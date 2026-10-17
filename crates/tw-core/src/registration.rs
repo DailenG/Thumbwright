@@ -14,7 +14,9 @@
 //! The journal key itself is always ours and is not journaled; ancestors of it that
 //! registration creates are, as soon as the journal key exists. A crash between creating
 //! those keys and journaling them, or between unjournaling and deleting them at the end of
-//! unregistration, can leave empty keys behind.
+//! unregistration, leaves them empty; every unregistration therefore also deletes the
+//! journal key and the product key below it when they are empty (settings in the product
+//! key keep it alive).
 
 use std::path::Path;
 
@@ -415,7 +417,10 @@ pub fn unregister(layout: &Layout) -> Result<Report> {
     let manifest = layout.manifest_key();
     let journal = match layout.root.options().read().write().open(&manifest) {
         Ok(key) => key,
-        Err(e) if is_not_found(&e) => return Ok(report),
+        Err(e) if is_not_found(&e) => {
+            remove_empty_product_keys(layout, &mut report)?;
+            return Ok(report);
+        }
         Err(e) => return Err(e),
     };
     // Created ancestors of the journal key can only go once the journal itself is gone.
@@ -450,6 +455,7 @@ pub fn unregister(layout: &Layout) -> Result<Report> {
     }
     drop(journal);
     remove_created_key(layout.root, &manifest, &mut report)?;
+    remove_empty_product_keys(layout, &mut report)?;
     for (_, step) in own.iter().rev() {
         if let Step::Key(path) = step {
             remove_created_key(layout.root, path, &mut report)?;
@@ -459,6 +465,20 @@ pub fn unregister(layout: &Layout) -> Result<Report> {
         notify_assoc_changed();
     }
     Ok(report)
+}
+
+/// Deletes the journal key and every key between it and the product key, product key
+/// included, deepest first, as long as each is empty. These keys are ours by name even when
+/// a crash kept them out of the journal; one that holds anything (such as settings) stays.
+fn remove_empty_product_keys(layout: &Layout, report: &mut Report) -> Result<()> {
+    let manifest = layout.manifest_key();
+    let ours = prefixes(&manifest).filter(|p| p.len() >= layout.product.len());
+    for path in ours.collect::<Vec<_>>().into_iter().rev() {
+        if let Undo::Kept = remove_created_key(layout.root, path, report)? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn is_empty(key: &Key) -> bool {
@@ -821,6 +841,42 @@ mod tests {
         assert!(CURRENT_USER.open(&foreign).is_ok());
         assert_eq!(sb.get(&handler), None, "our handler value is removed");
         assert!(status(&sb.layout).is_none());
+    }
+
+    /// The two crash windows the journal cannot record: right after `Recorder::start`
+    /// created the product and journal keys (nothing journaled yet), and right after the
+    /// journal key was deleted at the end of unregistration (product key still there).
+    #[test]
+    fn unjournaled_empty_product_keys_are_removed() {
+        for journal_left in [true, false] {
+            let sb = Sandbox::new("emptykeys");
+            sb.seed_user_state();
+            let before = sb.snapshot();
+            let leftover = if journal_left {
+                sb.layout.manifest_key()
+            } else {
+                sb.layout.product.clone()
+            };
+            CURRENT_USER.create(&leftover).unwrap();
+            unregister(&sb.layout).unwrap();
+            assert_eq!(sb.snapshot(), before, "journal key left: {journal_left}");
+        }
+    }
+
+    #[test]
+    fn product_key_with_settings_survives_unregister() {
+        let sb = Sandbox::new("settings");
+        let dll = PathBuf::from(r"C:\x\thumbwright_shell.dll");
+        register(&sb.layout, &plan(&dll)).unwrap();
+        CURRENT_USER
+            .create(&sb.layout.product)
+            .unwrap()
+            .set_u32("MaxFileMb", 64)
+            .unwrap();
+        unregister(&sb.layout).unwrap();
+        let product = CURRENT_USER.open(&sb.layout.product).unwrap();
+        assert_eq!(product.get_u32("MaxFileMb").unwrap(), 64);
+        assert!(CURRENT_USER.open(sb.layout.manifest_key()).is_err());
     }
 
     #[test]
