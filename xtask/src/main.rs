@@ -2,8 +2,9 @@
 //!
 //! Resolves the dependency graph for x86_64-pc-windows-msvc via `cargo metadata`,
 //! rejects any crate whose SPDX expression cannot be satisfied by the permissive
-//! allow-list, and writes THIRD_PARTY_LICENSES.md. `--check` fails instead of
-//! writing when the file is stale.
+//! allow-list, rejects any crate that compiles or links native code (no C compiler is
+//! assumed, and C/C++ must never run in the surrogate), and writes
+//! THIRD_PARTY_LICENSES.md. `--check` fails instead of writing when the file is stale.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -12,6 +13,9 @@ use std::process::{Command, ExitCode};
 use serde_json::Value;
 
 const TARGET: &str = "x86_64-pc-windows-msvc";
+
+/// Crates whose presence means C/C++ gets compiled at build time.
+const NATIVE_BUILD_CRATES: &[&str] = &["cc", "cmake", "bindgen", "pkg-config", "vcpkg", "nasm-rs"];
 
 /// Permissive licenses accepted in shipped or build-time dependencies.
 const ALLOWED: &[&str] = &[
@@ -99,7 +103,10 @@ fn run(check: bool) -> ExitCode {
         let version = p["version"].as_str().unwrap().to_owned();
         let license = p["license"].as_str().unwrap_or("").to_owned();
         if license.is_empty() || !satisfiable(&license) {
-            violations.push(format!("{name} {version}: {:?}", license));
+            violations.push(format!("{name} {version}: license {:?}", license));
+        }
+        if let Some(reason) = native_code(p) {
+            violations.push(format!("{name} {version}: {reason}"));
         }
         pkgs.insert(
             (name.clone(), version.clone()),
@@ -114,7 +121,7 @@ fn run(check: bool) -> ExitCode {
     }
 
     if !violations.is_empty() {
-        eprintln!("license policy violations:");
+        eprintln!("dependency policy violations:");
         for v in &violations {
             eprintln!("  {v}");
         }
@@ -144,6 +151,17 @@ fn run(check: bool) -> ExitCode {
         );
     }
     ExitCode::SUCCESS
+}
+
+/// Why a package would compile or link native code, if it does.
+fn native_code(p: &Value) -> Option<String> {
+    let name = p["name"].as_str().unwrap_or("");
+    if NATIVE_BUILD_CRATES.contains(&name) {
+        return Some("compiles native code at build time".into());
+    }
+    p["links"]
+        .as_str()
+        .map(|lib| format!("links native library `{lib}`"))
 }
 
 fn in_resolve(meta: &Value, id: &str) -> bool {
@@ -276,7 +294,15 @@ fn render<'a>(pkgs: impl Iterator<Item = &'a Pkg>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::satisfiable;
+    use super::{native_code, satisfiable};
+    use serde_json::json;
+
+    #[test]
+    fn native_code_policy() {
+        assert!(native_code(&json!({"name": "cc", "links": null})).is_some());
+        assert!(native_code(&json!({"name": "libz-sys", "links": "z"})).is_some());
+        assert!(native_code(&json!({"name": "image", "links": null})).is_none());
+    }
 
     #[test]
     fn spdx_policy() {

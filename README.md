@@ -16,7 +16,7 @@ Requires Windows x64 and the Rust toolchain pinned in `rust-toolchain.toml` (rus
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-cargo xtask licenses --check        # permissive-license audit; regenerates THIRD_PARTY_LICENSES.md without --check
+cargo xtask licenses --check        # dependency audit (permissive licenses, no native code); regenerates THIRD_PARTY_LICENSES.md without --check
 cargo build --release --workspace   # thin LTO; slow (11-28 min on the build-room machine)
 ```
 
