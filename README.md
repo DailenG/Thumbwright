@@ -42,4 +42,8 @@ This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, offi
 
 ## License
 
-MIT OR Apache-2.0. Third-party notices: `THIRD_PARTY_LICENSES.md`.
+Copyright (C) 2026 Dailen Gunter
+
+Thumbwright is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See `LICENSE` for the full text (`GPL-3.0-or-later`).
+
+Third-party notices: `THIRD_PARTY_LICENSES.md`.
