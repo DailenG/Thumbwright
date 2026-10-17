@@ -1,0 +1,13 @@
+[package]
+name = "xtask"
+description = "Repository automation: third-party license audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = "1.0.154"

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/tw-core", "crates/tw-shell", "crates/twctl", "xtask"]
+default-members = ["crates/tw-core", "crates/tw-shell", "crates/twctl"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+tw-core = { path = "crates/tw-core" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.release]
+# Shell code: unwinding is required so catch_unwind can contain decoder panics (REQ-ISO-3).
+panic = "unwind"
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

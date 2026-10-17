@@ -1,0 +1,21 @@
+[package]
+name = "tw-core"
+description = "Thumbwright shared core: identity, format matrix, budgets, decode pipeline, registration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
+# No `rayon`: a global thread pool would keep running this DLL's code after COM unloads it.
+jxl-oxide = { version = "0.12.6", default-features = false }
+lofty = "0.25.4"
+psd = "0.3.5"
+resvg = "0.48.1"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Imaging", "Win32_UI_Shell", "Win32_System_Registry"] }
+windows-registry = "0.6"
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }

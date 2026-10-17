@@ -1,0 +1,769 @@
+//! `twctl`: per-user registration, diagnostics-free command-line tooling, and the
+//! back end for every context-menu verb (the shell DLL never decodes in Explorer).
+//!
+//! Exit status 0 on success, 1 on any failure (including usage errors). Errors go to
+//! stderr as `twctl: <message>`; with `--notify` (menu invocations) they are also shown
+//! in a message box.
+
+mod ops;
+mod strip;
+mod win;
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use tw_core::config::{self, Settings};
+use tw_core::decode::route;
+use tw_core::registration::{self, Layout, Plan, Scope};
+use tw_core::{formats, ids, log};
+
+use ops::Result;
+
+const USAGE: &str = "usage: twctl <command> [args]
+  thumbnail <in> <out.png> [--size N]
+  convert <in> <out> [--quality N] [--resize WxH|N%]
+  convert-to <ext> <file...> [--quality N]
+  resize --to WxH|N% <file...>
+  rotate --by right|left|180|fliph|flipv <file...>
+  email --edge N <file...>
+  compress --max-size 1MB|500KB|N <file...>
+  strip <file...>
+  clip <in>
+  data-uri <in>
+  to-folder <file...>
+  info <in> [--json] [--gui]
+  wallpaper <in> --style stretch|tile|center|fill|fit|span
+  formats [--json]
+  register [--off|--status]
+  --version
+  --help | <command> --help
+global options: --notify (show errors in a message box), --files-from <list.txt>;
+  -- ends options (later arguments are file names even if they start with --)";
+
+struct Cli {
+    command: String,
+    positional: Vec<String>,
+    opts: HashMap<String, String>,
+    flags: Vec<String>,
+    /// `--help`/`-h` given after the command: print its synopsis instead of running it.
+    help: bool,
+}
+
+const VALUE_OPTS: &[&str] = &[
+    "--size",
+    "--quality",
+    "--resize",
+    "--to",
+    "--by",
+    "--edge",
+    "--max-size",
+    "--style",
+    "--files-from",
+];
+const FLAG_OPTS: &[&str] = &["--json", "--gui", "--off", "--status", "--notify"];
+
+fn parse(args: Vec<String>) -> Result<Cli> {
+    let mut it = args.into_iter();
+    let command = it.next().ok_or_else(|| USAGE.to_string())?;
+    let mut cli = Cli {
+        command,
+        positional: Vec::new(),
+        opts: HashMap::new(),
+        flags: Vec::new(),
+        help: false,
+    };
+    let mut options_ended = false;
+    while let Some(a) = it.next() {
+        if options_ended {
+            cli.positional.push(a);
+        } else if a == "--" {
+            options_ended = true;
+        } else if a == "--help" || a == "-h" {
+            cli.help = true;
+        } else if VALUE_OPTS.contains(&a.as_str()) {
+            let v = it.next().ok_or_else(|| format!("{a} needs a value"))?;
+            cli.opts.insert(a, v);
+        } else if FLAG_OPTS.contains(&a.as_str()) {
+            cli.flags.push(a);
+        } else if a.starts_with("--") {
+            return Err(format!("unknown option {a}"));
+        } else {
+            cli.positional.push(a);
+        }
+    }
+    if let Some(list) = cli.opts.remove("--files-from") {
+        let text = std::fs::read_to_string(&list).map_err(|e| format!("{list}: {e}"))?;
+        cli.positional.extend(
+            text.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(str::to_owned),
+        );
+        // Lists the shell extension writes for long selections are consumed; any other
+        // file is left alone.
+        if is_shell_list(Path::new(&list)) {
+            let _ = std::fs::remove_file(&list);
+        }
+    }
+    Ok(cli)
+}
+
+/// `%TEMP%\tw-list-*.txt`, the shape of lists written by the shell extension.
+fn is_shell_list(p: &Path) -> bool {
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let lower = name.to_ascii_lowercase();
+    let shaped = lower.starts_with("tw-list-") && lower.ends_with(".txt") && lower.len() >= 12;
+    shaped && p.parent() == Some(std::env::temp_dir().as_path())
+}
+
+impl Cli {
+    fn flag(&self, f: &str) -> bool {
+        self.flags.iter().any(|x| x == f)
+    }
+
+    fn opt(&self, o: &str) -> Option<&str> {
+        self.opts.get(o).map(String::as_str)
+    }
+
+    fn require(&self, o: &str) -> Result<&str> {
+        self.opt(o)
+            .ok_or_else(|| format!("{} needs {o}", self.command))
+    }
+
+    /// Rejects options the command does not declare.
+    fn allow(&self, opts: &[&str], flags: &[&str]) -> Result<()> {
+        if let Some(o) = self.opts.keys().find(|o| !opts.contains(&o.as_str())) {
+            return Err(format!("{} does not take {o}", self.command));
+        }
+        if let Some(f) = self
+            .flags
+            .iter()
+            .find(|f| *f != "--notify" && !flags.contains(&f.as_str()))
+        {
+            return Err(format!("{} does not take {f}", self.command));
+        }
+        Ok(())
+    }
+
+    fn exactly(&self, n: usize) -> Result<&[String]> {
+        if self.positional.len() != n {
+            return Err(format!(
+                "{} takes exactly {n} file argument(s)",
+                self.command
+            ));
+        }
+        Ok(&self.positional)
+    }
+
+    fn files(&self) -> Result<Vec<PathBuf>> {
+        if self.positional.is_empty() {
+            return Err(format!("{} needs at least one file", self.command));
+        }
+        Ok(self.positional.iter().map(PathBuf::from).collect())
+    }
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// Runs `f` for every file across all cores; collects per-file errors.
+fn batch(files: &[PathBuf], f: impl Fn(&Path) -> Result<PathBuf> + Sync) -> Result<String> {
+    let workers = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(files.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut results: Vec<(usize, Result<PathBuf>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(file) = files.get(i) else { break mine };
+                        mine.push((i, f(file)));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    results.sort_by_key(|(i, _)| *i);
+    let (mut ok, mut errs) = (Vec::new(), Vec::new());
+    for (_, r) in results {
+        match r {
+            Ok(p) => ok.push(p.display().to_string()),
+            Err(e) => errs.push(e),
+        }
+    }
+    if errs.is_empty() {
+        Ok(ok.join("\n"))
+    } else {
+        Err(format!(
+            "{} of {} failed:\n{}",
+            errs.len(),
+            files.len(),
+            errs.join("\n")
+        ))
+    }
+}
+
+/// Synopsis of one command from `USAGE`, or the whole text for an unknown command.
+fn command_usage(command: &str) -> String {
+    USAGE
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.split_whitespace().next() == Some(command))
+        .map_or_else(|| USAGE.to_string(), |l| format!("usage: twctl {l}"))
+}
+
+fn run(cli: &Cli) -> Result<String> {
+    if matches!(cli.command.as_str(), "--help" | "-h" | "help") {
+        return Ok(USAGE.to_string());
+    }
+    if cli.help {
+        return Ok(command_usage(&cli.command));
+    }
+    let dir = ops::exe_dir();
+    let settings = Settings::load(&dir);
+    let max = settings.max_file_bytes();
+    match cli.command.as_str() {
+        "--version" | "-V" => Ok(format!("twctl {}", ids::VERSION)),
+        "thumbnail" => {
+            cli.allow(&["--size"], &[])?;
+            let [input, out] = cli.exactly(2)? else {
+                unreachable!()
+            };
+            let (input, out) = (Path::new(input), Path::new(out));
+            if same_file(input, out) {
+                return Err("output must differ from input".into());
+            }
+            let size = match cli.opt("--size") {
+                Some(s) => s
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or("bad --size")?,
+                None => 256,
+            }
+            .min(settings.max_thumb_px);
+            let data = ops::read_input(input, max)?;
+            let engine = tw_core::pipeline::Engine::new(dir.join(ids::WORKER_EXE_NAME));
+            let ext = ops::ext_of(input);
+            let t = engine
+                .thumbnail(Arc::new(data), Some(&ext), size)
+                .map_err(|e| format!("{}: {e}", input.display()))?;
+            let img = ops::thumbnail_to_image(&t);
+            ops::write_atomic(out, &ops::encode(&img.into(), "png", None)?)?;
+            Ok(format!("{} ({}x{})", out.display(), t.width, t.height))
+        }
+        "convert" => {
+            cli.allow(&["--quality", "--resize"], &[])?;
+            let [input, out] = cli.exactly(2)? else {
+                unreachable!()
+            };
+            let (input, out) = (Path::new(input), Path::new(out));
+            if same_file(input, out) {
+                return Err("output must differ from input".into());
+            }
+            let quality = parse_quality(cli)?;
+            let mut img = ops::decode_full(input, max)?;
+            if let Some(r) = cli.opt("--resize") {
+                img = ops::apply_resize(&img, ops::parse_resize(r)?);
+            }
+            ops::write_atomic(out, &ops::encode(&img, &ops::ext_of(out), quality)?)?;
+            Ok(out.display().to_string())
+        }
+        "convert-to" => {
+            cli.allow(&["--quality"], &[])?;
+            let (target, files) = cli
+                .positional
+                .split_first()
+                .ok_or("convert-to needs <ext> <file...>")?;
+            let target = target.trim_start_matches('.').to_ascii_lowercase();
+            ops::format_for_target(&target).ok_or_else(|| format!("no writer for .{target}"))?;
+            let quality = parse_quality(cli)?;
+            if files.is_empty() {
+                return Err("convert-to needs at least one file".into());
+            }
+            let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+            batch(&files, |f| {
+                let img = ops::decode_full(f, max)?;
+                ops::write_new(f, "", &target, &ops::encode(&img, &target, quality)?)
+            })
+        }
+        "resize" => {
+            cli.allow(&["--to"], &[])?;
+            let spec = ops::parse_resize(cli.require("--to")?)?;
+            batch(&cli.files()?, |f| {
+                let ext = writable_ext(f);
+                let img = ops::apply_resize(&ops::decode_full(f, max)?, spec);
+                ops::write_new(f, " (resized)", &ext, &ops::encode(&img, &ext, None)?)
+            })
+        }
+        "rotate" => {
+            cli.allow(&["--by"], &[])?;
+            let by = cli.require("--by")?.to_owned();
+            ops::rotate(&image::DynamicImage::new_rgb8(1, 1), &by)?;
+            batch(&cli.files()?, |f| {
+                let ext = writable_ext(f);
+                let img = ops::rotate(&ops::decode_full(f, max)?, &by)?;
+                ops::write_new(f, " (edited)", &ext, &ops::encode(&img, &ext, Some(95))?)
+            })
+        }
+        "email" => {
+            cli.allow(&["--edge"], &[])?;
+            let edge: u32 = cli
+                .require("--edge")?
+                .parse()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or("bad --edge")?;
+            batch(&cli.files()?, |f| {
+                let img =
+                    ops::apply_resize(&ops::decode_full(f, max)?, ops::Resize::Fit(edge, edge));
+                ops::write_new(f, " (email)", "jpg", &ops::encode(&img, "jpg", Some(85))?)
+            })
+        }
+        "compress" => {
+            cli.allow(&["--max-size"], &[])?;
+            let limit = ops::parse_size(cli.require("--max-size")?)?;
+            batch(&cli.files()?, |f| {
+                let bytes = ops::compress_to(&ops::decode_full(f, max)?, limit)
+                    .map_err(|e| format!("{}: {e}", f.display()))?;
+                ops::write_new(f, " (compressed)", "jpg", &bytes)
+            })
+        }
+        "strip" => {
+            cli.allow(&[], &[])?;
+            batch(&cli.files()?, |f| {
+                let data = ops::read_input(f, max)?;
+                let out = strip::strip(&data).map_err(|e| format!("{}: {e}", f.display()))?;
+                ops::write_atomic(f, &out)?;
+                Ok(f.to_path_buf())
+            })
+        }
+        "clip" => {
+            cli.allow(&[], &[])?;
+            let [input] = cli.exactly(1)? else {
+                unreachable!()
+            };
+            win::copy_image(&ops::decode_full(Path::new(input), max)?)?;
+            Ok("image copied to the clipboard".into())
+        }
+        "data-uri" => {
+            cli.allow(&[], &[])?;
+            let [input] = cli.exactly(1)? else {
+                unreachable!()
+            };
+            let p = Path::new(input);
+            let (mime, bytes) = match web_mime(&ops::ext_of(p)) {
+                Some(m) => (m, ops::read_input(p, max)?),
+                None => (
+                    "image/png",
+                    ops::encode(&ops::decode_full(p, max)?, "png", None)?,
+                ),
+            };
+            win::copy_text(&format!("data:{mime};base64,{}", base64(&bytes)))?;
+            Ok("data URI copied to the clipboard".into())
+        }
+        "to-folder" => {
+            cli.allow(&[], &[])?;
+            let files = cli.files()?;
+            let parent = files[0]
+                .parent()
+                .ok_or("file has no parent folder")?
+                .to_path_buf();
+            if files.iter().any(|f| f.parent() != Some(parent.as_path())) {
+                return Err("all files must be in the same folder".into());
+            }
+            let folder = std::iter::once(parent.join("New folder"))
+                .chain((2..).map(|n| parent.join(format!("New folder ({n})"))))
+                .find(|p| !p.exists())
+                .expect("unbounded");
+            std::fs::create_dir(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+            for f in &files {
+                let dest = folder.join(f.file_name().ok_or("bad file name")?);
+                std::fs::rename(f, &dest).map_err(|e| format!("{}: {e}", f.display()))?;
+            }
+            Ok(folder.display().to_string())
+        }
+        "info" => {
+            cli.allow(&[], &["--json", "--gui"])?;
+            let [input] = cli.exactly(1)? else {
+                unreachable!()
+            };
+            let p = Path::new(input);
+            let img = ops::decode_full(p, max)?;
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let bits = img.color().bits_per_pixel() / u16::from(img.color().channel_count());
+            let fmt = formats::lookup(&ops::ext_of(p)).map_or("unknown", |f| f.description);
+            let text = if cli.flag("--json") {
+                format!(
+                    "{{\"width\":{},\"height\":{},\"bit_depth\":{bits},\"channels\":{},\"format\":{},\"file_size\":{size}}}",
+                    img.width(),
+                    img.height(),
+                    img.color().channel_count(),
+                    json_str(fmt)
+                )
+            } else {
+                format!(
+                    "{}\n{fmt}\n{} x {} pixels, {} channel(s), {bits}-bit\n{size} bytes",
+                    p.display(),
+                    img.width(),
+                    img.height(),
+                    img.color().channel_count()
+                )
+            };
+            if cli.flag("--gui") {
+                win::message(&text, false);
+            }
+            Ok(text)
+        }
+        "wallpaper" => {
+            cli.allow(&["--style"], &[])?;
+            let pos = win::wallpaper_position(cli.require("--style")?)?;
+            let [input] = cli.exactly(1)? else {
+                unreachable!()
+            };
+            let img = ops::decode_full(Path::new(input), max)?;
+            let store = std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .ok_or("LOCALAPPDATA not set")?
+                .join(ids::PRODUCT_NAME);
+            std::fs::create_dir_all(&store).map_err(|e| e.to_string())?;
+            let out = store.join("wallpaper.png");
+            ops::write_atomic(&out, &ops::encode(&img, "png", None)?)?;
+            win::set_wallpaper(&out, pos)?;
+            Ok(format!("wallpaper set from {input}"))
+        }
+        "formats" => {
+            cli.allow(&[], &["--json"])?;
+            cli.exactly(0)?;
+            Ok(formats_listing(cli.flag("--json")))
+        }
+        "register" => {
+            cli.allow(&[], &["--off", "--status"])?;
+            cli.exactly(0)?;
+            register(cli, &dir, &settings)
+        }
+        other => Err(format!("unknown command {other}\n{USAGE}")),
+    }
+}
+
+fn parse_quality(cli: &Cli) -> Result<Option<u8>> {
+    cli.opt("--quality")
+        .map(|q| {
+            q.parse::<u8>()
+                .ok()
+                .filter(|n| (1..=100).contains(n))
+                .ok_or_else(|| "bad --quality (1-100)".to_string())
+        })
+        .transpose()
+}
+
+/// Keeps the source format when it is writable, otherwise writes PNG.
+fn writable_ext(p: &Path) -> String {
+    let e = ops::ext_of(p);
+    if ops::format_for_target(&e).is_some() {
+        e
+    } else {
+        "png".into()
+    }
+}
+
+fn web_mime(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" | "jpe" | "jfif" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        _ => return None,
+    })
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::from('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+fn formats_listing(json: bool) -> String {
+    let rows = formats::all().iter().map(|f| {
+        let thumb = !route::chain_for_ext(f.ext).is_empty();
+        (f, thumb)
+    });
+    if json {
+        let items: Vec<String> = rows
+            .map(|(f, thumb)| {
+                format!(
+                    "{{\"category\":{},\"convertible\":{},\"description\":{},\"ext\":{},\"os_codec\":{},\"source\":{},\"thumbnail\":{thumb}}}",
+                    json_str(&format!("{:?}", f.category)),
+                    f.convertible,
+                    json_str(f.description),
+                    json_str(&format!(".{}", f.ext)),
+                    json_str(&format!("{:?}", f.os_codec)),
+                    json_str(&format!("{:?}", f.source)),
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    } else {
+        rows.map(|(f, thumb)| {
+            format!(
+                ".{:<12} {:<10} {:<16} {} {}",
+                f.ext,
+                format!("{:?}", f.category),
+                format!("{:?}", f.source),
+                if thumb { "thumbnail" } else { "-        " },
+                f.description
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+}
+
+fn register(cli: &Cli, dir: &Path, settings: &Settings) -> Result<String> {
+    let layout = Layout::for_scope(Scope::User);
+    if cli.flag("--status") {
+        return Ok(match registration::status(&layout) {
+            Some(s) => format!(
+                "Explorer thumbnails: ON for this user ({} file types, context menu {})\nDLL: {}",
+                s.thumbnail_extensions,
+                if s.context_menu { "on" } else { "off" },
+                s.dll_path
+            ),
+            None => "Explorer thumbnails: OFF for this user".into(),
+        });
+    }
+    if cli.flag("--off") {
+        registration::unregister(&layout).map_err(|e| e.to_string())?;
+        return Ok("Explorer thumbnails turned OFF for this user".into());
+    }
+    // REQ-REG-6: per-user registration is for portable copies only; from an installed
+    // copy it would survive uninstall and block thumbnails.
+    if !config::is_portable(dir) {
+        return Err(format!(
+            "per-user registration is only for portable copies ({} next to twctl.exe); \
+             an installed copy registers machine-wide, and a per-user registration would \
+             survive uninstall and block thumbnails. Use `twctl register --off` to remove one.",
+            config::PORTABLE_INI
+        ));
+    }
+    let dll = dir.join(ids::SHELL_DLL_NAME);
+    if !dll.is_file() {
+        return Err(format!("{} not found", dll.display()));
+    }
+    let extensions: Vec<&str> = formats::all()
+        .iter()
+        .map(|f| f.ext)
+        .filter(|e| !route::chain_for_ext(e).is_empty() && settings.type_enabled(e))
+        .collect();
+    let n = extensions.len();
+    registration::register(
+        &layout,
+        &Plan {
+            dll_path: &dll,
+            extensions,
+            context_menu: settings.menu_enabled,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Explorer thumbnails turned ON for this user ({n} file types)"
+    ))
+}
+
+fn main() -> ExitCode {
+    log::init("twctl");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let notify = args.iter().any(|a| a == "--notify");
+    let result = parse(args).and_then(|cli| run(&cli));
+    match result {
+        Ok(msg) => {
+            if !msg.is_empty() {
+                println!("{msg}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("twctl: {e}");
+            log::error(&format!("twctl: {e}"));
+            if notify {
+                win::message(&e, true);
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        for (i, o) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(i.as_bytes()), o);
+        }
+    }
+
+    #[test]
+    fn help_succeeds_without_running_the_command() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            run(&parse(args(&["--help"])).unwrap()),
+            Ok(USAGE.to_string())
+        );
+        let synopsis = run(&parse(args(&["strip", "--help"])).unwrap()).unwrap();
+        assert_eq!(synopsis, "usage: twctl strip <file...>");
+        // Help wins over missing required options and files.
+        let resize = run(&parse(args(&["resize", "-h"])).unwrap()).unwrap();
+        assert!(resize.starts_with("usage: twctl resize --to"), "{resize}");
+    }
+
+    #[test]
+    fn double_dash_ends_options() {
+        let args = vec![
+            "strip".into(),
+            "--".into(),
+            "--x.png".into(),
+            "--help".into(),
+        ];
+        let cli = parse(args).unwrap();
+        assert_eq!(cli.positional, ["--x.png", "--help"]);
+        assert!(!cli.help);
+    }
+
+    #[test]
+    fn arg_parsing_rejects_unknown_and_extra() {
+        let cli = parse(vec!["clip".into(), "a.png".into(), "b.png".into()]).unwrap();
+        assert!(run(&cli).unwrap_err().contains("exactly 1"));
+        assert!(parse(vec!["clip".into(), "--bogus".into()]).is_err());
+        let cli = parse(vec!["formats".into(), "--quality".into(), "5".into()]).unwrap();
+        assert!(run(&cli).is_err());
+        assert!(parse(vec!["resize".into(), "--to".into()]).is_err());
+    }
+
+    #[test]
+    fn thumbnail_refuses_overwriting_input() {
+        let p = std::env::temp_dir().join(format!("twctl-same-{}.png", std::process::id()));
+        std::fs::write(&p, b"x").unwrap();
+        let s = p.to_string_lossy().into_owned();
+        let cli = parse(vec!["thumbnail".into(), s.clone(), s]).unwrap();
+        assert_eq!(run(&cli), Err("output must differ from input".into()));
+        std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn convert_to_same_stem_keeps_both_outputs() {
+        let dir = std::env::temp_dir().join(format!("twctl-stem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let red = image::RgbImage::from_pixel(4, 4, image::Rgb([255, 0, 0]));
+        let blue = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 255]));
+        red.save(dir.join("a.png")).unwrap();
+        blue.save(dir.join("a.bmp")).unwrap();
+        let arg = |n: &str| dir.join(n).to_string_lossy().into_owned();
+        let cli = parse(vec![
+            "convert-to".into(),
+            "tga".into(),
+            arg("a.png"),
+            arg("a.bmp"),
+        ])
+        .unwrap();
+        run(&cli).unwrap();
+        let mut pixels: Vec<[u8; 3]> = ["a.tga", "a (1).tga"]
+            .iter()
+            .map(|n| {
+                image::open(dir.join(n))
+                    .unwrap()
+                    .to_rgb8()
+                    .get_pixel(0, 0)
+                    .0
+            })
+            .collect();
+        pixels.sort();
+        assert_eq!(pixels, vec![[0, 0, 255], [255, 0, 0]]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn files_from_user_list_is_kept() {
+        let dir = std::env::temp_dir().join(format!("twctl-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let list = dir.join("tw-list-mine.txt");
+        std::fs::write(&list, "a.png\nb.png\n").unwrap();
+        let cli = parse(vec![
+            "clip".into(),
+            "--files-from".into(),
+            list.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        assert!(run(&cli).unwrap_err().contains("exactly 1"));
+        assert!(list.exists(), "a list outside %TEMP% is never deleted");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn files_from_shell_list_is_consumed() {
+        let list = std::env::temp_dir().join(format!("tw-list-test-{}.txt", std::process::id()));
+        std::fs::write(&list, "a.png\n\nb.png\n").unwrap();
+        let cli = parse(vec![
+            "clip".into(),
+            "--files-from".into(),
+            list.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        assert_eq!(cli.positional, vec!["a.png", "b.png"]);
+        assert!(!list.exists());
+    }
+}

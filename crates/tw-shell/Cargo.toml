@@ -1,0 +1,30 @@
+[package]
+name = "tw-shell"
+description = "Thumbwright shell extension DLL (COM server) and its isolated decoder worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "thumbwright_shell"
+# cdylib: the shipped COM server. rlib: required by Cargo to build the integration tests,
+# which exercise the cdylib through LoadLibrary/DllGetClassObject like the OS does.
+crate-type = ["cdylib", "rlib"]
+
+# The worker ships next to the DLL; keeping it in this package guarantees that
+# `cargo test -p tw-shell` builds both into the same directory.
+[[bin]]
+name = "tw-worker"
+path = "src/bin/tw-worker.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tw-core = { version = "0.1.0", path = "../tw-core" }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_System_SystemServices", "Win32_System_Diagnostics_Debug"] }
+windows-core = "0.62"
+
+[dev-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
