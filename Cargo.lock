@@ -1075,6 +1075,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tw-settings"
+version = "0.1.0"
+dependencies = [
+ "tw-core",
+ "windows",
+ "windows-registry",
+]
+
+[[package]]
 name = "tw-shell"
 version = "0.1.0"
 dependencies = [

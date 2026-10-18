@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/tw-core", "crates/tw-shell", "crates/twctl", "xtask"]
-default-members = ["crates/tw-core", "crates/tw-shell", "crates/twctl"]
+members = ["crates/tw-core", "crates/tw-shell", "crates/twctl", "crates/tw-settings", "xtask"]
+default-members = ["crates/tw-core", "crates/tw-shell", "crates/twctl", "crates/tw-settings"]
 
 [workspace.package]
 version = "0.1.0"

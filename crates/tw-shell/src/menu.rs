@@ -250,6 +250,48 @@ const TREE: &[Node] = &[
     },
 ];
 
+static SEPARATOR: Node = Node::Separator;
+
+impl Node {
+    /// The settings id of an item; separators have none.
+    fn item_id(&self) -> Option<&'static str> {
+        match self {
+            Node::Separator => None,
+            Node::Leaf { id, .. } | Node::Sub { id, .. } => Some(id),
+        }
+    }
+}
+
+/// The tree nodes in display order for the saved `MenuOrder`. With no saved order that is
+/// `TREE` itself. Otherwise each item keeps the separator-delimited group it has in `TREE`
+/// and a separator goes wherever consecutive items belong to different groups, so the
+/// default order renders exactly as the default tree.
+fn display_nodes(order: &[String]) -> Vec<&'static Node> {
+    if order.is_empty() {
+        return TREE.iter().collect();
+    }
+    let mut group = 0;
+    let mut items: Vec<(usize, &'static Node)> = Vec::new();
+    for node in TREE {
+        match node {
+            Node::Separator => group += 1,
+            _ => items.push((group, node)),
+        }
+    }
+    let mut out = Vec::with_capacity(items.len() * 2);
+    let mut prev = None;
+    for id in tw_core::config::ordered_menu_ids(order) {
+        if let Some(&(group, node)) = items.iter().find(|(_, n)| n.item_id() == Some(id)) {
+            if prev.is_some_and(|p| p != group) {
+                out.push(&SEPARATOR);
+            }
+            out.push(node);
+            prev = Some(group);
+        }
+    }
+    out
+}
+
 /// Every verb in the tree, in a stable order (for string-verb lookup and tests).
 fn all_verbs() -> impl Iterator<Item = Verb> {
     TREE.iter().flat_map(|n| match n {
@@ -527,7 +569,7 @@ impl ContextMenu_Impl {
                 self.start_preview_fetch(&files[0]);
             }
             let mut last_was_sep = pos == 0 || want_preview;
-            for node in TREE {
+            for node in display_nodes(&settings.menu_order) {
                 match node {
                     Node::Separator => {
                         if !last_was_sep {
@@ -898,6 +940,51 @@ mod tests {
             ..Settings::default()
         };
         assert!(!menu_applies(&png, &off));
+    }
+
+    /// Item ids with `None` for separators, the shape of a menu.
+    fn shape(nodes: &[&Node]) -> Vec<Option<&'static str>> {
+        nodes.iter().map(|n| n.item_id()).collect()
+    }
+
+    #[test]
+    fn every_tree_item_is_known_to_the_settings_app() {
+        for id in TREE.iter().filter_map(Node::item_id) {
+            assert!(
+                tw_core::config::MENU_ITEMS.iter().any(|i| i.id == id),
+                "{id} is missing from config::MENU_ITEMS (settings app, MenuOrder)"
+            );
+        }
+    }
+
+    #[test]
+    fn default_order_renders_the_default_tree() {
+        let tree: Vec<&Node> = TREE.iter().collect();
+        assert_eq!(shape(&display_nodes(&[])), shape(&tree));
+        let default: Vec<String> = tw_core::config::MENU_ITEMS
+            .iter()
+            .map(|i| i.id.to_string())
+            .collect();
+        assert_eq!(shape(&display_nodes(&default)), shape(&tree));
+    }
+
+    #[test]
+    fn custom_order_moves_items_and_regroups_separators() {
+        let order = ["wallpaper".to_string(), "resize".to_string()];
+        let shown = shape(&display_nodes(&order));
+        // wallpaper and resize sit in different default groups; the rest follow in default order.
+        assert_eq!(&shown[..3], [Some("wallpaper"), None, Some("resize")]);
+        assert!(!shown[3..].contains(&Some("wallpaper")) && !shown[3..].contains(&Some("resize")));
+        let ids = shown.iter().flatten().count();
+        assert_eq!(
+            ids,
+            TREE.iter().filter_map(Node::item_id).count(),
+            "no item lost"
+        );
+        assert!(
+            shown.windows(2).all(|w| w[0].is_some() || w[1].is_some()),
+            "no doubled separators"
+        );
     }
 
     fn verb_of(ex: &CMINVOKECOMMANDINFOEX) -> VerbRef {

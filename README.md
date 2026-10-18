@@ -5,6 +5,7 @@ Clean-room Windows Explorer thumbnail provider and context-menu toolkit, written
 - `thumbwright_shell.dll`: COM server. Thumbnail provider (`IThumbnailProvider` + `IInitializeWithStream`, hosted by the OS thumbnail surrogate) and classic context menu (`IContextMenu{,2,3}`).
 - `tw-worker.exe`: per-request decoder process (Job Object: 512 MiB, 20 s CPU, kill-on-close) for WIC, SVG and audio tags.
 - `twctl.exe`: CLI, per-user registration, and the back end for every menu verb.
+- `thumbwright-settings.exe`: settings window (General, File types, Menu, Limits, Preview, Maintenance). Saves to `Thumbwright.ini` (portable) or `HKCU\Software\Thumbwright` (installed); toggling a file type updates the per-user registration through the journaled engine. `--self-test` creates, drives and destroys the window without showing it.
 
 Requirements: `FUNCTIONAL_SPEC.md`. Architecture, invariants and review state: `REVIEW_HANDOFF.md`, `REVIEW_FINDINGS.md`. Open work is tracked as GitHub issues.
 
@@ -20,7 +21,7 @@ cargo xtask licenses --check        # dependency audit (permissive licenses, no 
 cargo build --release --workspace   # thin LTO; slow (11-28 min on the build-room machine)
 ```
 
-The DLL, `tw-worker.exe` and `twctl.exe` must sit in one directory.
+The DLL, `tw-worker.exe`, `twctl.exe` and `thumbwright-settings.exe` must sit in one directory.
 
 Some tests write a throw-away key under `HKCU\Software\ThumbwrightTest-*` (removed on drop) and files under `%TEMP%`. Timing tests warm up freshly copied executables because antivirus scans them on first launch.
 
@@ -35,6 +36,8 @@ twctl register --off      # undoes exactly what register wrote
 ```
 
 Windows ignores HKCU COM registrations for elevated processes, so test Explorer from a non-elevated session. Run `register --off` before moving the folder (the registration stores an absolute DLL path).
+
+The settings window (`thumbwright-settings.exe`) edits the same settings. With a registration present, Apply adds or removes exactly the handler keys of the file types you toggled and broadcasts `SHCNE_ASSOCCHANGED`. Maintenance has Repair (re-register, then clear the thumbnail cache), Rebuild thumbnail cache, Turn on/off thumbnails and Open log. Windows has no API to purge the thumbnail cache, so Rebuild ends this user's `explorer.exe`, deletes `%LOCALAPPDATA%\Microsoft\Windows\Explorer\thumbcache_*.db`, and makes sure the shell is running again; the window asks for confirmation first.
 
 ## Clean-room rules
 

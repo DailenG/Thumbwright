@@ -45,6 +45,7 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 | `crates/tw-core` | rlib | IDs/GUIDs (`ids.rs`), format matrix (`formats/`), budgets (`limits.rs`), settings (`config.rs`), log (`log.rs`), routing + decoders (`decode/`), worker wire protocol (`protocol.rs`), worker client with Job Object (`worker.rs`), tier pipeline (`pipeline.rs`), registry engine (`registration.rs`) |
 | `crates/tw-shell` | `thumbwright_shell.dll` + `tw-worker.exe` | COM exports and class factory (`lib.rs`, `factory.rs`), thumbnail provider (`thumbnail.rs`), DIB creation (`bitmap.rs`), context menu (`menu.rs`), worker main (`src/bin/tw-worker.rs`), integration tests (`tests/`) |
 | `crates/twctl` | `twctl.exe` | CLI and menu-verb back end (`main.rs`), image operations (`ops.rs`), lossless metadata strip (`strip.rs`), clipboard/wallpaper/message box (`win.rs`) |
+| `crates/tw-settings` | `thumbwright-settings.exe` | Settings window (`ui.rs`, raw Win32 controls via `win.rs`), applying settings and per-user registration toggles (`model.rs`), thumbnail-cache rebuild (`cache.rs`) |
 | `xtask` | dev tool | License audit that generates `THIRD_PARTY_LICENSES.md` |
 
 **Key invariants (verify they hold):**
