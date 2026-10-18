@@ -5,8 +5,10 @@
 
 .DESCRIPTION
     Wraps `wix build` for packaging\wix\Package.wxs. SourceDir must contain thumbwright_shell.dll,
-    tw-worker.exe, twctl.exe, LICENSE and THIRD_PARTY_LICENSES.md; thumbwright-settings.exe is
-    included when present (or excluded with -NoSettings). The MSI never contains Thumbwright.ini.
+    tw-worker.exe, twctl.exe, Thumbwright.msix (the sparse package for the Windows 11 menu,
+    built by packaging\msix\build.ps1; the MSI registers it for all users), LICENSE and
+    THIRD_PARTY_LICENSES.md; thumbwright-settings.exe is included when present (or excluded
+    with -NoSettings). The MSI never contains Thumbwright.ini.
 
     WiX v7 requires acceptance of the WiX OSMF EULA (free below US$10,000/year of revenue from
     projects using WiX; see packaging\wix\README.md). Accept it once with `wix eula accept wix7`,
@@ -53,7 +55,7 @@ $ErrorActionPreference = 'Stop'
 $wxs = Join-Path $PSScriptRoot 'Package.wxs'
 $SourceDir = (Resolve-Path -LiteralPath $SourceDir).Path
 
-$required = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe', 'LICENSE', 'THIRD_PARTY_LICENSES.md')
+$required = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe', 'Thumbwright.msix', 'LICENSE', 'THIRD_PARTY_LICENSES.md')
 foreach ($name in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $SourceDir $name))) {
         throw "Payload file missing from ${SourceDir}: $name"
@@ -62,6 +64,27 @@ foreach ($name in $required) {
 # Portable mode is keyed on this file next to the binaries (REQ-REG-6); an installed copy must not have it.
 if (Test-Path -LiteralPath (Join-Path $SourceDir 'Thumbwright.ini')) {
     throw "Thumbwright.ini found in $SourceDir. Remove it: it would put the installed copy in portable mode."
+}
+
+# The uninstall actions find the sparse package by its identity name, so take it from the package
+# that ships rather than repeating it.
+function Get-MsixIdentityName {
+    param([string]$Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entry = $zip.GetEntry('AppxManifest.xml')
+        if ($null -eq $entry) { throw "$Path has no AppxManifest.xml" }
+        $reader = New-Object System.IO.StreamReader ($entry.Open())
+        try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally {
+        $zip.Dispose()
+    }
+    return $manifest.Package.Identity.Name
+}
+$packageName = Get-MsixIdentityName (Join-Path $SourceDir 'Thumbwright.msix')
+if ($packageName -notmatch '^[A-Za-z0-9][A-Za-z0-9.\-]+$') {
+    throw "Thumbwright.msix has an unusable identity name: '$packageName'"
 }
 
 $wix = Get-Command wix -ErrorAction SilentlyContinue
@@ -75,7 +98,7 @@ if ($wix) {
 }
 
 # -pdbtype none: no .wixpdb next to the MSI (dist\ must hold only shippable files).
-$wixArgs = @('build', '-arch', 'x64', '-pdbtype', 'none', '-d', "Version=$Version", '-d', "SourceDir=$SourceDir")
+$wixArgs = @('build', '-arch', 'x64', '-pdbtype', 'none', '-d', "Version=$Version", '-d', "PackageName=$packageName", '-d', "SourceDir=$SourceDir")
 $settingsPresent = Test-Path -LiteralPath (Join-Path $SourceDir 'thumbwright-settings.exe')
 if ($settingsPresent -and -not $NoSettings) {
     $wixArgs += @('-d', 'IncludeSettings=1')

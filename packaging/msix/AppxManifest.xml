@@ -7,7 +7,14 @@
   stay in the install directory, which is passed as the external location when the package
   is registered:
 
-      Add-AppxPackage -Path Thumbwright.msix -ExternalLocation "<install dir>"
+      Add-AppxPackage -Path Thumbwright.msix -ExternalLocation "<install dir>"      (one user)
+      Add-AppxPackage -Stage Thumbwright.msix -ExternalLocation "<install dir>"     (all users:
+      Add-AppxProvisionedPackage -Online -PackagePath Thumbwright.msix -SkipLicense  the MSI)
+
+  The Application below names thumbwright-settings.exe, whose embedded manifest carries the
+  matching <msix publisher packageName applicationId> element (crates/tw-settings/build.rs,
+  fed by scripts/release.ps1), so that executable runs with this package's identity. Publisher,
+  Name and Application Id must be identical in the two places.
 
   Names between at-signs below are tokens that build.ps1 fills; do not edit them by hand:
     @PACKAGE_NAME@            fresh package identity name (build.ps1 -PackageName)
@@ -16,7 +23,7 @@
     @VERSION@                 four-part version, from the workspace version
     @EXPLORER_COMMAND_CLSID@  CLSID_EXPLORER_COMMAND, read from crates/tw-core/src/ids.rs
     @SHELL_DLL@               thumbwright_shell.dll
-    @CTL_EXE@                 twctl.exe
+    @APP_EXE@                 thumbwright-settings.exe, the executable that carries identity
 -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -56,7 +63,7 @@
   <Applications>
     <Application
       Id="Thumbwright"
-      Executable="@CTL_EXE@"
+      Executable="@APP_EXE@"
       uap10:TrustLevel="mediumIL"
       uap10:RuntimeBehavior="win32App">
       <uap:VisualElements

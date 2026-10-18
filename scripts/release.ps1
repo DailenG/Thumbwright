@@ -1,15 +1,23 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Release build: cargo release build, collect to dist\, Authenticode-sign, build and sign the MSI.
+    Release build: cargo release build, collect to dist\, Authenticode-sign, build and sign the
+    sparse MSIX package and the MSI.
 
 .DESCRIPTION
     1. cargo xtask licenses --check and cargo build --release --workspace --locked
-    2. Collects thumbwright_shell.dll, tw-worker.exe, twctl.exe, thumbwright-settings.exe, LICENSE
-       and THIRD_PARTY_LICENSES.md into dist\ (cleaned first); a missing binary fails the release
-    3. Signs the binaries (REQ-SEC-4, issue #1), then verifies every signature
-    4. Builds dist\Thumbwright-<version>-x64.msi from the signed payload (packaging\wix)
-    5. Signs the MSI, then verifies it
+    2. Collects thumbwright_shell.dll, tw-worker.exe, twctl.exe, LICENSE and
+       THIRD_PARTY_LICENSES.md into dist\ (cleaned first); a missing binary fails the release
+    3. Signs those binaries (REQ-SEC-4, issue #1), then verifies every signature
+    4. Reads the subject of the certificate that signed the DLL: that is the sparse package's
+       Publisher (it must equal the signing certificate subject exactly, issue #19)
+    5. Rebuilds with TW_MSIX_PUBLISHER set so thumbwright-settings.exe embeds the matching
+       <msix> identity element (crates\tw-settings\build.rs), collects it, signs and verifies it
+    6. Builds dist\Thumbwright.msix (packaging\msix\build.ps1 -Publisher <that subject>), signs
+       it with the same method, verifies it, and checks its signer subject equals the Publisher
+    7. Builds dist\Thumbwright-<version>-x64.msi from the signed payload, Thumbwright.msix
+       included (packaging\wix; the installer registers the package for all users)
+    8. Signs the MSI, then verifies it
 
     Signing, in order of preference:
       a. The Azure Trusted Signing helper (-SignHelper, default
@@ -40,6 +48,14 @@
 .PARAMETER SignTool
     Path of signtool.exe. Default: newest x64 signtool under the Windows 10/11 SDK, else PATH.
 
+.PARAMETER DevPublisher
+    Publisher written into the sparse package and the settings exe when -SkipSign is used (a
+    signed release takes it from the signing certificate instead). The package is unsigned in
+    that case, so Windows will not register it.
+
+.PARAMETER DistDir
+    Output directory, emptied first. Default: dist\ in the repository.
+
 .PARAMETER AcceptWixEula
     Pass `-acceptEula wix7` to the MSI build (see packaging\wix\README.md for the terms).
 
@@ -57,13 +73,86 @@ param(
     [string]$TimestampUrl = 'http://timestamp.digicert.com',
     [string]$SignHelper = 'C:\Syncs\Resilio\Code\MCP\code-signer\sign-helper.ps1',
     [string]$SignTool,
+    [string]$DevPublisher = 'CN=Thumbwright Unsigned Development',
+    [string]$DistDir,
     [switch]$AcceptWixEula
 )
 
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
-$dist = Join-Path $root 'dist'
+$dist = if ($DistDir) { [System.IO.Path]::GetFullPath($DistDir) } else { Join-Path $root 'dist' }
+
+# Identity of the sparse package for the Windows 11 menu (packaging\msix). The name goes to the
+# executable's manifest, to the package and to the MSI; the application id is read from the
+# package manifest template so that the executable and the package cannot disagree.
+$msixPackageName = 'Thumbwright.ShellExtension'
+$msixApplicationId = $null
+$template = Get-Content -LiteralPath (Join-Path $root 'packaging\msix\AppxManifest.xml') -Raw
+$idMatch = [regex]::Match($template, '<Application\s+Id="([^"]+)"')
+if (-not $idMatch.Success) { throw 'No <Application Id="..."> in packaging\msix\AppxManifest.xml' }
+$msixApplicationId = $idMatch.Groups[1].Value
+
+# Subject of the certificate that signed a PE file or MSI, exactly as Windows reports it
+# (.NET Framework form: "CN=..., O=..., L=..., S=..., C=..."). CreateFromSignedFile is used
+# rather than Get-AuthenticodeSignature, which does not load when PSModulePath is inherited from
+# PowerShell 7.
+function Get-SignerSubject {
+    param([string]$Path)
+    $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile($Path)
+    return $certificate.Subject
+}
+
+# Subject of the certificate that signed an .msix: its AppxSignature.p7x part is a 4-byte "PKCX"
+# tag followed by a PKCS #7 SignedData blob.
+function Get-MsixSignerSubject {
+    param([string]$Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Add-Type -AssemblyName System.Security
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entry = $zip.GetEntry('AppxSignature.p7x')
+        if ($null -eq $entry) { throw "$Path has no AppxSignature.p7x; it is not signed." }
+        $stream = $entry.Open()
+        try {
+            $memory = New-Object System.IO.MemoryStream
+            $stream.CopyTo($memory)
+            $part = $memory.ToArray()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $zip.Dispose()
+    }
+    if ($part.Length -le 4 -or [System.Text.Encoding]::ASCII.GetString($part, 0, 4) -ne 'PKCX') {
+        throw "$Path has an AppxSignature.p7x without the PKCX tag."
+    }
+    [byte[]]$blob = New-Object byte[] ($part.Length - 4)
+    [System.Array]::Copy($part, 4, $blob, 0, $blob.Length)
+    $cms = New-Object System.Security.Cryptography.Pkcs.SignedCms
+    $cms.Decode($blob)
+    return $cms.SignerInfos[0].Certificate.Subject
+}
+
+# The executable must carry the <msix> element that ties it to the package; without a match
+# Windows runs it unpackaged and no error is shown. Reads the manifest straight from the file.
+function Assert-EmbeddedIdentity {
+    param([string]$Exe, [string]$Publisher, [string]$PackageName, [string]$ApplicationId)
+    $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($Exe))
+    $found = [regex]::Match($text, '<msix\b[^>]*>')
+    if (-not $found.Success) { throw "$Exe has no <msix> element in its embedded manifest." }
+    $xml = $found.Value
+    if (-not $xml.EndsWith('/>')) { $xml += '</msix>' }
+    $element = ([xml]$xml).DocumentElement
+    $expected = @{ publisher = $Publisher; packageName = $PackageName; applicationId = $ApplicationId }
+    foreach ($name in $expected.Keys) {
+        $actual = $element.GetAttribute($name)
+        if ($actual -ne $expected[$name]) {
+            throw "$(Split-Path -Leaf $Exe): embedded msix $name is '$actual', expected '$($expected[$name])'."
+        }
+    }
+    Write-Host "  $(Split-Path -Leaf $Exe) embeds the package identity (publisher, packageName, applicationId)"
+}
 
 function Get-WorkspaceVersion {
     $text = Get-Content -LiteralPath (Join-Path $root 'Cargo.toml') -Raw
@@ -186,6 +275,8 @@ try {
     Write-Host '== Dependency policy'
     Invoke-Native 'cargo' @('xtask', 'licenses', '--check')
 
+    # The first pass has no package identity (the publisher is not known yet); see below.
+    Remove-Item Env:TW_MSIX_PUBLISHER, Env:TW_MSIX_PACKAGE_NAME, Env:TW_MSIX_APPLICATION_ID -ErrorAction SilentlyContinue
     Write-Host '== cargo build --release --workspace'
     Invoke-Native 'cargo' @('build', '--release', '--workspace', '--locked')
 } finally {
@@ -202,7 +293,9 @@ if (Test-Path -LiteralPath $dist) {
 }
 New-Item -ItemType Directory -Path $dist | Out-Null
 
-$binaries = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe', 'thumbwright-settings.exe')
+# The settings exe is built, signed and collected after the others: it embeds the package
+# identity, whose publisher is only known once something has been signed (next section).
+$binaries = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe')
 foreach ($name in $binaries) {
     $src = Join-Path $releaseDir $name
     if (-not (Test-Path -LiteralPath $src)) { throw "Release build did not produce $src" }
@@ -212,10 +305,57 @@ Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $dist
 Copy-Item -LiteralPath (Join-Path $root 'THIRD_PARTY_LICENSES.md') -Destination $dist
 $payload = @($binaries | ForEach-Object { Join-Path $dist $_ })
 
-if (-not $SkipSign) {
+if ($SkipSign) {
+    $publisher = $DevPublisher
+    Write-Warning "SkipSign: the sparse package publisher is the placeholder $publisher; the package is unsigned and cannot be registered."
+} else {
     Write-Host '== Sign binaries'
     Invoke-Sign -Files $payload -Method $method -Scope 'Bin' -Tool $tool
     Test-Signed -Files $payload -Tool $tool -AddMissingTimestamp
+    # The package Publisher must equal the signing certificate subject exactly, so it is read
+    # from the certificate that just signed the DLL, never typed in.
+    $publisher = Get-SignerSubject (Join-Path $dist 'thumbwright_shell.dll')
+}
+Write-Host "Package publisher: $publisher"
+
+# Rebuild so thumbwright-settings.exe embeds the <msix> identity element for this publisher
+# (crates/tw-settings/build.rs). Only that crate's build script re-runs; everything else is up
+# to date.
+Write-Host '== Settings exe with package identity'
+$settingsExe = 'thumbwright-settings.exe'
+$env:TW_MSIX_PUBLISHER = $publisher
+$env:TW_MSIX_PACKAGE_NAME = $msixPackageName
+$env:TW_MSIX_APPLICATION_ID = $msixApplicationId
+Push-Location $root
+try {
+    Invoke-Native 'cargo' @('build', '--release', '--workspace', '--locked')
+} finally {
+    Pop-Location
+    Remove-Item Env:TW_MSIX_PUBLISHER, Env:TW_MSIX_PACKAGE_NAME, Env:TW_MSIX_APPLICATION_ID -ErrorAction SilentlyContinue
+}
+$settingsSrc = Join-Path $releaseDir $settingsExe
+if (-not (Test-Path -LiteralPath $settingsSrc)) { throw "Release build did not produce $settingsSrc" }
+Copy-Item -LiteralPath $settingsSrc -Destination $dist
+$settingsPath = Join-Path $dist $settingsExe
+Assert-EmbeddedIdentity $settingsPath $publisher $msixPackageName $msixApplicationId
+if (-not $SkipSign) {
+    Invoke-Sign -Files @($settingsPath) -Method $method -Scope 'Bin' -Tool $tool
+    Test-Signed -Files @($settingsPath) -Tool $tool -AddMissingTimestamp
+}
+
+Write-Host '== Build sparse package'
+$msix = Join-Path $dist 'Thumbwright.msix'
+& (Join-Path $root 'packaging\msix\build.ps1') -Publisher $publisher -PackageName $msixPackageName -OutputPath $msix | Out-Null
+if (-not (Test-Path -LiteralPath $msix)) { throw "packaging\msix\build.ps1 did not produce $msix" }
+if (-not $SkipSign) {
+    Write-Host '== Sign sparse package'
+    Invoke-Sign -Files @($msix) -Method $method -Scope 'Bin' -Tool $tool
+    Test-Signed -Files @($msix) -Tool $tool -AddMissingTimestamp
+    $msixSigner = Get-MsixSignerSubject $msix
+    if ($msixSigner -ne $publisher) {
+        throw "The package is signed by '$msixSigner' but its Publisher is '$publisher'; Windows would refuse to register it."
+    }
+    Write-Host '  package signer subject equals the manifest Publisher'
 }
 
 Write-Host '== Build MSI'
