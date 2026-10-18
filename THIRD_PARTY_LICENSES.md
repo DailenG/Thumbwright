@@ -10,6 +10,8 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | Crate | Version | License (SPDX) | Scope | Repository |
 |---|---|---|---|---|
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | shipped | https://github.com/oyvindln/adler2 |
+| aes | 0.9.3 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/block-ciphers |
+| aho-corasick | 1.1.5 | Unlicense OR MIT | shipped | https://github.com/BurntSushi/aho-corasick |
 | alloc-no-stdlib | 2.0.4 | BSD-3-Clause | shipped | https://github.com/dropbox/rust-alloc-no-stdlib |
 | alloc-stdlib | 0.2.4 | BSD-3-Clause | shipped | https://github.com/dropbox/rust-alloc-no-stdlib |
 | arrayref | 0.3.9 | BSD-2-Clause | shipped | https://github.com/droundy/arrayref |
@@ -17,7 +19,9 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | autocfg | 1.5.1 | Apache-2.0 OR MIT | shipped | https://github.com/cuviper/autocfg |
 | base64 | 0.23.1 | MIT OR Apache-2.0 | shipped | https://github.com/marshallpierce/rust-base64 |
 | bit_field | 0.10.3 | Apache-2.0/MIT | shipped | https://github.com/phil-opp/rust-bit-field |
+| bitflags | 1.3.2 | MIT/Apache-2.0 | shipped | https://github.com/bitflags/bitflags |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | shipped | https://github.com/bitflags/bitflags |
+| block-buffer | 0.12.1 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/utils |
 | brotli-decompressor | 5.0.3 | BSD-3-Clause/MIT | shipped | https://github.com/dropbox/rust-brotli-decompressor |
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 | shipped | https://github.com/fitzgen/bumpalo |
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | shipped | https://github.com/Lokathor/bytemuck |
@@ -25,10 +29,26 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | byteorder | 1.5.0 | Unlicense OR MIT | shipped | https://github.com/BurntSushi/byteorder |
 | byteorder-lite | 0.1.0 | Unlicense OR MIT | shipped | https://github.com/image-rs/byteorder-lite |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | shipped | https://github.com/rust-lang/cfg-if |
+| cipher | 0.5.2 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/traits |
+| cmov | 0.5.4 | Apache-2.0 OR MIT | shipped | https://github.com/RustCrypto/utils |
 | color_quant | 1.1.0 | MIT | shipped | https://github.com/image-rs/color_quant.git |
+| const-oid | 0.10.2 | Apache-2.0 OR MIT | shipped | https://github.com/RustCrypto/formats |
+| cpubits | 0.1.1 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/utils |
+| cpufeatures | 0.3.1 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/utils |
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 | shipped | https://github.com/srijs/rust-crc32fast |
+| crypto-common | 0.2.2 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/traits |
+| ctutils | 0.4.3 | Apache-2.0 OR MIT | shipped | https://github.com/RustCrypto/utils |
 | data-encoding | 2.11.1 | MIT | shipped | https://github.com/ia0/data-encoding |
 | data-url | 0.3.2 | MIT OR Apache-2.0 | shipped | https://github.com/servo/rust-url |
+| digest | 0.11.3 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/traits |
+| djvu-bitmap | 0.43.0 | MIT | shipped | https://github.com/matyushkin/djvu-rs |
+| djvu-bzz | 0.43.0 | MIT | shipped | https://github.com/matyushkin/djvu-rs |
+| djvu-iff | 0.43.0 | MIT | shipped | https://github.com/matyushkin/djvu-rs |
+| djvu-iw44 | 0.43.0 | MIT | shipped | https://github.com/matyushkin/djvu-rs |
+| djvu-jb2 | 0.43.0 | MIT | shipped | https://github.com/matyushkin/djvu-rs |
+| djvu-pixmap | 0.43.0 | MIT | shipped | https://github.com/matyushkin/djvu-rs |
+| djvu-rs | 0.43.0 | MIT | shipped | https://github.com/matyushkin/djvu-rs |
+| djvu-zp | 0.43.0 | MIT | shipped | https://github.com/matyushkin/djvu-rs |
 | equivalent | 1.0.3 | Apache-2.0 OR MIT | shipped | https://github.com/indexmap-rs/equivalent |
 | euclid | 0.22.14 | MIT OR Apache-2.0 | shipped | https://github.com/servo/euclid |
 | exr | 1.74.2 | BSD-3-Clause | shipped | https://github.com/johannesvollmer/exrs |
@@ -38,14 +58,19 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | float-cmp | 0.9.0 | MIT | shipped | https://github.com/mikedilger/float-cmp |
 | font-types | 0.12.7 | MIT OR Apache-2.0 | shipped | https://github.com/googlefonts/fontations |
 | fontdb | 0.24.0 | MIT | shipped | https://github.com/RazrFalcon/fontdb |
+| getrandom | 0.4.3 | MIT OR Apache-2.0 | shipped | https://github.com/rust-random/getrandom |
 | gif | 0.14.2 | MIT OR Apache-2.0 | shipped | https://github.com/image-rs/image-gif |
 | half | 2.7.1 | MIT OR Apache-2.0 | shipped | https://github.com/VoidStarKat/half-rs |
 | harfrust | 0.12.0 | MIT | shipped | https://github.com/harfbuzz/harfrust |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | shipped | https://github.com/rust-lang/hashbrown |
+| hayro-jpeg2000 | 0.4.1 | Apache-2.0 OR MIT | shipped | https://github.com/LaurenzV/hayro |
+| hmac | 0.13.0 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/MACs |
+| hybrid-array | 0.4.15 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/hybrid-array |
 | image | 0.25.10 | MIT OR Apache-2.0 | shipped | https://github.com/image-rs/image |
 | image-webp | 0.2.4 | MIT OR Apache-2.0 | shipped | https://github.com/image-rs/image-webp |
 | imagesize | 0.15.0 | MIT | shipped | https://github.com/Roughsketch/imagesize |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT | shipped | https://github.com/indexmap-rs/indexmap |
+| inout | 0.2.4 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/utils |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | tooling | https://github.com/dtolnay/itoa |
 | jxl-bitstream | 1.1.0 | MIT OR Apache-2.0 | shipped | https://github.com/tirr-c/jxl-oxide.git |
 | jxl-coding | 1.0.1 | MIT OR Apache-2.0 | shipped | https://github.com/tirr-c/jxl-oxide.git |
@@ -66,6 +91,7 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | lofty | 0.25.4 | MIT OR Apache-2.0 | shipped | https://github.com/Serial-ATA/lofty-rs |
 | lofty_attr | 0.13.0 | MIT OR Apache-2.0 | shipped | https://github.com/Serial-ATA/lofty-rs |
 | log | 0.4.34 | MIT OR Apache-2.0 | shipped | https://github.com/rust-lang/log |
+| lzma-rust2 | 0.22.0 | Apache-2.0 | shipped | https://github.com/hasenbanck/lzma-rust2/ |
 | memchr | 2.8.3 | Unlicense OR MIT | shipped | https://github.com/BurntSushi/memchr |
 | memmap2 | 0.9.11 | MIT OR Apache-2.0 | shipped | https://github.com/RazrFalcon/memmap2-rs |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | shipped | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
@@ -78,8 +104,10 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | paste | 1.0.15 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/paste |
 | pico-args | 0.5.0 | MIT | shipped | https://github.com/RazrFalcon/pico-args |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | shipped | https://github.com/taiki-e/pin-project-lite |
+| png | 0.17.16 | MIT OR Apache-2.0 | shipped | https://github.com/image-rs/image-png |
 | png | 0.18.1 | MIT OR Apache-2.0 | shipped | https://github.com/image-rs/image-png |
 | polycool | 0.4.0 | MIT OR Apache-2.0 | shipped | https://github.com/linebender/kurbo |
+| ppmd-rust | 1.5.0 | CC0-1.0 OR MIT-0 | shipped | https://github.com/hasenbanck/ppmd-rust |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/proc-macro2 |
 | psd | 0.3.5 | MIT/Apache-2.0 | shipped | https://github.com/chinedufn/psd |
 | pulp | 0.22.3 | MIT | shipped | https://github.com/sarah-quinones/pulp/ |
@@ -88,14 +116,20 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | qoi | 0.4.1 | MIT/Apache-2.0 | shipped | https://github.com/aldanor/qoi-rust |
 | quick-error | 2.0.1 | MIT/Apache-2.0 | shipped | http://github.com/tailhook/quick-error |
 | quote | 1.0.47 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/quote |
+| rars | 0.11.0 | Apache-2.0 | shipped | https://github.com/bitplane/rars |
 | raw-cpuid | 11.6.0 | MIT | shipped | https://github.com/gz/rust-cpuid |
 | read-fonts | 0.41.0 | MIT OR Apache-2.0 | shipped | https://github.com/googlefonts/fontations |
 | reborrow | 0.5.5 | MIT | shipped | https://github.com/sarah-ek/reborrow/ |
 | resvg | 0.48.1 | Apache-2.0 OR MIT | shipped | https://github.com/linebender/resvg |
 | rgb | 0.8.53 | MIT | shipped | https://github.com/kornelski/rust-rgb |
 | roxmltree | 0.21.1 | MIT OR Apache-2.0 | shipped | https://github.com/RazrFalcon/roxmltree |
+| ruzstd | 0.9.1 | MIT | shipped | https://github.com/KillingSpark/zstd-rs |
+| safe_arch | 0.7.4 | Zlib OR Apache-2.0 OR MIT | shipped | https://github.com/Lokathor/safe_arch |
 | serde_core | 1.0.229 | MIT OR Apache-2.0 | tooling | https://github.com/serde-rs/serde |
 | serde_json | 1.0.154 | MIT OR Apache-2.0 | tooling | https://github.com/serde-rs/json |
+| sevenz-rust2 | 0.24.0 | Apache-2.0 | shipped | https://github.com/hasenbanck/sevenz-rust |
+| sha1 | 0.11.0 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/hashes |
+| sha2 | 0.11.1 | MIT OR Apache-2.0 | shipped | https://github.com/RustCrypto/hashes |
 | simd-adler32 | 0.3.10 | MIT | shipped | https://github.com/mcountryman/simd-adler32 |
 | simplecss | 0.2.2 | Apache-2.0 OR MIT | shipped | https://github.com/linebender/simplecss |
 | siphasher | 1.0.4 | MIT OR Apache-2.0 | shipped | https://github.com/jedisct1/rust-siphash |
@@ -107,7 +141,9 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | syn | 2.0.119 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/syn |
 | syn | 3.0.9 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/syn |
 | thiserror | 1.0.69 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/thiserror |
+| thiserror | 2.0.21 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/thiserror |
 | thiserror-impl | 1.0.69 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/thiserror |
+| thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/thiserror |
 | tiff | 0.11.3 | MIT | shipped | https://github.com/image-rs/image-tiff |
 | tiny-skia | 0.12.0 | BSD-3-Clause | shipped | https://github.com/linebender/tiny-skia |
 | tiny-skia-path | 0.12.0 | BSD-3-Clause | shipped | https://github.com/linebender/tiny-skia/tree/master/path |
@@ -115,6 +151,7 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | tracing | 0.1.44 | MIT | shipped | https://github.com/tokio-rs/tracing |
 | tracing-core | 0.1.36 | MIT | shipped | https://github.com/tokio-rs/tracing |
 | typed-path | 0.12.3 | MIT OR Apache-2.0 | shipped | https://github.com/chipsenkbeil/typed-path |
+| typenum | 1.20.1 | MIT OR Apache-2.0 | shipped | https://github.com/paholg/typenum |
 | unicode-bidi | 0.3.18 | MIT OR Apache-2.0 | shipped | https://github.com/servo/unicode-bidi |
 | unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | shipped | https://github.com/dtolnay/unicode-ident |
 | unicode-script | 0.5.8 | MIT OR Apache-2.0 | shipped | https://github.com/unicode-rs/unicode-script |
@@ -122,6 +159,7 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | usvg | 0.48.1 | Apache-2.0 OR MIT | shipped | https://github.com/linebender/resvg |
 | version_check | 0.9.5 | MIT/Apache-2.0 | shipped | https://github.com/SergioBenitez/version_check |
 | weezl | 0.1.12 | MIT OR Apache-2.0 | shipped | https://github.com/image-rs/weezl |
+| wide | 0.7.33 | Zlib OR Apache-2.0 OR MIT | shipped | https://github.com/Lokathor/wide |
 | windows | 0.62.2 | MIT OR Apache-2.0 | shipped | https://github.com/microsoft/windows-rs |
 | windows-collections | 0.3.2 | MIT OR Apache-2.0 | shipped | https://github.com/microsoft/windows-rs |
 | windows-core | 0.62.2 | MIT OR Apache-2.0 | shipped | https://github.com/microsoft/windows-rs |
@@ -137,6 +175,8 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | xmlwriter | 0.1.0 | MIT | shipped | https://github.com/RazrFalcon/xmlwriter |
 | zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | shipped | https://github.com/google/zerocopy |
 | zerocopy-derive | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | shipped | https://github.com/google/zerocopy |
+| zeroize | 1.9.1 | Apache-2.0 OR MIT | shipped | https://github.com/RustCrypto/utils |
+| zeroize_derive | 1.5.0 | Apache-2.0 OR MIT | shipped | https://github.com/RustCrypto/utils |
 | zip | 9.0.4 | MIT | shipped | https://github.com/zip-rs/zip2 |
 | zlib-rs | 0.6.8 | Zlib | shipped | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | tooling | https://github.com/dtolnay/zmij |

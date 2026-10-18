@@ -19,9 +19,15 @@ pub mod ebook;
 pub mod j2k;
 pub mod jxl;
 pub mod livp;
+#[cfg(windows)]
+pub mod memstream;
 pub mod mesh;
+#[cfg(windows)]
+pub mod metafile;
 pub mod ole;
 pub mod pcx;
+#[cfg(windows)]
+pub mod pdf;
 pub mod psd;
 pub mod raster;
 pub mod raw;
@@ -29,17 +35,11 @@ pub mod route;
 pub mod sci;
 pub mod sgi;
 pub mod svg;
-pub mod zip_preview;
-#[cfg(windows)]
-pub mod memstream;
-#[cfg(windows)]
-pub mod metafile;
-#[cfg(windows)]
-pub mod pdf;
 #[cfg(windows)]
 pub mod video;
 #[cfg(windows)]
 pub mod wic;
+pub mod zip_preview;
 
 use image::DynamicImage;
 
