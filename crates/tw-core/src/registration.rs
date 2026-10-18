@@ -51,6 +51,8 @@ pub struct Layout {
     pub product: String,
     /// Writes `Shell Extensions\Approved` entries (machine scope only).
     pub approve: bool,
+    /// Key (below `root`) holding the `Approved` values; only used when `approve` is set.
+    pub approved: String,
     /// Broadcasts `SHCNE_ASSOCCHANGED` after changes (off for sandboxed tests).
     pub notify: bool,
 }
@@ -66,6 +68,7 @@ impl Layout {
             classes: "Software\\Classes".into(),
             product: crate::config::PRODUCT_KEY.into(),
             approve,
+            approved: APPROVED_KEY.into(),
             notify: true,
         }
     }
@@ -276,7 +279,7 @@ fn register_class(rec: &mut Recorder, layout: &Layout, class: ClassId, dll: &str
     rec.set_string(&inproc, "", dll)?;
     rec.set_string(&inproc, "ThreadingModel", "Apartment")?;
     if layout.approve {
-        rec.set_string(APPROVED_KEY, &class.braced(), class.display_name)?;
+        rec.set_string(&layout.approved, &class.braced(), class.display_name)?;
     }
     Ok(())
 }
@@ -584,6 +587,7 @@ mod tests {
                 classes: format!("{base}\\Classes"),
                 product: format!("{base}\\Product"),
                 approve: false,
+                approved: format!("{base}\\Approved"),
                 notify: false,
             };
             Self { base, layout }
@@ -877,6 +881,89 @@ mod tests {
         let product = CURRENT_USER.open(&sb.layout.product).unwrap();
         assert_eq!(product.get_u32("MaxFileMb").unwrap(), 64);
         assert!(CURRENT_USER.open(sb.layout.manifest_key()).is_err());
+    }
+
+    /// The registration `DllRegisterServer` performs, minus the HKLM root: `approve` on,
+    /// every routable extension, both classes. Install, repair and upgrade (re-register over
+    /// an older path) must each leave exactly one registration, and uninstall must restore
+    /// the starting state, whether or not the `Approved` key pre-existed (it always does on a
+    /// real machine, holding other vendors' entries).
+    #[test]
+    fn machine_scope_plan_registers_approves_and_unregisters_cleanly() {
+        let extensions: Vec<&str> = crate::formats::all()
+            .iter()
+            .map(|f| f.ext)
+            .filter(|e| !crate::decode::route::chain_for_ext(e).is_empty())
+            .collect();
+        assert!(
+            extensions.len() > 100,
+            "{} routable extensions",
+            extensions.len()
+        );
+        let old_dll = PathBuf::from(r"C:\Program Files\Thumbwright\old\thumbwright_shell.dll");
+        let new_dll = PathBuf::from(r"C:\Program Files\Thumbwright\thumbwright_shell.dll");
+        let plan = |dll| Plan {
+            dll_path: dll,
+            extensions: extensions.clone(),
+            context_menu: true,
+        };
+        let foreign = "{00000000-0000-0000-0000-0000000000AA}";
+        for approved_preexists in [true, false] {
+            let mut sb = Sandbox::new("machine");
+            sb.layout.approve = true;
+            sb.seed_user_state();
+            if approved_preexists {
+                CURRENT_USER
+                    .create(&sb.layout.approved)
+                    .unwrap()
+                    .set_string(foreign, "Other vendor extension")
+                    .unwrap();
+            }
+            let before = sb.snapshot();
+            let approved = |name: &str| {
+                CURRENT_USER
+                    .open(&sb.layout.approved)
+                    .ok()?
+                    .get_string(name)
+                    .ok()
+            };
+
+            register(&sb.layout, &plan(&old_dll)).unwrap();
+            for class in [ids::CLSID_THUMBNAIL, ids::CLSID_CONTEXT_MENU] {
+                assert_eq!(
+                    approved(&class.braced()).as_deref(),
+                    Some(class.display_name),
+                    "{} approved",
+                    class.display_name
+                );
+            }
+            let handlers = CURRENT_USER
+                .open(format!("{}\\Classes", sb.base))
+                .unwrap()
+                .keys()
+                .unwrap()
+                .filter(|k| k.starts_with('.'))
+                .count();
+            assert!(handlers >= extensions.len(), "{handlers} .ext keys");
+            assert_eq!(approved(foreign).is_some(), approved_preexists);
+
+            // Upgrade: a newer install registers over the older one.
+            register(&sb.layout, &plan(&new_dll)).unwrap();
+            let inproc = format!("CLSID\\{}\\InprocServer32", ids::CLSID_THUMBNAIL.braced());
+            assert_eq!(sb.get(&inproc).as_deref(), Some(new_dll.to_str().unwrap()));
+            let installed = sb.snapshot();
+            // Repair: the same install registers again; nothing changes.
+            register(&sb.layout, &plan(&new_dll)).unwrap();
+            assert_eq!(sb.snapshot(), installed, "repair is idempotent");
+
+            unregister(&sb.layout).unwrap();
+            assert_eq!(
+                sb.snapshot(),
+                before,
+                "uninstall leaves zero diff (Approved pre-existed: {approved_preexists})"
+            );
+            assert_eq!(approved(foreign).is_some(), approved_preexists);
+        }
     }
 
     #[test]

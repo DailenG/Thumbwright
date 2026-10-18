@@ -1,0 +1,680 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    End-to-end test of the Thumbwright per-machine MSI: install, upgrade, repair, uninstall, and
+    a registry diff that must show zero product residue (issue #2, REQ-REG-8, C6).
+
+.DESCRIPTION
+    Elevated mode (default). Needs an elevated 64-bit PowerShell because it installs the MSI and
+    DllRegisterServer writes HKLM. It refuses to start otherwise. It changes the machine
+    (installs and removes Thumbwright), so run it on a test box or VM.
+
+    Before anything is installed it exports, with `reg export /reg:64`:
+        HKLM\SOFTWARE\Classes
+        HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved
+        HKLM\SOFTWARE\Thumbwright   (and the WOW6432Node copy)
+        HKCU\Software\Classes
+        HKCU\Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved
+        HKCU\Software\Thumbwright
+    Each export is flattened to "key<TAB>line" entries so a value line is compared together with
+    the key it belongs to. Scenarios:
+
+      InstallUninstall  install; verify registration (CLSID keys, InprocServer32, Approved entries,
+                        thumbnail handlers at both locations for several extensions, context menu
+                        handler, journal, files, no Thumbwright.ini); uninstall; re-export; the
+                        before and after exports must be identical (any added or lost line fails),
+                        and no product file or key may remain.
+      Upgrade           install an older version, install this one over it (major upgrade), verify,
+                        confirm the registry footprint equals a fresh install, uninstall, no residue.
+                        Without -OldMsi an older package is built from the same payload with
+                        version 0.0.1, which exercises the custom actions and upgrade ordering
+                        (not the contents of a real older release).
+      Repair            install, `msiexec /fa`, verify, confirm the footprint is unchanged,
+                        uninstall, no residue.
+
+    -DryRun is the non-elevated mode: it builds an MSI from -SourceDir (or inspects -Msi) and checks
+    its tables through the Windows Installer API (files, no INI, no Registry rows, the deferred
+    register action after InstallFiles, the unregister action before RemoveFiles), extracts it with
+    an administrative install into the work directory and runs `wix msi validate` (ICE). Nothing is
+    installed and no registry is touched.
+
+.PARAMETER Msi
+    The package under test. Default: newest dist\Thumbwright-*-x64.msi. In -DryRun, when omitted,
+    a throw-away MSI is built from -SourceDir instead.
+
+.PARAMETER OldMsi
+    A real older package for the Upgrade scenario. Must have the same UpgradeCode and a lower version.
+
+.PARAMETER SourceDir
+    Payload directory used to build throw-away MSIs (dry run, synthetic old version). Default: dist.
+
+.PARAMETER Scenario
+    All (default), InstallUninstall, Upgrade or Repair.
+
+.PARAMETER DryRun
+    Non-elevated package inspection only.
+
+.PARAMETER WorkDir
+    Logs and diff reports go here. Default: %TEMP%\tw-test-install-<timestamp>.
+
+.PARAMETER KeepExports
+    Keep the raw .reg exports (large: tens of MB each).
+
+.PARAMETER AcceptWixEula
+    Passed to build-msi.ps1 when a throw-away MSI is built.
+
+.EXAMPLE
+    .\scripts\test-install.ps1 -DryRun
+
+.EXAMPLE
+    # elevated
+    .\scripts\test-install.ps1 -Msi .\dist\Thumbwright-0.1.0-x64.msi
+#>
+[CmdletBinding()]
+param(
+    [string]$Msi,
+    [string]$OldMsi,
+    [string]$SourceDir,
+    [ValidateSet('All', 'InstallUninstall', 'Upgrade', 'Repair')]
+    [string]$Scenario = 'All',
+    [switch]$DryRun,
+    [string]$WorkDir,
+    [switch]$KeepExports,
+    [switch]$AcceptWixEula
+)
+
+$ErrorActionPreference = 'Stop'
+
+$root = Split-Path -Parent $PSScriptRoot
+if (-not $SourceDir) { $SourceDir = Join-Path $root 'dist' }
+if (-not $WorkDir) {
+    $WorkDir = Join-Path $env:TEMP ('tw-test-install-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+}
+
+# ---------------------------------------------------------------------------------------------
+# Check bookkeeping
+# ---------------------------------------------------------------------------------------------
+$script:Results = New-Object System.Collections.Generic.List[object]
+
+function Assert-Check {
+    param([string]$Name, [bool]$Condition, [string]$Detail = '')
+    $script:Results.Add([pscustomobject]@{ Name = $Name; Passed = $Condition; Detail = $Detail })
+    if ($Condition) {
+        Write-Host ("  PASS  {0}" -f $Name)
+    } else {
+        Write-Host ("  FAIL  {0} {1}" -f $Name, $Detail) -ForegroundColor Red
+    }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Windows Installer database access (late-bound COM, works in Windows PowerShell and PowerShell 7)
+# ---------------------------------------------------------------------------------------------
+function Invoke-Com {
+    param($Target, [string]$Member, [object[]]$Arguments = @(), [string]$Kind = 'InvokeMethod')
+    return $Target.GetType().InvokeMember($Member, $Kind, $null, $Target, $Arguments)
+}
+
+function Open-MsiDatabase {
+    param([string]$Path)
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    return Invoke-Com $installer 'OpenDatabase' @((Resolve-Path -LiteralPath $Path).Path, 0)
+}
+
+# Returns every row as a string[] of $Columns values. Missing tables raise, so use Test-MsiTable first.
+function Get-MsiRows {
+    param($Db, [string]$Sql, [int]$Columns)
+    $rows = New-Object System.Collections.Generic.List[object]
+    $view = Invoke-Com $Db 'OpenView' @($Sql)
+    [void](Invoke-Com $view 'Execute')
+    while ($true) {
+        $rec = Invoke-Com $view 'Fetch'
+        if ($null -eq $rec) { break }
+        $values = New-Object 'string[]' $Columns
+        for ($i = 1; $i -le $Columns; $i++) {
+            $values[$i - 1] = [string](Invoke-Com $rec 'StringData' @($i) 'GetProperty')
+        }
+        $rows.Add($values)
+    }
+    [void](Invoke-Com $view 'Close')
+    return , $rows
+}
+
+function Test-MsiTable {
+    param($Db, [string]$Name)
+    $rows = Get-MsiRows $Db "SELECT Name FROM _Tables WHERE Name='$Name'" 1
+    return ($rows.Count -gt 0)
+}
+
+function Get-MsiProperty {
+    param($Db, [string]$Name)
+    $rows = Get-MsiRows $Db "SELECT Value FROM Property WHERE Property='$Name'" 1
+    if ($rows.Count -eq 0) { return $null }
+    return $rows[0][0]
+}
+
+# ---------------------------------------------------------------------------------------------
+# Package inspection (used by -DryRun, and as a precondition of the elevated run)
+# ---------------------------------------------------------------------------------------------
+$script:RequiredFiles = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe', 'LICENSE', 'THIRD_PARTY_LICENSES.md')
+
+function Test-MsiPackage {
+    param([string]$Path)
+    Write-Host "== Package tables: $Path"
+    $db = Open-MsiDatabase $Path
+
+    $files = Get-MsiRows $db 'SELECT File, Component_, FileName, FileSize FROM File' 4
+    $longNames = @($files | ForEach-Object { ($_[2] -split '\|')[-1] })
+    $files | ForEach-Object { Write-Host ("    File   {0,-30} {1,-28} {2,10} bytes" -f $_[0], (($_[2] -split '\|')[-1]), $_[3]) }
+    foreach ($name in $script:RequiredFiles) {
+        Assert-Check "File table has $name" ($longNames -contains $name)
+    }
+    Assert-Check 'File table has no Thumbwright.ini (portable marker, REQ-REG-6)' (-not ($longNames | Where-Object { $_ -like '*.ini' }))
+
+    $components = Get-MsiRows $db 'SELECT Component, Directory_, Attributes FROM Component' 3
+    $components | ForEach-Object { Write-Host ("    Component {0,-24} dir {1} attrs {2}" -f $_[0], $_[1], $_[2]) }
+    Assert-Check 'All components are 64-bit in INSTALLFOLDER' (
+        -not ($components | Where-Object { (([int]$_[2]) -band 256) -eq 0 -or $_[1] -ne 'INSTALLFOLDER' }))
+
+    $hasRegistry = Test-MsiTable $db 'Registry'
+    $registryRows = if ($hasRegistry) { (Get-MsiRows $db 'SELECT Registry FROM Registry' 1).Count } else { 0 }
+    Assert-Check 'No Registry table rows (the DLL engine owns all HKLM state)' ($registryRows -eq 0) "rows: $registryRows"
+
+    $actions = @{}
+    foreach ($row in (Get-MsiRows $db 'SELECT Action, Type, Source, Target FROM CustomAction' 4)) {
+        $actions[$row[0]] = $row
+        Write-Host ("    CustomAction {0,-22} type {1,-5} {2}" -f $row[0], $row[1], $row[3])
+    }
+    $sequence = @{}
+    foreach ($row in (Get-MsiRows $db 'SELECT Action, Condition, Sequence FROM InstallExecuteSequence' 3)) {
+        $sequence[$row[0]] = $row
+    }
+    foreach ($name in 'RegisterShell', 'UnregisterShell', 'InstallFiles', 'RemoveFiles', 'RemoveExistingProducts') {
+        Assert-Check "InstallExecuteSequence has $name" ($sequence.ContainsKey($name))
+    }
+
+    if ($actions.ContainsKey('RegisterShell') -and $actions.ContainsKey('UnregisterShell')) {
+        $reg = $actions['RegisterShell']
+        $unreg = $actions['UnregisterShell']
+        # Type bits: 1024 = deferred, 2048 = no impersonation (runs as LocalSystem, elevated).
+        foreach ($a in $reg, $unreg) {
+            $type = [int]$a[1]
+            Assert-Check "$($a[0]) is a deferred, non-impersonated EXE action" (
+                (($type -band 1024) -ne 0) -and (($type -band 2048) -ne 0) -and (($type -band 7) -eq 2))
+            Assert-Check "$($a[0]) runs the 64-bit regsvr32 on the installed DLL" (
+                $a[3] -match 'System64Folder\]regsvr32\.exe' -and $a[3] -match 'INSTALLFOLDER\]thumbwright_shell\.dll')
+        }
+        Assert-Check 'RegisterShell registers (no /u); UnregisterShell unregisters (/u)' (
+            ($reg[3] -notmatch ' /u ') -and ($unreg[3] -match ' /s /u '))
+        Assert-Check 'RegisterShell is scheduled after InstallFiles' (
+            [int]$sequence['RegisterShell'][2] -gt [int]$sequence['InstallFiles'][2])
+        Assert-Check 'UnregisterShell is scheduled before RemoveFiles' (
+            [int]$sequence['UnregisterShell'][2] -lt [int]$sequence['RemoveFiles'][2])
+        Assert-Check 'UnregisterShell only runs on removal (REMOVE="ALL")' ($sequence['UnregisterShell'][1] -eq 'REMOVE="ALL"')
+        Assert-Check 'RegisterShell does not run on removal' ($sequence['RegisterShell'][1] -match 'NOT \(REMOVE="ALL"\)')
+    }
+    if ($sequence.ContainsKey('RemoveExistingProducts') -and $sequence.ContainsKey('InstallFiles')) {
+        Assert-Check 'Major upgrade removes the old product (and unregisters it) before new files are installed' (
+            [int]$sequence['RemoveExistingProducts'][2] -lt [int]$sequence['InstallFiles'][2])
+    }
+
+    Assert-Check 'Package is per-machine (ALLUSERS=1)' ((Get-MsiProperty $db 'ALLUSERS') -eq '1')
+    $version = Get-MsiProperty $db 'ProductVersion'
+    Assert-Check 'ProductVersion is major.minor.build' ($version -match '^\d+\.\d+\.\d+$') $version
+    return [pscustomobject]@{
+        Version     = $version
+        UpgradeCode = (Get-MsiProperty $db 'UpgradeCode')
+        ProductCode = (Get-MsiProperty $db 'ProductCode')
+    }
+}
+
+function New-TestMsi {
+    param([string]$OutFile, [string]$Version)
+    $buildArgs = @{ SourceDir = $SourceDir; OutFile = $OutFile; Version = $Version }
+    if ($AcceptWixEula) { $buildArgs.AcceptWixEula = $true }
+    & (Join-Path $root 'packaging\wix\build-msi.ps1') @buildArgs
+}
+
+function Test-AdminImage {
+    param([string]$Path)
+    Write-Host '== Administrative extraction (no custom actions run, nothing installed)'
+    $target = Join-Path $WorkDir 'admin-image'
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
+    $log = Join-Path $WorkDir 'admin-image.log'
+    $p = Start-Process -FilePath msiexec.exe -Wait -PassThru -NoNewWindow -ArgumentList @(
+        '/a', ('"{0}"' -f $Path), '/qn', ('TARGETDIR="{0}"' -f $target), '/l*v', ('"{0}"' -f $log))
+    Assert-Check 'msiexec /a extracts the package' ($p.ExitCode -eq 0) "exit code $($p.ExitCode), log $log"
+    $names = @(Get-ChildItem -LiteralPath $target -Recurse -File |
+            Where-Object { $_.Extension -ne '.msi' } | ForEach-Object { $_.Name })
+    Write-Host ("    extracted: {0}" -f ($names -join ', '))
+    foreach ($name in $script:RequiredFiles) {
+        Assert-Check "Extracted payload has $name" ($names -contains $name)
+    }
+    Assert-Check 'Extracted payload has no .ini file' (-not ($names | Where-Object { $_ -like '*.ini' }))
+}
+
+function Test-IceValidation {
+    param([string]$Path)
+    Write-Host '== ICE validation (wix msi validate)'
+    $wix = Get-Command wix -ErrorAction SilentlyContinue
+    $wixExe = if ($wix) { $wix.Source } else { Join-Path $env:USERPROFILE '.dotnet\tools\wix.exe' }
+    if (-not (Test-Path -LiteralPath $wixExe)) {
+        Write-Warning 'wix CLI not found; skipping ICE validation.'
+        return
+    }
+    $eula = @()
+    if ($AcceptWixEula) { $eula = @('-acceptEula', 'wix7') }
+    $out = & $wixExe msi validate @eula $Path 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    if ($out.Trim()) { Write-Host $out }
+    Assert-Check 'wix msi validate (ICE) reports no errors' ($code -eq 0) "exit code $code"
+}
+
+# ---------------------------------------------------------------------------------------------
+# Dry run
+# ---------------------------------------------------------------------------------------------
+function Invoke-DryRun {
+    New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
+    # msiexec needs an absolute path.
+    $target = if ($Msi) { (Resolve-Path -LiteralPath $Msi).Path } else { $null }
+    if (-not $target) {
+        $target = Join-Path $WorkDir 'dryrun.msi'
+        $version = '0.0.0'
+        $m = [regex]::Match((Get-Content -LiteralPath (Join-Path $root 'Cargo.toml') -Raw),
+            '(?ms)^\[workspace\.package\].*?^version\s*=\s*"(\d+\.\d+\.\d+)"')
+        if ($m.Success) { $version = $m.Groups[1].Value }
+        Write-Host "== Building a throw-away MSI from $SourceDir (version $version)"
+        New-TestMsi -OutFile $target -Version $version
+    }
+    [void](Test-MsiPackage $target)
+    Test-AdminImage $target
+    Test-IceValidation $target
+}
+
+# ---------------------------------------------------------------------------------------------
+# Elevated mode helpers
+# ---------------------------------------------------------------------------------------------
+function Assert-Elevated {
+    $principal = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Host ('test-install.ps1 installs and uninstalls the MSI and inspects HKLM, so it must run elevated. ' +
+            'Start an elevated 64-bit PowerShell (Run as administrator) and run it again, ' +
+            'or pass -DryRun for the non-elevated package checks.') -ForegroundColor Red
+        exit 2
+    }
+    if (-not [Environment]::Is64BitProcess) {
+        Write-Host 'Run this script from a 64-bit PowerShell: the DLL is x64 and registers in the 64-bit registry view.' -ForegroundColor Red
+        exit 2
+    }
+}
+
+$script:InstallDir = Join-Path $env:ProgramW6432 'Thumbwright'
+$script:Installed = New-Object System.Collections.Generic.List[string]
+
+# Exported key set. HKLM and HKCU, 64-bit view.
+$script:SnapshotKeys = @(
+    @{ Hive = 'HKLM'; Path = 'SOFTWARE\Classes' },
+    @{ Hive = 'HKLM'; Path = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved' },
+    @{ Hive = 'HKLM'; Path = 'SOFTWARE\Thumbwright' },
+    @{ Hive = 'HKLM'; Path = 'SOFTWARE\WOW6432Node\Thumbwright' },
+    @{ Hive = 'HKCU'; Path = 'Software\Classes' },
+    @{ Hive = 'HKCU'; Path = 'Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved' },
+    @{ Hive = 'HKCU'; Path = 'Software\Thumbwright' }
+)
+
+function Get-BaseKey {
+    param([string]$Hive)
+    $h = if ($Hive -eq 'HKLM') { [Microsoft.Win32.RegistryHive]::LocalMachine } else { [Microsoft.Win32.RegistryHive]::CurrentUser }
+    return [Microsoft.Win32.RegistryKey]::OpenBaseKey($h, [Microsoft.Win32.RegistryView]::Registry64)
+}
+
+function Test-RegistryKeyExists {
+    param([string]$Hive, [string]$Path)
+    $base = Get-BaseKey $Hive
+    $key = $base.OpenSubKey($Path)
+    if ($null -eq $key) { return $false }
+    $key.Close()
+    return $true
+}
+
+# Reads a REG_SZ-style value; $null when the key or value is missing. Name '' is the default value.
+function Get-RegistryValue {
+    param([string]$Hive, [string]$Path, [string]$Name = '')
+    $key = (Get-BaseKey $Hive).OpenSubKey($Path)
+    if ($null -eq $key) { return $null }
+    try { return $key.GetValue($Name, $null) } finally { $key.Close() }
+}
+
+# A .reg export is UTF-16. Flatten to "key header" and "key header<TAB>value line" entries so that a
+# value line is compared together with the key it belongs to (a bare '@="x"' line is meaningless alone).
+function Read-RegExport {
+    param([string]$Path, $Into)
+    $key = ''
+    foreach ($line in [System.IO.File]::ReadLines($Path, [System.Text.Encoding]::Unicode)) {
+        if ($line.Length -eq 0) { continue }
+        if ($line[0] -eq '[') {
+            $key = $line
+            [void]$Into.Add($line)
+        } elseif ($line.StartsWith('Windows Registry Editor')) {
+            continue
+        } else {
+            [void]$Into.Add($key + "`t" + $line)
+        }
+    }
+}
+
+function Get-Snapshot {
+    param([string]$Label)
+    Write-Host "  snapshot '$Label' (reg export of $($script:SnapshotKeys.Count) keys)..."
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    $index = 0
+    foreach ($spec in $script:SnapshotKeys) {
+        $index++
+        if (-not (Test-RegistryKeyExists $spec.Hive $spec.Path)) { continue }
+        $file = Join-Path $WorkDir ("{0}-{1}-{2}.reg" -f $Label, $index, $spec.Hive)
+        & reg.exe export ("{0}\{1}" -f $spec.Hive, $spec.Path) $file /y /reg:64 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "reg export failed for $($spec.Hive)\$($spec.Path)" }
+        Read-RegExport $file $set
+        if (-not $KeepExports) { Remove-Item -LiteralPath $file -Force }
+    }
+    return , $set
+}
+
+function Compare-Snapshot {
+    param($Before, $After)
+    $added = New-Object 'System.Collections.Generic.HashSet[string]' (, $After)
+    $added.ExceptWith($Before)
+    $removed = New-Object 'System.Collections.Generic.HashSet[string]' (, $Before)
+    $removed.ExceptWith($After)
+    return [pscustomobject]@{ Added = $added; Removed = $removed }
+}
+
+function Assert-NoResidue {
+    param([string]$Label, $Baseline, $After)
+    $diff = Compare-Snapshot $Baseline $After
+    $report = Join-Path $WorkDir ("diff-{0}.txt" -f ($Label -replace '[^A-Za-z0-9]+', '-'))
+    $lines = @($diff.Added | ForEach-Object { "+ $_" }) + @($diff.Removed | ForEach-Object { "- $_" })
+    Set-Content -LiteralPath $report -Value $lines -Encoding Unicode
+    $detail = ''
+    if ($lines.Count -gt 0) {
+        $detail = "$($diff.Added.Count) added, $($diff.Removed.Count) lost; first lines:`n    " +
+            (($lines | Select-Object -First 15) -join "`n    ") + "`n    full report: $report"
+    }
+    Assert-Check "Zero registry diff vs baseline $Label (HKLM + HKCU)" ($lines.Count -eq 0) $detail
+    $markers = '(?i)thumbwright|99A01621-C48D-402A-A898-3D3E6D46C32F|39A04F07-5D10-46F8-8AD0-729B94CF03FE'
+    $product = @($diff.Added | Where-Object { $_ -match $markers })
+    Assert-Check "No product key or value left behind $Label" ($product.Count -eq 0) ($product | Select-Object -First 5 | Out-String)
+}
+
+# Registry footprint of an install: what it added to the baseline (all of it product state).
+function Get-Footprint {
+    param($Baseline, $Installed)
+    return , (Compare-Snapshot $Baseline $Installed).Added
+}
+
+function Assert-SameFootprint {
+    param([string]$Label, $Expected, $Actual)
+    $e = New-Object 'System.Collections.Generic.HashSet[string]' (, $Expected)
+    $e.SymmetricExceptWith($Actual)
+    $detail = ''
+    if ($e.Count -gt 0) { $detail = "$($e.Count) differing lines, first: " + (($e | Select-Object -First 5) -join ' | ') }
+    Assert-Check "Registry footprint after $Label equals a fresh install" ($e.Count -eq 0) $detail
+}
+
+function Invoke-Msiexec {
+    param([ValidateSet('/i', '/x', '/fa')][string]$Verb, [string]$Path, [string]$LogName)
+    $log = Join-Path $WorkDir "$LogName.log"
+    Write-Host "  msiexec $Verb $(Split-Path -Leaf $Path)  (log: $log)"
+    $p = Start-Process -FilePath msiexec.exe -Wait -PassThru -NoNewWindow -ArgumentList @(
+        $Verb, ('"{0}"' -f $Path), '/qn', '/norestart', '/l*v', ('"{0}"' -f $log))
+    $ok = ($p.ExitCode -eq 0) -or ($p.ExitCode -eq 3010)
+    Assert-Check "msiexec $Verb $LogName succeeded" $ok "exit code $($p.ExitCode), log $log"
+    if ($p.ExitCode -eq 3010) {
+        Write-Warning "$LogName finished with 3010 (restart required): a file was in use."
+    }
+    if (-not $ok) { throw "msiexec $Verb failed ($($p.ExitCode)); see $log" }
+    if ($Verb -eq '/i' -and -not $script:Installed.Contains($Path)) { $script:Installed.Add($Path) }
+}
+
+# The thumbnail host (dllhost.exe) keeps the DLL mapped after a thumbnail was produced; an in-use
+# file would make the uninstall leave it behind. Stop surrogates that hold it. Explorer itself loads the
+# context menu handler on right-click; that case is only reported.
+function Stop-ShellSurrogate {
+    $dll = 'thumbwright_shell.dll'
+    # Only the processes that host shell extensions: scanning every process's modules is slow.
+    $hosts = @(Get-Process -Name dllhost, explorer, prevhost, SearchProtocolHost, SearchIndexer -ErrorAction SilentlyContinue)
+    foreach ($proc in $hosts) {
+        $holds = $false
+        try {
+            $holds = [bool]($proc.Modules | Where-Object { $_.ModuleName -eq $dll })
+        } catch {
+            $holds = $false
+        }
+        if (-not $holds) { continue }
+        if ($proc.ProcessName -eq 'dllhost') {
+            Write-Host "  stopping dllhost.exe pid $($proc.Id) that has $dll loaded"
+            Stop-Process -Id $proc.Id -Force
+        } else {
+            Write-Warning "$($proc.ProcessName) pid $($proc.Id) has $dll loaded; the file may be replaced only after a restart."
+        }
+    }
+}
+
+# --- Product class list, read from the source of truth rather than duplicated here ---------------
+function Get-ProductClasses {
+    $text = Get-Content -LiteralPath (Join-Path $root 'crates\tw-core\src\ids.rs') -Raw
+    $pattern = 'pub const (CLSID_\w+): ClassId = ClassId \{\s*guid: 0x([0-9A-Fa-f_]+),\s*display_name: "([^"]+)"'
+    $classes = @()
+    foreach ($m in [regex]::Matches($text, $pattern)) {
+        $hex = $m.Groups[2].Value.Replace('_', '').ToUpperInvariant()
+        if ($hex.Length -ne 32) { continue }
+        $braced = '{0}-{1}-{2}-{3}-{4}' -f $hex.Substring(0, 8), $hex.Substring(8, 4), $hex.Substring(12, 4), $hex.Substring(16, 4), $hex.Substring(20)
+        $classes += [pscustomobject]@{ Const = $m.Groups[1].Value; Clsid = "{$braced}"; Name = $m.Groups[3].Value }
+    }
+    if ($classes.Count -eq 0) { throw 'Could not read the CLSID constants from crates\tw-core\src\ids.rs' }
+    return $classes
+}
+
+$script:ThumbCategory = '{E357FCCD-A995-4576-B01F-234630154E96}'
+$script:ApprovedPath = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved'
+$script:CheckedExtensions = @('png', 'jpg', 'bmp', 'gif', 'svg')
+
+function Test-Installed {
+    param([string]$Label)
+    Write-Host "== Verify installed state: $Label"
+    $dll = Join-Path $script:InstallDir 'thumbwright_shell.dll'
+    foreach ($name in $script:RequiredFiles) {
+        Assert-Check "[$Label] installed file $name" (Test-Path -LiteralPath (Join-Path $script:InstallDir $name))
+    }
+    Assert-Check "[$Label] no Thumbwright.ini next to the binaries" (-not (Test-Path -LiteralPath (Join-Path $script:InstallDir 'Thumbwright.ini')))
+
+    $journal = (Get-BaseKey 'HKLM').OpenSubKey('SOFTWARE\Thumbwright\Registration')
+    Assert-Check "[$Label] registration journal exists under HKLM\SOFTWARE\Thumbwright\Registration" ($null -ne $journal)
+    if ($journal) {
+        $names = @($journal.GetValueNames() | Where-Object { $_ -match '^\d+$' })
+        Assert-Check "[$Label] journal DllPath is the installed DLL" ($journal.GetValue('DllPath') -eq $dll) ([string]$journal.GetValue('DllPath'))
+        Assert-Check "[$Label] journal has numbered entries" ($names.Count -gt 0) "$($names.Count) entries"
+        $journal.Close()
+    }
+
+    $classes = Get-ProductClasses
+    $core = @('CLSID_THUMBNAIL', 'CLSID_CONTEXT_MENU')
+    foreach ($class in $classes) {
+        $clsidKey = "SOFTWARE\Classes\CLSID\$($class.Clsid)"
+        $registered = Test-RegistryKeyExists 'HKLM' $clsidKey
+        if (-not $registered -and ($core -notcontains $class.Const)) {
+            Write-Host "    note: $($class.Const) is not registered by this build; skipped"
+            continue
+        }
+        Assert-Check "[$Label] $($class.Const) CLSID key" $registered
+        Assert-Check "[$Label] $($class.Const) display name" ((Get-RegistryValue 'HKLM' $clsidKey) -eq $class.Name) ([string](Get-RegistryValue 'HKLM' $clsidKey))
+        Assert-Check "[$Label] $($class.Const) InprocServer32 is the installed DLL" ((Get-RegistryValue 'HKLM' "$clsidKey\InprocServer32") -eq $dll) ([string](Get-RegistryValue 'HKLM' "$clsidKey\InprocServer32"))
+        Assert-Check "[$Label] $($class.Const) ThreadingModel" ((Get-RegistryValue 'HKLM' "$clsidKey\InprocServer32" 'ThreadingModel') -eq 'Apartment')
+        Assert-Check "[$Label] $($class.Const) in Shell Extensions\Approved" ((Get-RegistryValue 'HKLM' $script:ApprovedPath $class.Clsid) -eq $class.Name)
+    }
+
+    $thumb = ($classes | Where-Object { $_.Const -eq 'CLSID_THUMBNAIL' }).Clsid
+    $menu = ($classes | Where-Object { $_.Const -eq 'CLSID_CONTEXT_MENU' }).Clsid
+    foreach ($ext in $script:CheckedExtensions) {
+        foreach ($base in "SOFTWARE\Classes\.$ext", "SOFTWARE\Classes\SystemFileAssociations\.$ext") {
+            Assert-Check "[$Label] thumbnail handler at $base" ((Get-RegistryValue 'HKLM' "$base\shellex\$script:ThumbCategory") -eq $thumb)
+        }
+    }
+    Assert-Check "[$Label] context menu handler" ((Get-RegistryValue 'HKLM' 'SOFTWARE\Classes\*\shellex\ContextMenuHandlers\Thumbwright') -eq $menu)
+}
+
+function Test-Uninstalled {
+    param([string]$Label)
+    Write-Host "== Verify removed state: $Label"
+    Assert-Check "[$Label] install directory is gone" (-not (Test-Path -LiteralPath $script:InstallDir)) $script:InstallDir
+    Assert-Check "[$Label] HKLM\SOFTWARE\Thumbwright is gone" (-not (Test-RegistryKeyExists 'HKLM' 'SOFTWARE\Thumbwright'))
+    Assert-Check "[$Label] HKCU\Software\Thumbwright is gone" (-not (Test-RegistryKeyExists 'HKCU' 'Software\Thumbwright'))
+    foreach ($class in (Get-ProductClasses)) {
+        Assert-Check "[$Label] $($class.Const) CLSID key is gone" (-not (Test-RegistryKeyExists 'HKLM' "SOFTWARE\Classes\CLSID\$($class.Clsid)"))
+        Assert-Check "[$Label] $($class.Const) Approved entry is gone" ($null -eq (Get-RegistryValue 'HKLM' $script:ApprovedPath $class.Clsid))
+    }
+}
+
+function Get-InstalledProductCount {
+    param([string]$UpgradeCode)
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $related = Invoke-Com $installer 'RelatedProducts' @($UpgradeCode) 'GetProperty'
+    $n = 0
+    foreach ($p in $related) { $n++ }
+    return $n
+}
+
+# ---------------------------------------------------------------------------------------------
+# Scenarios
+# ---------------------------------------------------------------------------------------------
+function Invoke-InstallUninstall {
+    param($Baseline, $Package)
+    Write-Host '=== Scenario: install / uninstall'
+    Invoke-Msiexec '/i' $Package.Path 'a-install'
+    Test-Installed 'install'
+    $installed = Get-Snapshot 'a-installed'
+    $footprint = Get-Footprint $Baseline $installed
+    Assert-Check 'Install added registry state (journal, classes, Approved)' ($footprint.Count -gt 0) "$($footprint.Count) lines"
+    $hkcuAdded = @($footprint | Where-Object { $_.StartsWith('[HKEY_CURRENT_USER') })
+    Assert-Check 'Machine install wrote nothing to HKCU' ($hkcuAdded.Count -eq 0) "$($hkcuAdded.Count) lines"
+    Stop-ShellSurrogate
+    Invoke-Msiexec '/x' $Package.Path 'a-uninstall'
+    [void]$script:Installed.Remove($Package.Path)
+    Test-Uninstalled 'uninstall'
+    Assert-NoResidue 'after install+uninstall' $Baseline (Get-Snapshot 'a-removed')
+    return , $footprint
+}
+
+function Invoke-Upgrade {
+    param($Baseline, $Package, $Footprint)
+    Write-Host '=== Scenario: major upgrade'
+    $old = $OldMsi
+    $oldNote = 'a real older package'
+    if (-not $old) {
+        $old = Join-Path $WorkDir 'old-0.0.1.msi'
+        if ([version]$Package.Version -le [version]'0.0.1') { throw "Package version $($Package.Version) is too low to synthesise an older package; pass -OldMsi." }
+        New-TestMsi -OutFile $old -Version '0.0.1'
+        $oldNote = 'a synthetic 0.0.1 package built from the same payload'
+    }
+    $oldInfo = Test-MsiPackage $old
+    Assert-Check 'Old package has the same UpgradeCode' ($oldInfo.UpgradeCode -eq $Package.UpgradeCode)
+    Assert-Check 'Old package version is lower' ([version]$oldInfo.Version -lt [version]$Package.Version) "$($oldInfo.Version) vs $($Package.Version)"
+    Write-Host "  upgrading from $oldNote ($($oldInfo.Version))"
+
+    Invoke-Msiexec '/i' $old 'b-install-old'
+    Test-Installed 'old version'
+    Stop-ShellSurrogate
+    Invoke-Msiexec '/i' $Package.Path 'b-upgrade'
+    [void]$script:Installed.Remove($old)
+    Test-Installed 'after upgrade'
+    Assert-Check 'Exactly one product with this UpgradeCode is installed after the upgrade' ((Get-InstalledProductCount $Package.UpgradeCode) -eq 1)
+    if (-not $OldMsi) {
+        Assert-SameFootprint 'upgrade' $Footprint (Get-Footprint $Baseline (Get-Snapshot 'b-upgraded'))
+    }
+    Stop-ShellSurrogate
+    Invoke-Msiexec '/x' $Package.Path 'b-uninstall'
+    [void]$script:Installed.Remove($Package.Path)
+    Test-Uninstalled 'uninstall after upgrade'
+    Assert-NoResidue 'after upgrade+uninstall' $Baseline (Get-Snapshot 'b-removed')
+}
+
+function Invoke-Repair {
+    param($Baseline, $Package, $Footprint)
+    Write-Host '=== Scenario: repair (msiexec /fa)'
+    Invoke-Msiexec '/i' $Package.Path 'c-install'
+    Test-Installed 'before repair'
+    Stop-ShellSurrogate
+    Invoke-Msiexec '/fa' $Package.Path 'c-repair'
+    Test-Installed 'after repair'
+    Assert-SameFootprint 'repair' $Footprint (Get-Footprint $Baseline (Get-Snapshot 'c-repaired'))
+    Stop-ShellSurrogate
+    Invoke-Msiexec '/x' $Package.Path 'c-uninstall'
+    [void]$script:Installed.Remove($Package.Path)
+    Test-Uninstalled 'uninstall after repair'
+    Assert-NoResidue 'after repair+uninstall' $Baseline (Get-Snapshot 'c-removed')
+}
+
+function Invoke-Elevated {
+    $packagePath = $Msi
+    if (-not $packagePath) {
+        $latest = Get-ChildItem -LiteralPath (Join-Path $root 'dist') -Filter 'Thumbwright-*-x64.msi' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $latest) { throw 'No -Msi given and no dist\Thumbwright-*-x64.msi found. Run scripts\release.ps1 first.' }
+        $packagePath = $latest.FullName
+    }
+    $packagePath = (Resolve-Path -LiteralPath $packagePath).Path
+    New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
+    Write-Host "Work directory: $WorkDir"
+
+    $info = Test-MsiPackage $packagePath
+    $package = [pscustomobject]@{ Path = $packagePath; Version = $info.Version; UpgradeCode = $info.UpgradeCode }
+    if (($script:Results | Where-Object { -not $_.Passed }).Count -gt 0) {
+        throw 'The package failed its table checks; not installing it.'
+    }
+
+    # Never run over an existing install: the test uninstalls what it installs.
+    $already = Get-InstalledProductCount $package.UpgradeCode
+    if ($already -gt 0 -or (Test-Path -LiteralPath $script:InstallDir) -or (Test-RegistryKeyExists 'HKLM' 'SOFTWARE\Thumbwright')) {
+        throw 'Thumbwright is already installed or has left files or keys on this machine. Uninstall it (and clean up) first so the baseline is clean.'
+    }
+
+    Write-Host '== Baseline'
+    $baseline = Get-Snapshot 'baseline'
+
+    # The install/uninstall run always goes first: it yields the reference footprint the other
+    # scenarios compare against.
+    $footprint = Invoke-InstallUninstall $baseline $package
+    if ($Scenario -in 'All', 'Upgrade') { Invoke-Upgrade $baseline $package $footprint }
+    if ($Scenario -in 'All', 'Repair') { Invoke-Repair $baseline $package $footprint }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------------------------
+$exitCode = 0
+try {
+    if ($DryRun) {
+        Invoke-DryRun
+    } else {
+        Assert-Elevated
+        Invoke-Elevated
+    }
+} catch {
+    Write-Host ("ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    $exitCode = 1
+} finally {
+    # A failed run must not leave a registered product behind.
+    foreach ($leftover in @($script:Installed)) {
+        Write-Warning "Cleaning up: uninstalling $leftover"
+        Stop-ShellSurrogate
+        Start-Process -FilePath msiexec.exe -Wait -NoNewWindow -ArgumentList @('/x', ('"{0}"' -f $leftover), '/qn', '/norestart') | Out-Null
+    }
+}
+
+$failed = @($script:Results | Where-Object { -not $_.Passed })
+Write-Host ''
+Write-Host ("{0} checks, {1} failed. Work directory: {2}" -f $script:Results.Count, $failed.Count, $WorkDir)
+if ($failed.Count -gt 0) {
+    $failed | ForEach-Object { Write-Host ("FAILED: {0} {1}" -f $_.Name, $_.Detail) -ForegroundColor Red }
+    $exitCode = 1
+}
+exit $exitCode
