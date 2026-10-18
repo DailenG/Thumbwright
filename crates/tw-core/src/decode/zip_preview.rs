@@ -91,6 +91,12 @@ pub fn extract(data: &[u8], ext: &str) -> Result<DynamicImage> {
     extract_with(data, ext, Budget::default())
 }
 
+/// Image entry named (any directory) one of `names` in a ZIP package, under the standard
+/// budget. Lets other decoders reuse the bounded reader for ZIP-wrapped formats.
+pub(super) fn extract_thumbnail(data: &[u8], names: &[&str]) -> Result<DynamicImage> {
+    Archive::open(data, Budget::default())?.by_basename(names)
+}
+
 /// Decompression budget (REQ-SEC-1); tests shrink it.
 #[derive(Clone, Copy, Debug)]
 struct Budget {

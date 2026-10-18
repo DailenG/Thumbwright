@@ -30,6 +30,8 @@ pub enum Decoder {
     Svg = 9,
     /// Windows Imaging Component (OS codecs, C++): HEIF, JPEG XR, AVIF, RAW extension.
     Wic = 10,
+    /// Design/package embedded previews: InDesign, Corel, EPS, Blender, ICNS, Aseprite, Paint.NET.
+    Design = 70,
 }
 
 /// Where a decoder may run (REQ-ISO-2 / REQ-ISO-3).
@@ -45,7 +47,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 10] = [
+    pub const ALL: [Decoder; 11] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -56,6 +58,7 @@ impl Decoder {
         Self::Zip,
         Self::Svg,
         Self::Wic,
+        Self::Design,
     ];
 
     pub fn placement(self) -> Placement {
@@ -85,6 +88,7 @@ impl Decoder {
             Self::Raw => super::raw::extract(data),
             Self::Audio => super::audio::extract(data, ext),
             Self::Zip => super::zip_preview::extract(data, ext),
+            Self::Design => super::design::decode(data, ext),
             Self::Svg => super::svg::render(data, edge),
             #[cfg(windows)]
             Self::Wic => super::wic::decode(data, edge),
@@ -117,6 +121,7 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
         (super::raw::EXTENSIONS, &[Raw, Wic]),
         (super::audio::EXTENSIONS, &[Audio]),
         (super::zip_preview::EXTENSIONS, &[Zip]),
+        (super::design::EXTENSIONS, &[Design]),
     ];
     single
         .iter()
@@ -184,6 +189,7 @@ mod tests {
             .chain(super::super::raw::EXTENSIONS)
             .chain(super::super::audio::EXTENSIONS)
             .chain(super::super::zip_preview::EXTENSIONS)
+            .chain(super::super::design::EXTENSIONS)
         {
             assert!(formats::lookup(ext).is_some(), "{ext} not in matrix");
         }

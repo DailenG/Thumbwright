@@ -847,6 +847,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1064,11 +1070,14 @@ dependencies = [
 name = "tw-core"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "image",
  "jxl-oxide",
  "lofty",
+ "memchr",
  "psd",
  "resvg",
+ "ruzstd",
  "windows",
  "windows-registry",
  "zip",
