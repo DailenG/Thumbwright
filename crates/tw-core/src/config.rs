@@ -29,6 +29,10 @@ pub struct Settings {
     pub disabled_types: Vec<String>,
     /// Menu verb ids the user hid.
     pub hidden_menu_items: Vec<String>,
+    /// Offer "Build thumbnails here" in the folder menu.
+    pub menu_build_here: bool,
+    /// Add a margin around pages of combined PDFs.
+    pub pdf_margin: bool,
     pub verbose_log: bool,
 }
 
@@ -43,6 +47,8 @@ impl Default for Settings {
             menu_preview: MenuPreview::InSubmenu,
             disabled_types: Vec::new(),
             hidden_menu_items: Vec::new(),
+            menu_build_here: true,
+            pdf_margin: false,
             verbose_log: false,
         }
     }
@@ -98,6 +104,8 @@ impl Settings {
             }
             "DisabledTypes" => self.disabled_types = parse_list(v),
             "HiddenMenuItems" => self.hidden_menu_items = parse_list(v),
+            "MenuBuildHere" => self.menu_build_here = parse_bool(v).unwrap_or(true),
+            "PdfMargin" => self.pdf_margin = parse_bool(v).unwrap_or(false),
             "VerboseLog" => self.verbose_log = parse_bool(v).unwrap_or(false),
             _ => {}
         }
