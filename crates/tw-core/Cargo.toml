@@ -13,6 +13,7 @@ workspace = true
 djvu-rs = { version = "0.43.0", default-features = false, features = ["std"] }
 # gzip for .emz/.wmz and Blender (pure-Rust backend, already in the dependency tree via zip).
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = ["std"] }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
 # No `rayon`: a global thread pool would keep running this DLL's code after COM unloads it.
 jxl-oxide = { version = "0.12.6", default-features = false }

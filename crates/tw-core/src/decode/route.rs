@@ -57,6 +57,10 @@ pub enum Decoder {
     Archive = 61,
     /// Apple Live Photo bundle: ZIP holding a HEIC/JPEG still (HEIC needs WIC, so worker).
     Livp = 62,
+    /// Scientific, medical, film, texture and network formats (FITS, DPX, DICOM, XCF, ...).
+    Sci = 40,
+    /// JPEG 2000 via `hayro-jpeg2000` (pure Rust, not cancellable: runs in the worker).
+    J2k = 41,
 }
 
 /// Where a decoder may run (REQ-ISO-2 / REQ-ISO-3).
@@ -72,7 +76,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 22] = [
+    pub const ALL: [Decoder; 24] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -95,6 +99,8 @@ impl Decoder {
         Self::Ebook,
         Self::Archive,
         Self::Livp,
+        Self::Sci,
+        Self::J2k,
     ];
 
     pub fn placement(self) -> Placement {
@@ -107,7 +113,8 @@ impl Decoder {
             | Self::Pdf
             | Self::Metafile
             | Self::Archive
-            | Self::Livp => Placement::Worker,
+            | Self::Livp
+            | Self::J2k => Placement::Worker,
             _ => Placement::InProc,
         }
     }
@@ -146,6 +153,8 @@ impl Decoder {
             Self::Audio => super::audio::extract(data, ext),
             Self::Zip => super::zip_preview::extract(data, ext),
             Self::Design => super::design::decode(data, ext),
+            Self::Sci => super::sci::decode(data, ext),
+            Self::J2k => super::j2k::decode(data, edge),
             Self::Svg => super::svg::render(data, edge),
             Self::Cad => super::cad::decode(data, ext),
             Self::Mesh => super::mesh::decode(data, ext),
@@ -221,6 +230,8 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
         (super::ebook::EXTENSIONS, &[Ebook]),
         (super::archive::EXTENSIONS, &[Archive]),
         (super::livp::EXTENSIONS, &[Livp]),
+        (super::sci::EXTENSIONS, &[Sci]),
+        (super::j2k::EXTENSIONS, &[J2k]),
     ];
     single
         .iter()
@@ -300,6 +311,8 @@ mod tests {
             .chain(super::super::ebook::EXTENSIONS)
             .chain(super::super::archive::EXTENSIONS)
             .chain(super::super::livp::EXTENSIONS)
+            .chain(super::super::sci::EXTENSIONS)
+            .chain(super::super::j2k::EXTENSIONS)
         {
             assert!(formats::lookup(ext).is_some(), "{ext} not in matrix");
         }
@@ -313,6 +326,7 @@ mod tests {
         assert_eq!(Decoder::Video.placement(), Placement::Worker);
         assert_eq!(Decoder::Pdf.placement(), Placement::Worker);
         assert_eq!(Decoder::Metafile.placement(), Placement::Worker);
+        assert_eq!(Decoder::J2k.placement(), Placement::Worker);
         assert_eq!(Decoder::Raster.placement(), Placement::InProc);
         assert_eq!(Decoder::Djvu.placement(), Placement::Worker);
         assert_eq!(Decoder::Ole.placement(), Placement::InProc);
