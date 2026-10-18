@@ -1067,6 +1067,7 @@ dependencies = [
  "image",
  "jxl-oxide",
  "lofty",
+ "miniz_oxide 0.9.1",
  "psd",
  "resvg",
  "windows",

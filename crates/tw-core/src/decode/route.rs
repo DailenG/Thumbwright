@@ -30,6 +30,10 @@ pub enum Decoder {
     Svg = 9,
     /// Windows Imaging Component (OS codecs, C++): HEIF, JPEG XR, AVIF, RAW extension.
     Wic = 10,
+    /// Previews embedded in CAD, slicer and drawing files (G-code, DWG, DXF, CLIP).
+    Cad = 80,
+    /// STL / OBJ / PLY meshes shaded by the software rasteriser (triangle caps, deadline-checked).
+    Mesh = 81,
 }
 
 /// Where a decoder may run (REQ-ISO-2 / REQ-ISO-3).
@@ -45,7 +49,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 10] = [
+    pub const ALL: [Decoder; 12] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -56,6 +60,8 @@ impl Decoder {
         Self::Zip,
         Self::Svg,
         Self::Wic,
+        Self::Cad,
+        Self::Mesh,
     ];
 
     pub fn placement(self) -> Placement {
@@ -86,6 +92,8 @@ impl Decoder {
             Self::Audio => super::audio::extract(data, ext),
             Self::Zip => super::zip_preview::extract(data, ext),
             Self::Svg => super::svg::render(data, edge),
+            Self::Cad => super::cad::decode(data, ext),
+            Self::Mesh => super::mesh::decode(data, ext),
             #[cfg(windows)]
             Self::Wic => super::wic::decode(data, edge),
             #[cfg(not(windows))]
@@ -111,6 +119,8 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
     let single: &'static [(&'static [&'static str], &'static [Decoder])] = &[
         (&["svg", "svgz"], &[Svg]),
         (&["jxl"], &[Jxl]),
+        (super::cad::EXTENSIONS, &[Cad]),
+        (super::mesh::EXTENSIONS, &[Mesh]),
         (super::pcx::EXTENSIONS, &[Pcx]),
         (super::sgi::EXTENSIONS, &[Sgi]),
         (super::psd::EXTENSIONS, &[Psd]),
@@ -184,6 +194,8 @@ mod tests {
             .chain(super::super::raw::EXTENSIONS)
             .chain(super::super::audio::EXTENSIONS)
             .chain(super::super::zip_preview::EXTENSIONS)
+            .chain(super::super::cad::EXTENSIONS)
+            .chain(super::super::mesh::EXTENSIONS)
         {
             assert!(formats::lookup(ext).is_some(), "{ext} not in matrix");
         }
