@@ -728,8 +728,13 @@ impl App {
         s.thumbnails_enabled = is_checked(self.c.thumbs);
         s.use_embedded_thumbs = is_checked(self.c.embedded);
         s.cloud_thumbnails = is_checked(self.c.cloud);
-        s.video_frame_percent =
-            number(self.c.video_pct, PAGE_PREVIEW, "Video thumbnail frame", 0, 100)? as u8;
+        s.video_frame_percent = number(
+            self.c.video_pct,
+            PAGE_PREVIEW,
+            "Video thumbnail frame",
+            0,
+            100,
+        )? as u8;
         s.verbose_log = is_checked(self.c.verbose);
         s.jpeg_quality = number(self.c.jpeg, PAGE_GENERAL, "JPEG quality", 1, 100)? as u8;
         s.png_compression = number(self.c.png, PAGE_GENERAL, "PNG compression level", 0, 9)? as u8;

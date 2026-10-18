@@ -44,6 +44,7 @@ fn over_budget_worker_is_killed_and_reported_as_timeout() {
         worker_exe: worker(),
         max_tier_time: Duration::from_millis(300),
         video_percent: 30,
+        prefer_embedded: true,
     };
     let start = Instant::now();
     let r = engine.thumbnail(Arc::new(slow_svg()), Some("svg"), 1024);

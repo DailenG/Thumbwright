@@ -793,7 +793,8 @@ fn explorer_command_enumerates_the_menu_tree_for_a_png() {
 
 #[test]
 fn explorer_command_follows_menu_order_and_hidden_items() {
-    let _settings = Settings::set("MenuOrder=wallpaper,resize\nHiddenMenuItems=email,settings,copy");
+    let _settings =
+        Settings::set("MenuOrder=wallpaper,resize\nHiddenMenuItems=email,settings,copy");
     let s = Scratch::new("xcmd-order");
     let png = s.file("pic.png", &red_png(8, 8));
     let items = items_for(&png);
@@ -811,9 +812,21 @@ fn explorer_command_follows_menu_order_and_hidden_items() {
             }
         })
         .collect();
-    assert_eq!(&titles[..3], ["Set as wallpaper", "-", "Resize"], "{titles:?}");
-    assert!(!titles.iter().any(|t| t == "Shrink for email" || t == "Copy to clipboard"));
-    assert_eq!(titles.last().map(String::as_str), Some("Settings"), "Settings never hides");
+    assert_eq!(
+        &titles[..3],
+        ["Set as wallpaper", "-", "Resize"],
+        "{titles:?}"
+    );
+    assert!(
+        !titles
+            .iter()
+            .any(|t| t == "Shrink for email" || t == "Copy to clipboard")
+    );
+    assert_eq!(
+        titles.last().map(String::as_str),
+        Some("Settings"),
+        "Settings never hides"
+    );
     assert!(
         titles.windows(2).all(|w| !(w[0] == "-" && w[1] == "-")) && titles[0] != "-",
         "{titles:?}"

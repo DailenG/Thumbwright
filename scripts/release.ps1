@@ -5,8 +5,8 @@
 
 .DESCRIPTION
     1. cargo xtask licenses --check and cargo build --release --workspace --locked
-    2. Collects thumbwright_shell.dll, tw-worker.exe, twctl.exe (and thumbwright-settings.exe when
-       the build produced it), LICENSE and THIRD_PARTY_LICENSES.md into dist\ (cleaned first)
+    2. Collects thumbwright_shell.dll, tw-worker.exe, twctl.exe, thumbwright-settings.exe, LICENSE
+       and THIRD_PARTY_LICENSES.md into dist\ (cleaned first); a missing binary fails the release
     3. Signs the binaries (REQ-SEC-4, issue #1), then verifies every signature
     4. Builds dist\Thumbwright-<version>-x64.msi from the signed payload (packaging\wix)
     5. Signs the MSI, then verifies it
@@ -202,10 +202,7 @@ if (Test-Path -LiteralPath $dist) {
 }
 New-Item -ItemType Directory -Path $dist | Out-Null
 
-$binaries = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe')
-if (Test-Path -LiteralPath (Join-Path $releaseDir 'thumbwright-settings.exe')) {
-    $binaries += 'thumbwright-settings.exe'
-}
+$binaries = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe', 'thumbwright-settings.exe')
 foreach ($name in $binaries) {
     $src = Join-Path $releaseDir $name
     if (-not (Test-Path -LiteralPath $src)) { throw "Release build did not produce $src" }

@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(&*ordered(raw, true), raw);
         assert_eq!(&*ordered(raw, false), &[Decoder::Wic, Decoder::Raw]);
         // Nothing else could decode these, so the setting cannot change them.
-        for ext in ["crw", "psd", "docx", "png"] {
+        for ext in ["psd", "docx", "png"] {
             let chain = chain_for_ext(ext);
             if !chain.is_empty() {
                 assert_eq!(&*ordered(chain, false), chain, "{ext}");

@@ -71,8 +71,7 @@ fn paths(items: Option<&IShellItemArray>) -> Option<Vec<PathBuf>> {
 /// items on a multi-selection drop out, Settings never hides, and separators collapse (none
 /// leading, trailing or doubled), as the classic menu builds it.
 fn visible_flags(settings: &Settings, single: bool, nodes: &[&'static Node]) -> Vec<bool> {
-    let hidden =
-        |id: &str| id != SETTINGS_ID && settings.hidden_menu_items.iter().any(|h| h == id);
+    let hidden = |id: &str| id != SETTINGS_ID && settings.hidden_menu_items.iter().any(|h| h == id);
     let mut flags = vec![false; nodes.len()];
     let mut pending_separator = None;
     let mut any = false;

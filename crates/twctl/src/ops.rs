@@ -186,7 +186,8 @@ fn isolated_edge(decoder: Decoder) -> Option<u32> {
         Decoder::Pdf | Decoder::Metafile | Decoder::OleMetafile | Decoder::Djvu => {
             Some(VECTOR_EDGE)
         }
-        Decoder::J2k | Decoder::Wic => Some(RASTER_EDGE),
+        Decoder::J2k | Decoder::Wic | Decoder::Livp => Some(RASTER_EDGE),
+        Decoder::Archive => Some(VECTOR_EDGE),
         Decoder::Audio | Decoder::Video => Some(COVER_ART_EDGE),
         _ => None,
     }
@@ -240,11 +241,10 @@ pub fn encode_with_exif(
     match format {
         ImageFormat::Jpeg => {
             let rgb = img.to_rgb8();
-            let mut enc =
-                JpegEncoder::new_with_quality(
-                    &mut out,
-                    quality.unwrap_or(defaults().jpeg_quality).clamp(1, 100),
-                );
+            let mut enc = JpegEncoder::new_with_quality(
+                &mut out,
+                quality.unwrap_or(defaults().jpeg_quality).clamp(1, 100),
+            );
             match normalised {
                 Some(e) if e.len() <= MAX_JPEG_EXIF => {
                     enc.set_exif_metadata(e).map_err(|e| e.to_string())?;
@@ -993,6 +993,15 @@ mod tests {
     }
 
     #[test]
+    fn every_worker_placed_decoder_but_svg_is_isolated_in_conversions() {
+        use tw_core::decode::route::Placement;
+        for d in Decoder::ALL {
+            let worker = d.placement() == Placement::Worker && d != Decoder::Svg;
+            assert_eq!(isolated_edge(d).is_some(), worker, "{d:?}");
+        }
+    }
+
+    #[test]
     fn conversion_defaults_follow_the_settings() {
         let s = Settings {
             jpeg_quality: 55,
@@ -1009,7 +1018,10 @@ mod tests {
             }
         );
         let d = Defaults::from(&Settings::default());
-        assert_eq!((d.jpeg_quality, d.png_compression, d.prefer_embedded), (90, 9, true));
+        assert_eq!(
+            (d.jpeg_quality, d.png_compression, d.prefer_embedded),
+            (90, 9, true)
+        );
         use image::codecs::png::CompressionType;
         assert!(matches!(png_compression(0), CompressionType::Uncompressed));
         assert!(matches!(png_compression(6), CompressionType::Level(6)));
@@ -1032,7 +1044,12 @@ mod tests {
             out
         };
         let (stored, best) = (png(0), png(9));
-        assert!(best.len() < stored.len(), "{} vs {}", best.len(), stored.len());
+        assert!(
+            best.len() < stored.len(),
+            "{} vs {}",
+            best.len(),
+            stored.len()
+        );
         assert_eq!(decode_as("png", &stored).to_rgb8(), img.to_rgb8());
         assert_eq!(decode_as("png", &best).to_rgb8(), img.to_rgb8());
     }

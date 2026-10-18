@@ -401,7 +401,13 @@ fn run(cli: &Cli) -> Result<String> {
                 if let Some(n) = r.note {
                     notes.lock().unwrap_or_else(|e| e.into_inner()).push(n);
                 }
-                ops::write_new_like(f, " (edited)", &r.ext, &r.bytes, settings.preserve_file_date)
+                ops::write_new_like(
+                    f,
+                    " (edited)",
+                    &r.ext,
+                    &r.bytes,
+                    settings.preserve_file_date,
+                )
             });
             let mut notes = notes.into_inner().unwrap_or_else(|e| e.into_inner());
             notes.sort();

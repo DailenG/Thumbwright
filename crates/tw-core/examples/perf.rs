@@ -520,14 +520,16 @@ fn anatomy(exe: &Path, iters: usize) {
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let writer = std::thread::scope(|s| {
-            s.spawn(|| protocol::write_request(
+            s.spawn(|| {
+                protocol::write_request(
                     &mut stdin,
                     d,
                     edge,
                     tw_core::limits::DEFAULT_VIDEO_PERCENT,
                     ext,
                     data,
-                ));
+                )
+            });
             protocol::read_response(&mut stdout, edge)
         });
         writer.unwrap().unwrap();
