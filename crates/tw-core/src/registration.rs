@@ -17,10 +17,17 @@
 //! unregistration, leaves them empty; every unregistration therefore also deletes the
 //! journal key and the product key below it when they are empty (settings in the product
 //! key keep it alive).
+//!
+//! Toggling one file type (REQ-REG-3: `register_extension`, `unregister_extension`,
+//! `sync_extensions`) uses the same journal: it appends to it, or undoes exactly the entries
+//! below that extension's two roots plus any shared parent that becomes empty. Everything
+//! else stays journaled, so a later full `unregister` still leaves zero product keys.
 
 use std::path::Path;
 
-use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_INVALID_DATA};
+use windows::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER, ERROR_NOT_FOUND,
+};
 use windows::Win32::System::Registry::{HKEY, RegDeleteKeyW};
 use windows::core::HSTRING;
 use windows_registry::{CURRENT_USER, Key, LOCAL_MACHINE, Type};
@@ -225,6 +232,27 @@ impl<'a> Recorder<'a> {
         Ok(rec)
     }
 
+    /// Reopens the journal of an existing registration to append more steps after its
+    /// last entry. Fails if there is no complete registration or the journal is corrupt.
+    fn resume(root: &'a Key, manifest: &str) -> Result<Self> {
+        let journal = root.options().read().write().open(manifest)?;
+        if journal.get_string(DLL_PATH_VALUE).is_err() {
+            return Err(windows::core::Error::new(
+                ERROR_NOT_FOUND.to_hresult(),
+                "Thumbwright is not registered in this scope",
+            ));
+        }
+        let next = read_indexed_journal(&journal)?
+            .last()
+            .map_or(0, |&(index, ..)| index as usize + 1);
+        Ok(Self {
+            root,
+            journal,
+            next,
+            report: Report::default(),
+        })
+    }
+
     /// Durably appends `line` to the journal; callers mutate only after this succeeds.
     fn log(&mut self, line: &str) -> Result<()> {
         self.journal.set_string(journal_name(self.next), line)?;
@@ -289,13 +317,8 @@ pub fn register(layout: &Layout, plan: &Plan) -> Result<Report> {
     let dll = plan.dll_path.to_string_lossy().into_owned();
     let mut rec = Recorder::start(layout.root, &layout.manifest_key(), &dll)?;
     register_class(&mut rec, layout, ids::CLSID_THUMBNAIL, &dll)?;
-    let thumb = ids::CLSID_THUMBNAIL.braced();
     for ext in &plan.extensions {
-        for base in [format!(".{ext}"), format!("SystemFileAssociations\\.{ext}")] {
-            let path =
-                layout.classes_path(&format!("{base}\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}"));
-            rec.set_string(&path, "", &thumb)?;
-        }
+        register_thumbnail_ext(&mut rec, layout, ext)?;
     }
     if plan.context_menu {
         register_class(&mut rec, layout, ids::CLSID_CONTEXT_MENU, &dll)?;
@@ -311,9 +334,190 @@ pub fn register(layout: &Layout, plan: &Plan) -> Result<Report> {
     Ok(rec.report)
 }
 
-/// Every journal entry with its value name, oldest first. Any value other than `DllPath`
-/// that is not a well-formed REG_SZ entry is corruption.
-fn read_journal(journal: &Key) -> Result<Vec<(String, Step)>> {
+/// Registry paths below `layout.classes` under which `ext`'s two thumbnail-handler keys
+/// live: the extension key itself and its `SystemFileAssociations` twin (REQ-REG-1).
+fn ext_roots(layout: &Layout, ext: &str) -> [String; 2] {
+    [
+        layout.classes_path(&format!(".{ext}")),
+        layout.classes_path(&format!("SystemFileAssociations\\.{ext}")),
+    ]
+}
+
+/// Writes the thumbnail handler value at both of `ext`'s locations, journaling first.
+fn register_thumbnail_ext(rec: &mut Recorder, layout: &Layout, ext: &str) -> Result<()> {
+    let thumb = ids::CLSID_THUMBNAIL.braced();
+    for root in ext_roots(layout, ext) {
+        rec.set_string(
+            &format!("{root}\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}"),
+            "",
+            &thumb,
+        )?;
+    }
+    Ok(())
+}
+
+/// An extension becomes part of a registry path, so it must be a plain token: no
+/// separators, wildcards or dots that would address a different key.
+fn check_ext(ext: &str) -> Result<()> {
+    let plain = !ext.is_empty()
+        && ext.len() <= 32
+        && ext
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+' | b'~'));
+    if plain {
+        Ok(())
+    } else {
+        Err(windows::core::Error::new(
+            ERROR_INVALID_PARAMETER.to_hresult(),
+            format!("invalid file extension {ext:?}"),
+        ))
+    }
+}
+
+/// True when `path` is `root` or lies below it (registry paths compare case-insensitively).
+fn is_at_or_under(path: &str, root: &str) -> bool {
+    path.get(..root.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(root))
+        && (path.len() == root.len() || path.as_bytes()[root.len()] == b'\\')
+}
+
+/// True when `ancestor` is a proper ancestor key of `path`.
+fn is_proper_ancestor(ancestor: &str, path: &str) -> bool {
+    path.len() > ancestor.len() && is_at_or_under(path, ancestor)
+}
+
+/// Registers the thumbnail handler for one more extension on top of an existing
+/// registration (REQ-REG-3). Exactly its two handler keys, plus any missing parent keys,
+/// are created and journaled; the extension's default value is never touched. Fails when
+/// the engine has no registration in this layout: there is nothing for the handler to
+/// point at. Broadcasts `SHCNE_ASSOCCHANGED` when `layout.notify` is set.
+pub fn register_extension(layout: &Layout, ext: &str) -> Result<Report> {
+    let result = add_extension(layout, ext);
+    if layout.notify {
+        notify_assoc_changed();
+    }
+    result
+}
+
+fn add_extension(layout: &Layout, ext: &str) -> Result<Report> {
+    check_ext(ext)?;
+    let mut rec = Recorder::resume(layout.root, &layout.manifest_key())?;
+    register_thumbnail_ext(&mut rec, layout, ext)?;
+    Ok(rec.report)
+}
+
+/// Removes `ext`'s thumbnail handler keys: undoes exactly the journal entries below its two
+/// roots, newest first, then deletes the shared parents (such as `SystemFileAssociations`)
+/// this engine created if nothing else lives in them any more. Entries of other extensions
+/// and of the classes stay journaled. Extensions with no journaled entries are a no-op.
+/// Broadcasts `SHCNE_ASSOCCHANGED` when `layout.notify` is set.
+pub fn unregister_extension(layout: &Layout, ext: &str) -> Result<Report> {
+    let result = remove_extension(layout, ext);
+    if layout.notify {
+        notify_assoc_changed();
+    }
+    result
+}
+
+fn remove_extension(layout: &Layout, ext: &str) -> Result<Report> {
+    check_ext(ext)?;
+    let mut report = Report::default();
+    let journal = match layout
+        .root
+        .options()
+        .read()
+        .write()
+        .open(layout.manifest_key())
+    {
+        Ok(key) => key,
+        Err(e) if is_not_found(&e) => return Ok(report),
+        Err(e) => return Err(e),
+    };
+    let entries = read_indexed_journal(&journal)?;
+    let roots = ext_roots(layout, ext);
+    let own = |step: &Step| match step {
+        Step::Key(path) | Step::NewValue { path, .. } | Step::OldValue { path, .. } => {
+            roots.iter().any(|r| is_at_or_under(path, r))
+        }
+    };
+    let mut first_err = None;
+    for (_, name, step) in entries.iter().rev().filter(|(.., step)| own(step)) {
+        let done = match undo(layout.root, step, &mut report) {
+            Ok(Undo::Done) => true,
+            // As in `unregister`: after a failure a kept key may hold the failed step's value.
+            Ok(Undo::Kept) => first_err.is_none(),
+            Err(e) => {
+                first_err = first_err.or(Some(e));
+                false
+            }
+        };
+        if done && let Err(e) = journal.remove_value(name) {
+            first_err = first_err.or(Some(e));
+        }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    // Parents we created that only this extension needed, deepest first.
+    for (_, name, step) in entries.iter().rev() {
+        if let Step::Key(path) = step
+            && roots.iter().any(|r| is_proper_ancestor(path, r))
+            && let Undo::Done = remove_created_key(layout.root, path, &mut report)?
+        {
+            journal.remove_value(name)?;
+        }
+    }
+    Ok(report)
+}
+
+/// True when both of `ext`'s thumbnail-handler keys point at this product's thumbnail class.
+pub fn extension_registered(layout: &Layout, ext: &str) -> bool {
+    if check_ext(ext).is_err() {
+        return false;
+    }
+    let thumb = ids::CLSID_THUMBNAIL.braced();
+    ext_roots(layout, ext).iter().all(|root| {
+        layout
+            .root
+            .open(format!("{root}\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}"))
+            .and_then(|key| key.get_string(""))
+            .is_ok_and(|v| v.eq_ignore_ascii_case(&thumb))
+    })
+}
+
+/// Makes the registered set match `enabled` within `universe` (every extension the product
+/// can register): missing ones are added, registered ones that are not enabled are removed,
+/// extensions outside `universe` are left alone. One `SHCNE_ASSOCCHANGED` broadcast covers
+/// all changes. Needs an existing registration only when something must be added.
+pub fn sync_extensions(layout: &Layout, enabled: &[&str], universe: &[&str]) -> Result<Report> {
+    let mut total = Report::default();
+    let mut changed = false;
+    let result = universe.iter().try_for_each(|ext| {
+        let want = enabled.contains(ext);
+        if want == extension_registered(layout, ext) {
+            return Ok(());
+        }
+        changed = true;
+        let step = if want {
+            add_extension(layout, ext)?
+        } else {
+            remove_extension(layout, ext)?
+        };
+        total.keys_created += step.keys_created;
+        total.values_written += step.values_written;
+        total.keys_removed += step.keys_removed;
+        total.values_restored += step.values_restored;
+        Ok(())
+    });
+    if changed && layout.notify {
+        notify_assoc_changed();
+    }
+    result.map(|()| total)
+}
+
+/// Every journal entry with its index and value name, oldest first. Any value other than
+/// `DllPath` that is not a well-formed REG_SZ entry is corruption.
+fn read_indexed_journal(journal: &Key) -> Result<Vec<(u64, String, Step)>> {
     let mut entries = Vec::new();
     for (name, value) in journal.values()? {
         if name.eq_ignore_ascii_case(DLL_PATH_VALUE) {
@@ -337,7 +541,12 @@ fn read_journal(journal: &Key) -> Result<Vec<(String, Step)>> {
         }
     }
     entries.sort_by_key(|&(index, ..)| index);
-    Ok(entries
+    Ok(entries)
+}
+
+/// Every journal entry with its value name, oldest first.
+fn read_journal(journal: &Key) -> Result<Vec<(String, Step)>> {
+    Ok(read_indexed_journal(journal)?
         .into_iter()
         .map(|(_, name, step)| (name, step))
         .collect())
@@ -877,6 +1086,206 @@ mod tests {
         let product = CURRENT_USER.open(&sb.layout.product).unwrap();
         assert_eq!(product.get_u32("MaxFileMb").unwrap(), 64);
         assert!(CURRENT_USER.open(sb.layout.manifest_key()).is_err());
+    }
+
+    fn plan_for<'a>(dll: &'a Path, extensions: &[&'a str]) -> Plan<'a> {
+        Plan {
+            dll_path: dll,
+            extensions: extensions.to_vec(),
+            context_menu: true,
+        }
+    }
+
+    fn dll() -> PathBuf {
+        PathBuf::from(r"C:\x\thumbwright_shell.dll")
+    }
+
+    /// Key paths (entries without a value part) of a snapshot.
+    fn keys(snapshot: &[String]) -> Vec<&String> {
+        snapshot.iter().filter(|l| !l.contains('|')).collect()
+    }
+
+    #[test]
+    fn extension_toggle_adds_and_removes_exactly_its_two_handler_keys() {
+        let sb = Sandbox::new("toggle");
+        sb.seed_user_state();
+        register(&sb.layout, &plan_for(&dll(), &["png"])).unwrap();
+        let before = sb.snapshot();
+        assert!(!extension_registered(&sb.layout, "tga"));
+
+        let added = register_extension(&sb.layout, "tga").unwrap();
+        assert!(extension_registered(&sb.layout, "tga"));
+        let after = sb.snapshot();
+        let new_keys: Vec<&String> = keys(&after)
+            .into_iter()
+            .filter(|k| !keys(&before).contains(k))
+            .collect();
+        let handler = format!("shellex\\{THUMBNAIL_HANDLER_CATEGORY}");
+        let leaves = new_keys.iter().filter(|k| k.ends_with(&handler)).count();
+        assert_eq!(leaves, 2, "exactly two handler keys: {new_keys:?}");
+        let want = [
+            "\\Classes\\.tga".to_string(),
+            format!("\\Classes\\.tga\\{handler}"),
+            "\\Classes\\SystemFileAssociations\\.tga".to_string(),
+            format!("\\Classes\\SystemFileAssociations\\.tga\\{handler}"),
+        ];
+        for key in &want {
+            assert!(new_keys.contains(&key), "{key} missing from {new_keys:?}");
+        }
+        assert!(
+            new_keys.iter().all(|k| k.contains(".tga")),
+            "only .tga keys are added: {new_keys:?}"
+        );
+        assert_eq!(added.keys_created, 6);
+        assert_eq!(sb.get(".tga"), None, "no default value is written");
+        assert_eq!(status(&sb.layout).unwrap().thumbnail_extensions, 2);
+
+        let removed = unregister_extension(&sb.layout, "tga").unwrap();
+        assert_eq!(removed.keys_removed, 6);
+        assert!(!extension_registered(&sb.layout, "tga"));
+        assert!(extension_registered(&sb.layout, "png"));
+        assert_eq!(
+            sb.snapshot(),
+            before,
+            "keys, values and journal are exactly as before the toggle"
+        );
+    }
+
+    #[test]
+    fn extension_toggle_restores_foreign_handler_and_keeps_other_extensions() {
+        let sb = Sandbox::new("toggle-foreign");
+        sb.seed_user_state();
+        let pristine = sb.snapshot();
+        register(&sb.layout, &plan_for(&dll(), &["png", "svg"])).unwrap();
+
+        unregister_extension(&sb.layout, "svg").unwrap();
+        let svg_handler = format!(".svg\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}");
+        assert_eq!(sb.get(&svg_handler).as_deref(), Some("{FOREIGN}"));
+        assert_eq!(
+            sb.get(&format!(
+                "SystemFileAssociations\\.svg\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}"
+            )),
+            None
+        );
+        assert!(extension_registered(&sb.layout, "png"));
+        assert!(!extension_registered(&sb.layout, "svg"));
+        assert_eq!(status(&sb.layout).unwrap().thumbnail_extensions, 1);
+
+        register_extension(&sb.layout, "svg").unwrap();
+        assert!(extension_registered(&sb.layout, "svg"));
+        unregister_extension(&sb.layout, "svg").unwrap();
+        // The journal must still describe everything left, so a full unregister is clean.
+        unregister(&sb.layout).unwrap();
+        assert_eq!(sb.snapshot(), pristine);
+    }
+
+    #[test]
+    fn removing_the_last_extension_deletes_the_systemfileassociations_parent_we_created() {
+        let sb = Sandbox::new("toggle-parent");
+        let pristine = sb.snapshot();
+        register(&sb.layout, &plan_for(&dll(), &["png", "tga"])).unwrap();
+        let sfa = format!("{}\\Classes\\SystemFileAssociations", sb.base);
+        unregister_extension(&sb.layout, "png").unwrap();
+        assert!(
+            CURRENT_USER.open(&sfa).is_ok(),
+            "tga still needs the parent"
+        );
+        unregister_extension(&sb.layout, "tga").unwrap();
+        assert!(
+            CURRENT_USER.open(&sfa).is_err(),
+            "parent goes with its last child"
+        );
+        assert!(
+            status(&sb.layout).is_some(),
+            "the registration itself stays"
+        );
+        unregister(&sb.layout).unwrap();
+        assert_eq!(sb.snapshot(), pristine);
+    }
+
+    #[test]
+    fn extension_toggle_keeps_foreign_content_below_the_extension_key() {
+        let sb = Sandbox::new("toggle-keep");
+        register(&sb.layout, &plan_for(&dll(), &["png"])).unwrap();
+        register_extension(&sb.layout, "tga").unwrap();
+        CURRENT_USER
+            .create(format!("{}\\Classes\\.tga", sb.base))
+            .unwrap()
+            .set_string("", "tgafile")
+            .unwrap();
+        unregister_extension(&sb.layout, "tga").unwrap();
+        assert_eq!(sb.get(".tga").as_deref(), Some("tgafile"));
+        assert!(!extension_registered(&sb.layout, "tga"));
+        unregister(&sb.layout).unwrap();
+        assert_eq!(sb.get(".tga").as_deref(), Some("tgafile"));
+    }
+
+    #[test]
+    fn extension_toggle_rejects_bad_input_without_writing() {
+        let sb = Sandbox::new("toggle-bad");
+        let pristine = sb.snapshot();
+        // Nothing registered: there is no class for the handler to point at.
+        assert!(register_extension(&sb.layout, "png").is_err());
+        assert_eq!(
+            unregister_extension(&sb.layout, "png").unwrap(),
+            Report::default()
+        );
+        assert_eq!(sb.snapshot(), pristine);
+
+        register(&sb.layout, &plan_for(&dll(), &[])).unwrap();
+        let registered = sb.snapshot();
+        for bad in ["", "a\\b", "x/y", ".png", "..", "*", &"a".repeat(33)] {
+            assert!(register_extension(&sb.layout, bad).is_err(), "{bad:?}");
+            assert!(unregister_extension(&sb.layout, bad).is_err(), "{bad:?}");
+            assert!(!extension_registered(&sb.layout, bad));
+        }
+        assert_eq!(sb.snapshot(), registered);
+    }
+
+    #[test]
+    fn sync_extensions_reconciles_and_is_idempotent() {
+        let sb = Sandbox::new("sync");
+        register(&sb.layout, &plan_for(&dll(), &["png"])).unwrap();
+        let universe = ["png", "svg", "tga", "bmp"];
+        sync_extensions(&sb.layout, &["svg", "tga"], &universe).unwrap();
+        let on: Vec<bool> = universe
+            .iter()
+            .map(|e| extension_registered(&sb.layout, e))
+            .collect();
+        assert_eq!(on, [false, true, true, false]);
+        let settled = sb.snapshot();
+        assert_eq!(
+            sync_extensions(&sb.layout, &["svg", "tga"], &universe).unwrap(),
+            Report::default()
+        );
+        assert_eq!(sb.snapshot(), settled);
+        // An extension outside the universe is not this call's business.
+        sync_extensions(&sb.layout, &[], &["svg"]).unwrap();
+        assert!(extension_registered(&sb.layout, "tga"));
+        assert!(!extension_registered(&sb.layout, "svg"));
+    }
+
+    #[test]
+    fn crash_during_extension_registration_is_fully_undone_by_unregister() {
+        let (first, last) = {
+            let sb = Sandbox::new("xcount");
+            register(&sb.layout, &plan_for(&dll(), &["png"])).unwrap();
+            let first = sb.journal_len();
+            register_extension(&sb.layout, "tga").unwrap();
+            (first, sb.journal_len())
+        };
+        assert!(last > first);
+        for n in first + 1..=last {
+            let sb = Sandbox::new("xcrash");
+            let pristine = sb.snapshot();
+            register(&sb.layout, &plan_for(&dll(), &["png"])).unwrap();
+            CRASH_AFTER.set(Some(n));
+            let crashed = register_extension(&sb.layout, "tga");
+            CRASH_AFTER.set(None);
+            assert!(crashed.is_err(), "crash point {n} not reached");
+            unregister(&sb.layout).unwrap();
+            assert_eq!(sb.snapshot(), pristine, "crash after {n} journal entries");
+        }
     }
 
     #[test]
