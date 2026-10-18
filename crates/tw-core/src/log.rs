@@ -1,6 +1,7 @@
 //! Shared append-only diagnostics log at `%LOCALAPPDATA%\Thumbwright.log`
 //! (FUNCTIONAL_SPEC.md 3.6). Each process writes a header line on its first entry.
-//! Logging never fails the caller.
+//! Logging never fails the caller. Failures are always logged; with `VerboseLog=1` the
+//! shell DLL also traces each successful request via [`verbose`].
 
 use std::io::Write;
 use std::sync::{LazyLock, Mutex, OnceLock};
@@ -53,4 +54,12 @@ pub fn error(msg: &str) {
 
 pub fn info(msg: &str) {
     write_line("INFO", msg);
+}
+
+/// A `VerboseLog=1` trace of a successful request. `line` runs only when `enabled`, so a
+/// disabled log costs one branch and no formatting.
+pub fn verbose(enabled: bool, line: impl FnOnce() -> String) {
+    if enabled {
+        write_line("TRACE", &line());
+    }
 }

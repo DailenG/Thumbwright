@@ -280,6 +280,13 @@ fn memory_limit(decoder: Decoder, input_len: usize) -> u64 {
     }
 }
 
+/// A worker request's result plus the process that served it.
+pub struct Run {
+    /// Process id of the worker; `None` when no worker could be started.
+    pub pid: Option<u32>,
+    pub result: Result<Thumbnail>,
+}
+
 /// Runs `decoder` in a worker process used for this request only. Never blocks longer than
 /// `timeout` (plus process teardown); a worker that crashes, exceeds a job limit or sends an
 /// invalid response yields `Malformed`; a timeout yields `Timeout`. The budget starts once
@@ -294,6 +301,19 @@ pub fn run(
     param: u8,
     timeout: Duration,
 ) -> Result<Thumbnail> {
+    run_reporting(exe, decoder, ext, data, edge, param, timeout).result
+}
+
+/// [`run`], also reporting the worker's process id (diagnostics log).
+pub fn run_reporting(
+    exe: &Path,
+    decoder: Decoder,
+    ext: &str,
+    data: Arc<Vec<u8>>,
+    edge: u32,
+    param: u8,
+    timeout: Duration,
+) -> Run {
     let prespawn = PRESPAWN.load(Ordering::Relaxed);
     let memory = memory_limit(decoder, data.len());
     let reused = if prespawn {
@@ -307,10 +327,20 @@ pub fn run(
     } else {
         None
     };
-    let Worker { mut child, job } = match reused {
-        Some(w) => w,
-        None => Worker::spawn(exe, memory)?,
+    let worker = match reused {
+        Some(w) => Ok(w),
+        None => Worker::spawn(exe, memory),
     };
+    let Worker { mut child, job } = match worker {
+        Ok(w) => w,
+        Err(e) => {
+            return Run {
+                pid: None,
+                result: Err(e),
+            };
+        }
+    };
+    let pid = child.id();
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -344,7 +374,10 @@ pub fn run(
     let _ = child.wait();
     let _ = writer.join();
     let _ = reader.join();
-    outcome
+    Run {
+        pid: Some(pid),
+        result: outcome,
+    }
 }
 
 #[cfg(test)]

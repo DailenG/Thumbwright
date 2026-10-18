@@ -80,6 +80,10 @@ The script runs the dependency audit, `cargo build --release --workspace --locke
 - `upload <file...> [--copy] [--confirm]`, `upload-hosts [--open]`, `upload-history`: HTTPS POST to the hosts in `upload-hosts.conf` (spec 10.3) through WinHTTP. Nothing is sent without an explicit upload command; the menu verb asks first with Cancel as the default button.
 - `--mcp`: MCP server over stdio exposing the CLI's operations plus `view`.
 
+## Diagnostics log
+
+All components append to `%LOCALAPPDATA%\Thumbwright.log`. Failures are always logged (`ERROR GetThumbnail: failed ... ext=<ext> size=<bytes>`). With "Verbose logging" on in the settings window (`VerboseLog=1`), the shell DLL also logs one `TRACE` line per successful request: the class (`thumbnail`, `cloud`, `preview`, `property`, `menu`), the file extension (never the path), the requested size, the decoder that produced the result with its position in the routed chain (`attempt`), the `tw-worker.exe` pid (`-` for an in-process tier), elapsed milliseconds and the output size. Example: `TRACE GetThumbnail: ok class=thumbnail ext=svg size=112 req=256 decoder=Svg attempt=1 worker_pid=4812 ms=21 out=256x128`. With the setting off nothing is formatted or written.
+
 ## Clean-room rules
 
 This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, official Microsoft documentation and permissively licensed crate sources. Do not consult the reference product's binaries or source. The reference product is deliberately not named in this repository. See `docs/history/REVIEW_HANDOFF.md` section 1.

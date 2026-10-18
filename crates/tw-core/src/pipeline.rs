@@ -31,6 +31,30 @@ pub fn pin_this_module() {
     };
 }
 
+/// Which tier produced a thumbnail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trace {
+    pub decoder: Decoder,
+    /// 1-based position in the routed chain; above 1 means earlier tiers fell through.
+    pub attempt: usize,
+    /// The worker process that ran the tier; `None` for an in-process tier.
+    pub worker_pid: Option<u32>,
+}
+
+impl std::fmt::Display for Trace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "decoder={:?} attempt={} worker_pid=",
+            self.decoder, self.attempt
+        )?;
+        match self.worker_pid {
+            Some(pid) => write!(f, "{pid}"),
+            None => f.write_str("-"),
+        }
+    }
+}
+
 pub struct Engine {
     /// `tw-worker.exe`, expected next to the DLL.
     pub worker_exe: PathBuf,
@@ -66,31 +90,55 @@ impl Engine {
 
     /// Produces a thumbnail whose longer edge is at most `edge`.
     pub fn thumbnail(&self, data: Arc<Vec<u8>>, ext: Option<&str>, edge: u32) -> Result<Thumbnail> {
+        self.thumbnail_traced(data, ext, edge).map(|(t, _)| t)
+    }
+
+    /// [`thumbnail`](Self::thumbnail), also reporting which tier produced the result
+    /// (diagnostics log).
+    pub fn thumbnail_traced(
+        &self,
+        data: Arc<Vec<u8>>,
+        ext: Option<&str>,
+        edge: u32,
+    ) -> Result<(Thumbnail, Trace)> {
         let head = &data[..data.len().min(4096)];
         let chain = route::ordered(route::plan(ext, head), self.prefer_embedded);
         let ext = ext.unwrap_or("").to_owned();
         let mut last = DecodeError::Unsupported;
-        for &decoder in chain.iter() {
-            let result = match decoder.placement() {
-                Placement::InProc => run_inproc(
-                    decoder,
-                    data.clone(),
-                    &ext,
-                    edge,
-                    limits::INPROC_DECODE_TIMEOUT.min(self.max_tier_time),
+        for (index, &decoder) in chain.iter().enumerate() {
+            let (result, worker_pid) = match decoder.placement() {
+                Placement::InProc => (
+                    run_inproc(
+                        decoder,
+                        data.clone(),
+                        &ext,
+                        edge,
+                        limits::INPROC_DECODE_TIMEOUT.min(self.max_tier_time),
+                    ),
+                    None,
                 ),
-                Placement::Worker => crate::worker::run(
-                    &self.worker_exe,
-                    decoder,
-                    &ext,
-                    data.clone(),
-                    edge,
-                    self.video_percent,
-                    crate::worker::budget(decoder).min(self.max_tier_time),
-                ),
+                Placement::Worker => {
+                    let run = crate::worker::run_reporting(
+                        &self.worker_exe,
+                        decoder,
+                        &ext,
+                        data.clone(),
+                        edge,
+                        self.video_percent,
+                        crate::worker::budget(decoder).min(self.max_tier_time),
+                    );
+                    (run.result, run.pid)
+                }
             };
             match result {
-                Ok(t) => return Ok(t),
+                Ok(t) => {
+                    let trace = Trace {
+                        decoder,
+                        attempt: index + 1,
+                        worker_pid,
+                    };
+                    return Ok((t, trace));
+                }
                 Err(e) if e.falls_through() => last = e,
                 Err(e) => return Err(e),
             }

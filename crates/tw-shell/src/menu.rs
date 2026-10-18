@@ -11,7 +11,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
     E_FAIL, E_INVALIDARG, E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM,
@@ -45,6 +45,7 @@ use windows::core::{HRESULT, PCWSTR, PSTR, PWSTR, Ref, Result, implement};
 
 use tw_core::config::{MenuPreview, Settings};
 use tw_core::ids;
+use tw_core::log;
 
 use crate::ModuleRef;
 
@@ -1055,6 +1056,7 @@ impl IContextMenu3_Impl for ContextMenu_Impl {
 const CMDLINE_BUDGET: usize = 30_000;
 
 pub(crate) fn launch(verb: &Verb, files: &[PathBuf], _hwnd: HWND) -> Result<()> {
+    let started = Instant::now();
     let exe = crate::install_dir().join(ids::CTL_EXE_NAME);
     let mut cmd = std::process::Command::new(exe);
     cmd.args(verb.args).arg("--notify");
@@ -1080,10 +1082,25 @@ pub(crate) fn launch(verb: &Verb, files: &[PathBuf], _hwnd: HWND) -> Result<()> 
     } else {
         cmd.args(files);
     }
-    cmd.creation_flags(CREATE_NO_WINDOW.0)
+    let child = cmd
+        .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()
-        .map(|_| ())
-        .map_err(|_| E_FAIL.into())
+        .map_err(|_| E_FAIL)?;
+    log::verbose(Settings::load(&crate::install_dir()).verbose_log, || {
+        let ext = files
+            .first()
+            .and_then(|f| f.extension())
+            .map(|e| e.to_string_lossy().to_ascii_lowercase());
+        format!(
+            "InvokeCommand: ok class=menu verb={} files={} ext={} twctl_pid={} ms={}",
+            verb.name,
+            files.len(),
+            ext.as_deref().unwrap_or("?"),
+            child.id(),
+            started.elapsed().as_millis()
+        )
+    });
+    Ok(())
 }
 
 #[cfg(test)]
