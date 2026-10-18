@@ -127,24 +127,29 @@ impl Settings {
             return Self::from_ini(&text);
         }
         #[cfg(windows)]
-        if let Ok(key) = windows_registry::CURRENT_USER.open(PRODUCT_KEY) {
-            let mut s = Self::default();
-            if let Ok(values) = key.values() {
-                for (name, value) in values {
-                    let text = match value.ty() {
-                        windows_registry::Type::U32 => {
-                            u32::try_from(value).ok().map(|n| n.to_string())
-                        }
-                        _ => String::try_from(value).ok(),
-                    };
-                    if let Some(text) = text {
-                        s.apply(&name, &text);
-                    }
-                }
-            }
+        if let Some(s) = Self::from_registry(PRODUCT_KEY) {
             return s;
         }
         Self::default()
+    }
+
+    /// Reads the values under `HKCU\<subkey>`; `None` when the key does not exist.
+    #[cfg(windows)]
+    pub fn from_registry(subkey: &str) -> Option<Self> {
+        let key = windows_registry::CURRENT_USER.open(subkey).ok()?;
+        let mut s = Self::default();
+        if let Ok(values) = key.values() {
+            for (name, value) in values {
+                let text = match value.ty() {
+                    windows_registry::Type::U32 => u32::try_from(value).ok().map(|n| n.to_string()),
+                    _ => String::try_from(value).ok(),
+                };
+                if let Some(text) = text {
+                    s.apply(&name, &text);
+                }
+            }
+        }
+        Some(s)
     }
 }
 
