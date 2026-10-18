@@ -5,8 +5,22 @@
 //! stderr as `twctl: <message>`; with `--notify` (menu invocations) they are also shown
 //! in a message box.
 
+mod cmds;
+mod doctor;
+mod eyedropper;
+mod jobs;
+mod mcp;
+mod meta;
+mod modern;
+mod ocr;
 mod ops;
+mod organize;
+mod pdf;
+mod prebuild;
 mod strip;
+mod ui;
+mod upload;
+mod verbs;
 mod win;
 
 use std::collections::HashMap;
@@ -35,6 +49,25 @@ const USAGE: &str = "usage: twctl <command> [args]
   to-folder <file...>
   info <in> [--json] [--gui]
   wallpaper <in> --style stretch|tile|center|fill|fit|span
+  batch <thumbnail|convert|info> <in|dir...> [--recurse] [--out DIR] [--size N] [--to EXT] [--quality N] [--resize WxH|N%] [--json]
+  batch --retry-from <report.json> [--out DIR] [--size N] [--to EXT] [--quality N] [--resize WxH|N%] [--json]
+  prebuild <dir|file...> [--recurse] [--size N,N] [--rebuild-all] [--jobs N]
+  pdf <out.pdf> <in...> [--strict] [--json] [--searchable] [--margin PT]
+  pdf --auto <in...> [--strict] [--json] [--searchable] [--margin PT]
+  cbz <out.cbz> <in...> [--strict] [--json]
+  cbz --auto <in...> [--strict] [--json]
+  ocr <in> [--copy] [--window]
+  rename --by date|camera-date|artist-title|track-title|pattern [--pattern P] [--ask] <file...>
+  sort --by size|date|tag [--tag artist|album|genre|year] [--ask] <file...>
+  upload <file...> [--copy] [--confirm]
+  upload-hosts [--open]
+  upload-history [--json]
+  pick-color
+  lock-screen <in>
+  folder-icon <in>
+  settings
+  doctor [file] [--bundle out.zip]
+  --mcp
   formats [--json]
   register [--off|--status]
   --version
@@ -61,8 +94,31 @@ const VALUE_OPTS: &[&str] = &[
     "--max-size",
     "--style",
     "--files-from",
+    "--out",
+    "--retry-from",
+    "--bundle",
+    "--pattern",
+    "--tag",
+    "--jobs",
+    "--margin",
 ];
-const FLAG_OPTS: &[&str] = &["--json", "--gui", "--off", "--status", "--notify"];
+const FLAG_OPTS: &[&str] = &[
+    "--json",
+    "--gui",
+    "--off",
+    "--status",
+    "--notify",
+    "--recurse",
+    "--strict",
+    "--searchable",
+    "--copy",
+    "--confirm",
+    "--rebuild-all",
+    "--open",
+    "--auto",
+    "--window",
+    "--ask",
+];
 
 fn parse(args: Vec<String>) -> Result<Cli> {
     let mut it = args.into_iter();
@@ -215,13 +271,29 @@ fn batch(files: &[PathBuf], f: impl Fn(&Path) -> Result<PathBuf> + Sync) -> Resu
     }
 }
 
-/// Synopsis of one command from `USAGE`, or the whole text for an unknown command.
+/// Synopsis of one command from `USAGE` (every line that starts with it), or the whole
+/// text for an unknown command.
 fn command_usage(command: &str) -> String {
-    USAGE
+    let lines: Vec<&str> = USAGE
         .lines()
         .map(str::trim_start)
-        .find(|l| l.split_whitespace().next() == Some(command))
-        .map_or_else(|| USAGE.to_string(), |l| format!("usage: twctl {l}"))
+        .filter(|l| l.split_whitespace().next() == Some(command))
+        .collect();
+    if lines.is_empty() {
+        return USAGE.to_string();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                format!("usage: twctl {l}")
+            } else {
+                format!("       twctl {l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn run(cli: &Cli) -> Result<String> {
@@ -288,7 +360,9 @@ fn run(cli: &Cli) -> Result<String> {
                 .split_first()
                 .ok_or("convert-to needs <ext> <file...>")?;
             let target = target.trim_start_matches('.').to_ascii_lowercase();
-            ops::format_for_target(&target).ok_or_else(|| format!("no writer for .{target}"))?;
+            if !ops::can_write(&target) {
+                return Err(format!("no writer for .{target}"));
+            }
             let quality = parse_quality(cli)?;
             if files.is_empty() {
                 return Err("convert-to needs at least one file".into());
@@ -454,7 +528,8 @@ fn run(cli: &Cli) -> Result<String> {
             cli.exactly(0)?;
             register(cli, &dir, &settings)
         }
-        other => Err(format!("unknown command {other}\n{USAGE}")),
+        other => cmds::run(cli, &dir, &settings, max)
+            .unwrap_or_else(|| Err(format!("unknown command {other}\n{USAGE}"))),
     }
 }
 
@@ -616,6 +691,19 @@ fn register(cli: &Cli, dir: &Path, settings: &Settings) -> Result<String> {
     ))
 }
 
+/// Set when a command finished but some items failed and its output (a report) still has
+/// to reach stdout: `main` then exits 1 after printing it.
+static PARTIAL_FAILURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn mark_partial_failure() {
+    PARTIAL_FAILURE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reads and clears the partial-failure mark.
+fn take_partial_failure() -> bool {
+    PARTIAL_FAILURE.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn main() -> ExitCode {
     log::init("twctl");
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -626,7 +714,11 @@ fn main() -> ExitCode {
             if !msg.is_empty() {
                 println!("{msg}");
             }
-            ExitCode::SUCCESS
+            if take_partial_failure() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) => {
             eprintln!("twctl: {e}");

@@ -28,6 +28,19 @@ const CF_DIBV5: u32 = 17;
 const CF_UNICODETEXT: u32 = 13;
 const LCS_SRGB: u32 = 0x7352_4742;
 
+/// Absolute path in the plain `C:\...` form the shell APIs want (no `\\?\` prefix, no
+/// forward slashes, no relative parts); the input is returned unchanged when it cannot be
+/// resolved.
+pub fn shell_path(path: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).map_or_else(
+        |_| path.to_path_buf(),
+        |p| {
+            let s = p.to_string_lossy();
+            std::path::PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s).to_owned())
+        },
+    )
+}
+
 pub fn message(text: &str, error: bool) {
     let style = MB_OK
         | if error {

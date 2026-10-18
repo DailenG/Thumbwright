@@ -107,8 +107,16 @@ pub fn format_for_target(ext: &str) -> Option<ImageFormat> {
     })
 }
 
+/// Whether `ext` has a writer: a native `image` encoder, or AVIF / JPEG XL.
+pub fn can_write(ext: &str) -> bool {
+    format_for_target(ext).is_some() || crate::modern::handles(ext)
+}
+
 /// Encodes `img` for `ext`. JPEG takes `quality` (1-100, default 90); WebP is lossless.
 pub fn encode(img: &DynamicImage, ext: &str, quality: Option<u8>) -> Result<Vec<u8>> {
+    if crate::modern::handles(ext) {
+        return crate::modern::encode(img, ext, quality);
+    }
     let format = format_for_target(ext).ok_or_else(|| format!("no writer for .{ext}"))?;
     let mut out = Vec::new();
     match format {
