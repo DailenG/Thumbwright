@@ -10,8 +10,11 @@ $env:PATH = (Join-Path $env:CARGO_HOME 'bin') + ';' + $env:PATH
 $xwin = Join-Path $root '.toolchain\xwin'
 if (Test-Path $xwin) {
     $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = 'rust-lld'
+    # This variable replaces the rustflags in .cargo/config.toml, so repeat crt-static here.
     $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = (
-        @('crt\lib\x86_64', 'sdk\lib\um\x86_64', 'sdk\lib\ucrt\x86_64') |
-            ForEach-Object { '-Lnative=' + (Join-Path $xwin $_) }
+        @('-C', 'target-feature=+crt-static') + (
+            @('crt\lib\x86_64', 'sdk\lib\um\x86_64', 'sdk\lib\ucrt\x86_64') |
+                ForEach-Object { '-Lnative=' + (Join-Path $xwin $_) }
+        )
     ) -join ' '
 }
