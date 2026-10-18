@@ -1181,26 +1181,39 @@ mod tests {
 
     #[test]
     fn crash_after_any_journal_entry_is_fully_undone() {
+        // The full final plan (user files, folder and background menu, cloud and installer
+        // classes), registered per user and machine-style with `Approved` entries.
         let dll = PathBuf::from(r"C:\x\thumbwright_shell.dll");
-        let total = {
-            let sb = Sandbox::new("count");
-            sb.seed_user_state();
-            register(&sb.layout, &plan(&dll)).unwrap();
-            sb.journal_len()
-        };
-        assert!(total > 10, "journal has {total} entries");
-        for n in 1..=total {
-            let sb = Sandbox::new("crash");
-            sb.seed_user_state();
-            let before = sb.snapshot();
-            CRASH_AFTER.set(Some(n));
-            let crashed = register(&sb.layout, &plan(&dll));
-            CRASH_AFTER.set(None);
-            assert!(crashed.is_err(), "crash point {n} not reached");
-            assert_eq!(sb.journal_len(), n);
-            unregister(&sb.layout).unwrap();
-            assert_eq!(sb.snapshot(), before, "crash after {n} journal entries");
-            assert!(status(&sb.layout).is_none());
+        for approve in [false, true] {
+            let total = {
+                let mut sb = Sandbox::new("count");
+                sb.layout.approve = approve;
+                sb.seed_user_state();
+                register(&sb.layout, &plan(&dll)).unwrap();
+                sb.journal_len()
+            };
+            assert!(total > 10, "journal has {total} entries");
+            for n in 1..=total {
+                let mut sb = Sandbox::new("crash");
+                sb.layout.approve = approve;
+                sb.seed_user_state();
+                let before = sb.snapshot();
+                CRASH_AFTER.set(Some(n));
+                let crashed = register(&sb.layout, &plan(&dll));
+                CRASH_AFTER.set(None);
+                assert!(
+                    crashed.is_err(),
+                    "crash point {n} not reached (approve: {approve})"
+                );
+                assert_eq!(sb.journal_len(), n);
+                unregister(&sb.layout).unwrap();
+                assert_eq!(
+                    sb.snapshot(),
+                    before,
+                    "crash after {n} journal entries (approve: {approve})"
+                );
+                assert!(status(&sb.layout).is_none());
+            }
         }
     }
 
