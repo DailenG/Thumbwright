@@ -36,6 +36,20 @@ twctl register --off      # undoes exactly what register wrote
 
 Windows ignores HKCU COM registrations for elevated processes, so test Explorer from a non-elevated session. Run `register --off` before moving the folder (the registration stores an absolute DLL path).
 
+## twctl
+
+`twctl --help` lists every command; `twctl <command> --help` shows one. Besides the image verbs (convert, resize, rotate, compress, strip, clip, wallpaper, ...):
+
+- `doctor [file] [--bundle out.zip]`: sectioned self-check (spec 7.1) with FIX hints; foreign ProgID-level thumbnail handlers are reported.
+- `batch <thumbnail|convert|info> <in|dir...> [--json]` and `batch --retry-from report.json`: multi-file jobs on all cores; the JSON report lists each file's outcome and the retry reruns only the failures.
+- `prebuild <dir|file...> [--size N,N] [--rebuild-all]`: warms Explorer's thumbnail cache (also the "Build thumbnails here" folder-menu entry).
+- `pdf` / `cbz <out> <in...> [--strict] [--json]`: combine images; `pdf --searchable` adds an invisible OCR text layer. The JSON result is `{combined, omitted[{input,cause,detail}], output, requested, status}`.
+- `ocr <in>`: Windows' built-in OCR engine (runs in `twctl`, never in the shell DLL).
+- `rename`, `sort`, `folder-icon`, `lock-screen`, `pick-color`, `settings`.
+- `convert-to avif|jxl`: pure-Rust encoders (AVIF through `ravif`/`rav1e` without assembly; JPEG XL is lossless only).
+- `upload <file...> [--copy] [--confirm]`, `upload-hosts [--open]`, `upload-history`: HTTPS POST to the hosts in `upload-hosts.conf` (spec 10.3) through WinHTTP. Nothing is sent without an explicit upload command; the menu verb asks first with Cancel as the default button.
+- `--mcp`: MCP server over stdio exposing the CLI's operations plus `view`.
+
 ## Clean-room rules
 
 This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, official Microsoft documentation and permissively licensed crate sources. Do not consult the reference product's binaries or source. See `REVIEW_HANDOFF.md` section 1.

@@ -44,7 +44,7 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 |---|---|---|
 | `crates/tw-core` | rlib | IDs/GUIDs (`ids.rs`), format matrix (`formats/`), budgets (`limits.rs`), settings (`config.rs`), log (`log.rs`), routing + decoders (`decode/`), worker wire protocol (`protocol.rs`), worker client with Job Object (`worker.rs`), tier pipeline (`pipeline.rs`), registry engine (`registration.rs`) |
 | `crates/tw-shell` | `thumbwright_shell.dll` + `tw-worker.exe` | COM exports and class factory (`lib.rs`, `factory.rs`), thumbnail provider (`thumbnail.rs`), DIB creation (`bitmap.rs`), context menu (`menu.rs`), worker main (`src/bin/tw-worker.rs`), integration tests (`tests/`) |
-| `crates/twctl` | `twctl.exe` | CLI and menu-verb back end (`main.rs`), image operations (`ops.rs`), lossless metadata strip (`strip.rs`), clipboard/wallpaper/message box (`win.rs`) |
+| `crates/twctl` | `twctl.exe` | CLI and menu-verb back end (`main.rs`, `cmds.rs`), image operations (`ops.rs`), lossless metadata strip (`strip.rs`), clipboard/wallpaper/message box (`win.rs`), `doctor`, `batch` (`jobs.rs`), `prebuild`, PDF/CBZ (`pdf.rs`), OCR (`ocr.rs`), rename/sort (`organize.rs`, `meta.rs`), upload over WinHTTP (`upload.rs`), AVIF/JXL writers (`modern.rs`), dialogs and eyedropper (`ui.rs`, `eyedropper.rs`), MCP server (`mcp.rs`) |
 | `xtask` | dev tool | License audit that generates `THIRD_PARTY_LICENSES.md` |
 
 **Key invariants (verify they hold):**
@@ -82,7 +82,7 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 
 - **Coverage:** 160 of 363 spec formats are routed. Unrouted types are never registered, so Windows' own handlers stay in charge. Not handled: video, PDF/DjVu, legacy binary Office, WMA/DSF, APK, most of the legacy raster long tail.
 - **Missing COM classes:** cloud-folder, preview handler, property handler, Windows 11 modern menu.
-- **Missing menu verbs:** OCR, upload, combine PDF/CBZ, rename, sort, pick color, lock screen, folder icon, settings, AVIF/JXL output. `doctor`, `batch` and `--mcp` CLI commands are also missing.
+- **Menu verbs:** all spec 6.2 verbs now exist except "Convert..." (dialog) and "Save video frame". Per-item visibility is the `HiddenMenuItems` setting (item ids = the `id` fields in `menu.rs` `TREE`; Settings is never hidden). Reordering belongs to the settings-app work.
 - **Simplifications:**
   - Rotation re-encodes JPEG at quality 95 instead of rotating losslessly.
   - EXIF is not carried over on conversion.
