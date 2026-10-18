@@ -11,6 +11,7 @@
 pub mod audio;
 pub mod design;
 pub mod cad;
+pub mod bitmap;
 pub mod jxl;
 pub mod mesh;
 pub mod pcx;

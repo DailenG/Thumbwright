@@ -36,6 +36,9 @@ pub enum Decoder {
     Cad = 80,
     /// STL / OBJ / PLY meshes shaded by the software rasteriser (triangle caps, deadline-checked).
     Mesh = 81,
+    /// Legacy bitmap formats: XBM/XPM, Sun raster, MacPaint, IFF ILBM, PIX, CUT, TIM, VTF,
+    /// PFM/PHM, PGX, SCR, ANI, CALS (pure Rust, bounded).
+    Bitmap = 30,
 }
 
 /// Where a decoder may run (REQ-ISO-2 / REQ-ISO-3).
@@ -51,7 +54,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 13] = [
+    pub const ALL: [Decoder; 14] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -65,6 +68,7 @@ impl Decoder {
         Self::Design,
         Self::Cad,
         Self::Mesh,
+        Self::Bitmap,
     ];
 
     pub fn placement(self) -> Placement {
@@ -98,6 +102,7 @@ impl Decoder {
             Self::Svg => super::svg::render(data, edge),
             Self::Cad => super::cad::decode(data, ext),
             Self::Mesh => super::mesh::decode(data, ext),
+            Self::Bitmap => super::bitmap::decode(data, ext),
             #[cfg(windows)]
             Self::Wic => super::wic::decode(data, edge),
             #[cfg(not(windows))]
@@ -132,6 +137,7 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
         (super::audio::EXTENSIONS, &[Audio]),
         (super::zip_preview::EXTENSIONS, &[Zip]),
         (super::design::EXTENSIONS, &[Design]),
+        (super::bitmap::EXTENSIONS, &[Bitmap]),
     ];
     single
         .iter()
@@ -202,6 +208,7 @@ mod tests {
             .chain(super::super::design::EXTENSIONS)
             .chain(super::super::cad::EXTENSIONS)
             .chain(super::super::mesh::EXTENSIONS)
+            .chain(super::super::bitmap::EXTENSIONS)
         {
             assert!(formats::lookup(ext).is_some(), "{ext} not in matrix");
         }
