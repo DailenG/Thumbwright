@@ -38,6 +38,8 @@ pub struct Engine {
     pub max_tier_time: Duration,
     /// Video frame offset in percent of the duration (0-100).
     pub video_percent: u8,
+    /// `UseEmbeddedThumbs`: try a camera file's embedded preview before a full decode.
+    pub prefer_embedded: bool,
 }
 
 impl Engine {
@@ -46,7 +48,14 @@ impl Engine {
             worker_exe,
             max_tier_time: limits::WORKER_THUMBNAIL_TIMEOUT,
             video_percent: limits::DEFAULT_VIDEO_PERCENT,
+            prefer_embedded: true,
         }
+    }
+
+    /// Sets whether a camera file's embedded preview is tried before a full decode.
+    pub fn with_prefer_embedded(mut self, prefer: bool) -> Self {
+        self.prefer_embedded = prefer;
+        self
     }
 
     /// Sets the video frame offset in percent of the duration (clamped to 100).
@@ -58,10 +67,10 @@ impl Engine {
     /// Produces a thumbnail whose longer edge is at most `edge`.
     pub fn thumbnail(&self, data: Arc<Vec<u8>>, ext: Option<&str>, edge: u32) -> Result<Thumbnail> {
         let head = &data[..data.len().min(4096)];
-        let chain = route::plan(ext, head);
+        let chain = route::ordered(route::plan(ext, head), self.prefer_embedded);
         let ext = ext.unwrap_or("").to_owned();
         let mut last = DecodeError::Unsupported;
-        for &decoder in chain {
+        for &decoder in chain.iter() {
             let result = match decoder.placement() {
                 Placement::InProc => run_inproc(
                     decoder,

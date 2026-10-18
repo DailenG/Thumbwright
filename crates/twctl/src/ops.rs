@@ -4,8 +4,9 @@
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::SystemTime;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
@@ -14,6 +15,7 @@ use image::{
     DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, RgbaImage, imageops::FilterType,
 };
 
+use tw_core::config::Settings;
 use tw_core::decode::route::{self, Decoder};
 use tw_core::decode::{DecodeError, Thumbnail};
 use tw_core::{ids, worker};
@@ -30,6 +32,49 @@ const VECTOR_EDGE: u32 = 2048;
 const COVER_ART_EDGE: u32 = 4096;
 /// Longest edge decoded for conversion from worker-isolated raster formats (JPEG 2000).
 const RASTER_EDGE: u32 = 16384;
+
+/// Settings that shape conversions (`JpegQuality`, `PngCompression`, `UseEmbeddedThumbs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Defaults {
+    jpeg_quality: u8,
+    png_compression: u8,
+    prefer_embedded: bool,
+}
+
+static DEFAULTS: OnceLock<Defaults> = OnceLock::new();
+
+/// Makes the saved `JpegQuality` and `PngCompression` the defaults of every encode that gets
+/// no explicit quality, and `UseEmbeddedThumbs` the decoder order for camera RAW input.
+/// Called once by `main`; later calls are ignored.
+impl From<&Settings> for Defaults {
+    fn from(s: &Settings) -> Self {
+        Self {
+            jpeg_quality: s.jpeg_quality.clamp(1, 100),
+            png_compression: s.png_compression.min(9),
+            prefer_embedded: s.use_embedded_thumbs,
+        }
+    }
+}
+
+pub fn set_defaults(settings: &Settings) {
+    let _ = DEFAULTS.set(Defaults::from(settings));
+}
+
+fn defaults() -> Defaults {
+    DEFAULTS
+        .get()
+        .copied()
+        .unwrap_or_else(|| Defaults::from(&Settings::default()))
+}
+
+/// PNG compression level 0 (stored) to 9 (smallest).
+fn png_compression(level: u8) -> image::codecs::png::CompressionType {
+    use image::codecs::png::CompressionType;
+    match level {
+        0 => CompressionType::Uncompressed,
+        n => CompressionType::Level(n.min(9)),
+    }
+}
 
 /// Directory holding `twctl.exe`, `tw-worker.exe` and the portable INI.
 pub fn exe_dir() -> PathBuf {
@@ -74,8 +119,9 @@ pub fn read_input(p: &Path, max_bytes: u64) -> Result<Vec<u8>> {
 /// Full-resolution decode through the format router. Memory-safe tiers run in this
 /// process; decoders that parse hostile tags or call OS codecs or fixed-function libraries
 /// (audio tags can overflow the stack, which would end `twctl` without the `--notify` message
-/// box; video, PDF and metafiles use OS codecs; DjVu and JPEG 2000 cannot bound their
-/// allocation) go through the Job-Object-confined worker, like in the shell.
+/// box; WIC, video, PDF and metafiles use OS codecs and need COM, which only the worker
+/// initialises; DjVu and JPEG 2000 cannot bound their allocation) go through the
+/// Job-Object-confined worker, like in the shell. `twctl` never hosts WIC itself (I2).
 pub fn decode_full(p: &Path, max_bytes: u64) -> Result<DynamicImage> {
     decode_bytes(p, read_input(p, max_bytes)?)
 }
@@ -103,13 +149,14 @@ pub fn decode_bytes(p: &Path, data: Vec<u8>) -> Result<DynamicImage> {
     if chain.is_empty() {
         return Err(format!("{}: unsupported file type", p.display()));
     }
+    let chain = route::ordered(chain, defaults().prefer_embedded);
     let inproc_edge = if chain.contains(&Decoder::Svg) {
         VECTOR_EDGE
     } else {
         u32::MAX
     };
     let mut last = DecodeError::Unsupported;
-    for &decoder in chain {
+    for &decoder in chain.iter() {
         let result = match isolated_edge(decoder) {
             Some(edge) => worker::run(
                 &exe_dir().join(ids::WORKER_EXE_NAME),
@@ -139,7 +186,7 @@ fn isolated_edge(decoder: Decoder) -> Option<u32> {
         Decoder::Pdf | Decoder::Metafile | Decoder::OleMetafile | Decoder::Djvu => {
             Some(VECTOR_EDGE)
         }
-        Decoder::J2k => Some(RASTER_EDGE),
+        Decoder::J2k | Decoder::Wic => Some(RASTER_EDGE),
         Decoder::Audio | Decoder::Video => Some(COVER_ART_EDGE),
         _ => None,
     }
@@ -194,7 +241,10 @@ pub fn encode_with_exif(
         ImageFormat::Jpeg => {
             let rgb = img.to_rgb8();
             let mut enc =
-                JpegEncoder::new_with_quality(&mut out, quality.unwrap_or(90).clamp(1, 100));
+                JpegEncoder::new_with_quality(
+                    &mut out,
+                    quality.unwrap_or(defaults().jpeg_quality).clamp(1, 100),
+                );
             match normalised {
                 Some(e) if e.len() <= MAX_JPEG_EXIF => {
                     enc.set_exif_metadata(e).map_err(|e| e.to_string())?;
@@ -207,8 +257,12 @@ pub fn encode_with_exif(
             }
             enc.encode_image(&rgb).map_err(|e| e.to_string())?;
         }
-        ImageFormat::Png if normalised.is_some() => {
-            let mut enc = PngEncoder::new(&mut out);
+        ImageFormat::Png => {
+            let mut enc = PngEncoder::new_with_quality(
+                &mut out,
+                png_compression(defaults().png_compression),
+                image::codecs::png::FilterType::Adaptive,
+            );
             if let Some(e) = normalised {
                 enc.set_exif_metadata(e).map_err(|e| e.to_string())?;
             }
@@ -344,6 +398,48 @@ pub fn write_new(src: &Path, suffix: &str, ext: &str, bytes: &[u8]) -> Result<Pa
             }
         }
     }
+}
+
+/// The modification time of `src` when `preserve` (setting `PreserveFileDate`) is on.
+fn source_stamp(src: &Path, preserve: bool) -> Result<Option<SystemTime>> {
+    if !preserve {
+        return Ok(None);
+    }
+    std::fs::metadata(src)
+        .and_then(|m| m.modified())
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", src.display()))
+}
+
+/// Gives `dest` the modification time `stamp`, if any.
+fn apply_stamp(dest: &Path, stamp: Option<SystemTime>) -> Result<()> {
+    let Some(t) = stamp else { return Ok(()) };
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(dest)
+        .and_then(|f| f.set_modified(t))
+        .map_err(|e| format!("{}: cannot keep the original date: {e}", dest.display()))
+}
+
+/// [`write_atomic`] to `dest`, with `src`'s modification time when `preserve`.
+pub fn write_atomic_like(src: &Path, dest: &Path, bytes: &[u8], preserve: bool) -> Result<()> {
+    let stamp = source_stamp(src, preserve)?;
+    write_atomic(dest, bytes)?;
+    apply_stamp(dest, stamp)
+}
+
+/// [`write_new`] next to `src`, with `src`'s modification time when `preserve`.
+pub fn write_new_like(
+    src: &Path,
+    suffix: &str,
+    ext: &str,
+    bytes: &[u8],
+    preserve: bool,
+) -> Result<PathBuf> {
+    let stamp = source_stamp(src, preserve)?;
+    let out = write_new(src, suffix, ext, bytes)?;
+    apply_stamp(&out, stamp)?;
+    Ok(out)
 }
 
 /// `WxH` (fit inside, never enlarge) or `N%`.
@@ -858,6 +954,111 @@ mod tests {
                 .1
                 .is_none()
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `tw-worker.exe` next to the test executable, copied from cargo's output directory
+    /// (the integration build of the workspace puts it there).
+    fn ensure_worker() {
+        let dest = exe_dir().join(ids::WORKER_EXE_NAME);
+        if dest.is_file() {
+            return;
+        }
+        let built = exe_dir()
+            .parent()
+            .map(|p| p.join(ids::WORKER_EXE_NAME))
+            .filter(|p| p.is_file())
+            .expect("tw-worker.exe is not built; run `cargo build --workspace` first");
+        std::fs::copy(built, dest).unwrap();
+    }
+
+    #[test]
+    fn damaged_png_is_a_decode_error_not_a_com_error() {
+        ensure_worker();
+        let dir = temp_dir_for("damaged-png");
+        let mut png = encode(&noisy(32, 32), "png", None).unwrap();
+        // Keep the signature and IHDR, wreck the compressed data.
+        for b in &mut png[40..] {
+            *b = 0x5A;
+        }
+        let path = dir.join("broken.png");
+        std::fs::write(&path, &png).unwrap();
+        let err = decode_full(&path, u64::MAX).unwrap_err();
+        assert!(
+            !err.to_ascii_lowercase().contains("coinitialize") && !err.contains("0x800401F0"),
+            "WIC must not run in twctl: {err}"
+        );
+        assert!(err.contains("broken.png"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn conversion_defaults_follow_the_settings() {
+        let s = Settings {
+            jpeg_quality: 55,
+            png_compression: 0,
+            use_embedded_thumbs: false,
+            ..Settings::default()
+        };
+        assert_eq!(
+            Defaults::from(&s),
+            Defaults {
+                jpeg_quality: 55,
+                png_compression: 0,
+                prefer_embedded: false
+            }
+        );
+        let d = Defaults::from(&Settings::default());
+        assert_eq!((d.jpeg_quality, d.png_compression, d.prefer_embedded), (90, 9, true));
+        use image::codecs::png::CompressionType;
+        assert!(matches!(png_compression(0), CompressionType::Uncompressed));
+        assert!(matches!(png_compression(6), CompressionType::Level(6)));
+        assert!(matches!(png_compression(200), CompressionType::Level(9)));
+    }
+
+    #[test]
+    fn png_level_changes_the_size_and_round_trips() {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_fn(128, 128, |x, y| {
+            image::Rgb([(x / 8) as u8 * 16, (y / 8) as u8 * 16, 40])
+        }));
+        let png = |level| {
+            let mut out = Vec::new();
+            let enc = PngEncoder::new_with_quality(
+                &mut out,
+                png_compression(level),
+                image::codecs::png::FilterType::Adaptive,
+            );
+            img.write_with_encoder(enc).unwrap();
+            out
+        };
+        let (stored, best) = (png(0), png(9));
+        assert!(best.len() < stored.len(), "{} vs {}", best.len(), stored.len());
+        assert_eq!(decode_as("png", &stored).to_rgb8(), img.to_rgb8());
+        assert_eq!(decode_as("png", &best).to_rgb8(), img.to_rgb8());
+    }
+
+    #[test]
+    fn preserve_file_date_copies_the_source_mtime_only_when_asked() {
+        let dir = temp_dir_for("keep-date");
+        let src = dir.join("a.png");
+        std::fs::write(&src, b"x").unwrap();
+        let old = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let mtime = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        let kept = write_new_like(&src, " (a)", "png", b"1", true).unwrap();
+        assert_eq!(mtime(&kept), old);
+        let fresh = write_new_like(&src, " (b)", "png", b"2", false).unwrap();
+        assert_ne!(mtime(&fresh), old);
+        let dest = dir.join("b.png");
+        write_atomic_like(&src, &dest, b"3", true).unwrap();
+        assert_eq!(mtime(&dest), old);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"3");
+        assert!(write_new_like(&dir.join("missing.png"), "", "png", b"1", true).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

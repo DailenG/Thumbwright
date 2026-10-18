@@ -258,7 +258,8 @@ fn produce(
 
     let data = read_all(stream, info.size).map_err(|e| fail(&format!("read: {e}")))?;
     let engine = Engine::new(dir.join(ids::WORKER_EXE_NAME))
-        .with_video_percent(settings.video_frame_percent);
+        .with_video_percent(settings.video_frame_percent)
+        .with_prefer_embedded(settings.use_embedded_thumbs);
     let edge = cx.clamp(1, settings.max_thumb_px);
     engine
         .thumbnail(Arc::new(data), ext.as_deref(), edge)

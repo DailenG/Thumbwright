@@ -2,6 +2,8 @@
 //! decoders. The first decoder that succeeds wins; a decoder failure falls through to the
 //! next one only when [`DecodeError::falls_through`] allows it.
 
+use std::borrow::Cow;
+
 use image::DynamicImage;
 
 use super::{DecodeError, Result};
@@ -271,6 +273,21 @@ pub fn plan(ext: Option<&str>, head: &[u8]) -> &'static [Decoder] {
     &[]
 }
 
+/// `chain` in the order to try it for the `UseEmbeddedThumbs` setting. By default a camera
+/// RAW file's embedded JPEG preview ([`Decoder::Raw`]) is tried first because it is far
+/// cheaper than a full decode. With `prefer_embedded` off, the full decoder that follows it
+/// in the chain (the OS RAW codec) goes first and the embedded preview stays as the
+/// fallback. Chains without an embedded-preview stage, and those where nothing else could
+/// decode the file, are unchanged.
+pub fn ordered(chain: &'static [Decoder], prefer_embedded: bool) -> Cow<'static, [Decoder]> {
+    if prefer_embedded || !chain.contains(&Decoder::Raw) {
+        return Cow::Borrowed(chain);
+    }
+    let (embedded, full): (Vec<Decoder>, Vec<Decoder>) =
+        chain.iter().partition(|d| **d == Decoder::Raw);
+    Cow::Owned(full.into_iter().chain(embedded).collect())
+}
+
 /// Runs `chain` in order (all stages in the current process), stopping at the first
 /// success or at a failure that must not fall through.
 pub fn run_chain(chain: &[Decoder], data: &[u8], ext: &str, edge: u32) -> Result<DynamicImage> {
@@ -289,6 +306,22 @@ pub fn run_chain(chain: &[Decoder], data: &[u8], ext: &str, edge: u32) -> Result
 mod tests {
     use super::*;
     use crate::formats;
+
+    #[test]
+    fn embedded_preview_preference_orders_raw_chains_only() {
+        let raw = chain_for_ext("cr2");
+        assert_eq!(raw, &[Decoder::Raw, Decoder::Wic]);
+        assert_eq!(&*ordered(raw, true), raw);
+        assert_eq!(&*ordered(raw, false), &[Decoder::Wic, Decoder::Raw]);
+        // Nothing else could decode these, so the setting cannot change them.
+        for ext in ["crw", "psd", "docx", "png"] {
+            let chain = chain_for_ext(ext);
+            if !chain.is_empty() {
+                assert_eq!(&*ordered(chain, false), chain, "{ext}");
+            }
+        }
+        assert_eq!(&*ordered(&[Decoder::Raw], false), &[Decoder::Raw]);
+    }
 
     #[test]
     fn wire_codes_round_trip() {

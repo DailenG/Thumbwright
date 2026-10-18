@@ -307,6 +307,7 @@ fn run(cli: &Cli) -> Result<String> {
     }
     let dir = ops::exe_dir();
     let settings = Settings::load(&dir);
+    ops::set_defaults(&settings);
     let max = settings.max_file_bytes();
     match cli.command.as_str() {
         "--version" | "-V" => Ok(format!("twctl {}", ids::VERSION)),
@@ -330,7 +331,8 @@ fn run(cli: &Cli) -> Result<String> {
             .min(settings.max_thumb_px);
             let data = ops::read_input(input, max)?;
             let engine = tw_core::pipeline::Engine::new(dir.join(ids::WORKER_EXE_NAME))
-                .with_video_percent(settings.video_frame_percent);
+                .with_video_percent(settings.video_frame_percent)
+                .with_prefer_embedded(settings.use_embedded_thumbs);
             let ext = ops::ext_of(input);
             let t = engine
                 .thumbnail(Arc::new(data), Some(&ext), size)
@@ -354,7 +356,7 @@ fn run(cli: &Cli) -> Result<String> {
                 img = ops::apply_resize(&img, ops::parse_resize(r)?);
             }
             let bytes = ops::encode_with_exif(&img, &ops::ext_of(out), quality, exif.as_deref())?;
-            ops::write_atomic(out, &bytes)?;
+            ops::write_atomic_like(input, out, &bytes, settings.preserve_file_date)?;
             Ok(out.display().to_string())
         }
         "convert-to" => {
@@ -375,7 +377,7 @@ fn run(cli: &Cli) -> Result<String> {
             batch(&files, |f| {
                 let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_metadata)?;
                 let bytes = ops::encode_with_exif(&img, &target, quality, exif.as_deref())?;
-                ops::write_new(f, "", &target, &bytes)
+                ops::write_new_like(f, "", &target, &bytes, settings.preserve_file_date)
             })
         }
         "resize" => {
@@ -386,7 +388,7 @@ fn run(cli: &Cli) -> Result<String> {
                 let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_metadata)?;
                 let img = ops::apply_resize(&img, spec);
                 let bytes = ops::encode_with_exif(&img, &ext, None, exif.as_deref())?;
-                ops::write_new(f, " (resized)", &ext, &bytes)
+                ops::write_new_like(f, " (resized)", &ext, &bytes, settings.preserve_file_date)
             })
         }
         "rotate" => {
@@ -399,7 +401,7 @@ fn run(cli: &Cli) -> Result<String> {
                 if let Some(n) = r.note {
                     notes.lock().unwrap_or_else(|e| e.into_inner()).push(n);
                 }
-                ops::write_new(f, " (edited)", &r.ext, &r.bytes)
+                ops::write_new_like(f, " (edited)", &r.ext, &r.bytes, settings.preserve_file_date)
             });
             let mut notes = notes.into_inner().unwrap_or_else(|e| e.into_inner());
             notes.sort();
