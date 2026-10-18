@@ -130,12 +130,14 @@ fn process(file: &Path, o: &Options, settings: &Settings, worker: &Path) -> Resu
         }
         "convert" => {
             let to = o.to.as_deref().unwrap_or("png");
-            let mut img = ops::decode_full(file, max)?;
+            let (mut img, meta) = ops::decode_full_with_meta(file, max, settings.keep_metadata)?;
             if let Some(r) = &o.resize {
                 img = ops::apply_resize(&img, ops::parse_resize(r)?);
             }
-            let bytes = ops::encode(&img, to, o.quality)?;
-            let out = ops::write_new(&target(file, o.out.as_deref())?, "", to, &bytes)?;
+            let bytes = ops::encode_with_meta(&img, to, o.quality, &meta)?;
+            let named = target(file, o.out.as_deref())?;
+            let out =
+                ops::write_new_dated(&named, file, "", to, &bytes, settings.preserve_file_date)?;
             Ok(json!({"output": out.display().to_string()}))
         }
         _ => {
@@ -399,5 +401,51 @@ mod tests {
         assert!(read_report("not json").is_err());
         assert!(read_report("{}").is_err());
         assert!(read_report(r#"{"operation":"info"}"#).is_err());
+    }
+
+    #[test]
+    fn batch_convert_honours_preserve_file_date_and_keep_metadata() {
+        use crate::exif::testutil::{camera_exif, inject_into_jpeg};
+        let dir = std::env::temp_dir().join(format!("twctl-batch-date-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = ops::encode(&image::DynamicImage::new_rgb8(16, 16), "jpg", Some(90)).unwrap();
+        let src = dir.join("cam.jpg");
+        std::fs::write(&src, inject_into_jpeg(&plain, &camera_exif(1, (16, 16)))).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let mtime = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        let run = |tag: &str, preserve: bool, keep: bool| {
+            let settings = Settings {
+                preserve_file_date: preserve,
+                keep_metadata: keep,
+                ..Settings::default()
+            };
+            let mut o = opts("convert");
+            o.to = Some("png".into());
+            o.out = Some(dir.join(tag));
+            let done = run_files(std::slice::from_ref(&src), &o, &settings, &dir);
+            let out = done[0].result.as_ref().unwrap()["output"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            PathBuf::from(out)
+        };
+        // `--out DIR` names the output in DIR but dates it from the real source.
+        let kept = run("kept", true, true);
+        assert_eq!(kept.parent().unwrap(), dir.join("kept"));
+        assert_eq!(mtime(&kept), old);
+        let fresh = run("fresh", false, true);
+        assert_ne!(mtime(&fresh), old);
+        // Metadata follows KeepMetadata like in `convert-to`.
+        let make = |p: &Path| crate::exif::summarize_file(&std::fs::read(p).unwrap()).make;
+        assert_eq!(make(&kept).as_deref(), Some("Thumbcam"));
+        assert!(make(&run("bare", false, false)).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

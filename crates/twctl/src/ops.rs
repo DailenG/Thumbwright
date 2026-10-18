@@ -20,6 +20,7 @@ use tw_core::decode::route::{self, Decoder};
 use tw_core::decode::{DecodeError, Thumbnail};
 use tw_core::{ids, worker};
 
+use crate::carry::{self, Metadata};
 use crate::exif;
 use crate::jpeg_lossless::{self, Transform};
 use crate::strip;
@@ -126,19 +127,31 @@ pub fn decode_full(p: &Path, max_bytes: u64) -> Result<DynamicImage> {
     decode_bytes(p, read_input(p, max_bytes)?)
 }
 
-/// [`decode_full`] plus the source's EXIF block (TIFF structure, no `Exif\0\0` prefix) when
-/// `keep_exif` is set and the source is a JPEG, PNG or WebP carrying one. The raster decoders
-/// apply the EXIF orientation to the pixels, so [`encode_with_exif`] writes Orientation 1.
-pub fn decode_full_with_exif(
+/// [`decode_full`] plus the source's EXIF block, ICC profile and XMP packet when
+/// `keep_metadata` is set and the source is a JPEG, PNG, WebP or TIFF carrying them (see
+/// [`Metadata::read`]); problems with the source's metadata are printed as `note:` lines.
+/// The raster decoders apply the EXIF orientation to the pixels, so [`encode_with_meta`]
+/// writes Orientation 1.
+pub fn decode_full_with_meta(
     p: &Path,
     max_bytes: u64,
-    keep_exif: bool,
-) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    keep_metadata: bool,
+) -> Result<(DynamicImage, Metadata)> {
     let data = read_input(p, max_bytes)?;
-    let exif = keep_exif
-        .then(|| exif::from_container(&data).map(<[u8]>::to_vec))
-        .flatten();
-    Ok((decode_bytes(p, data)?, exif))
+    let meta = read_metadata(p, &data, keep_metadata);
+    Ok((decode_bytes(p, data)?, meta))
+}
+
+/// The metadata of `data` (the contents of `p`), or none when `keep_metadata` is off.
+fn read_metadata(p: &Path, data: &[u8], keep_metadata: bool) -> Metadata {
+    if !keep_metadata {
+        return Metadata::default();
+    }
+    let meta = Metadata::read(&ext_of(p), data);
+    meta.notes
+        .iter()
+        .for_each(|n| eprintln!("twctl: note: {}: {n}", p.display()));
+    meta
 }
 
 /// [`decode_full`] for bytes already read from `p`.
@@ -214,29 +227,50 @@ pub fn can_write(ext: &str) -> bool {
     format_for_target(ext).is_some() || crate::modern::handles(ext)
 }
 
-/// Encodes `img` for `ext`. JPEG takes `quality` (1-100, default 90); WebP is lossless.
+/// Encodes `img` for `ext` without metadata. JPEG takes `quality` (1-100, default 90);
+/// WebP is lossless.
 pub fn encode(img: &DynamicImage, ext: &str, quality: Option<u8>) -> Result<Vec<u8>> {
-    encode_with_exif(img, ext, quality, None)
+    encode_noted(img, ext, quality, &Metadata::default()).map(|(bytes, _)| bytes)
 }
 
-/// Largest EXIF block an APP1 segment can hold (64 KiB less length and `Exif\0\0`).
-const MAX_JPEG_EXIF: usize = 65535 - 2 - 6;
-
-/// [`encode`] that also writes `exif` (a source EXIF block) where the target supports it:
-/// JPEG, PNG (`eXIf`), WebP and TIFF. The block is normalised for the pixels being written
-/// (see `exif::normalise`); formats without EXIF support ignore it.
-pub fn encode_with_exif(
+/// [`encode`] that also writes the metadata of the source (`meta`) where the target holds
+/// it, and prints a `note:` line for each part that could not be carried (see
+/// [`carry::prepare`]).
+pub fn encode_with_meta(
     img: &DynamicImage,
     ext: &str,
     quality: Option<u8>,
-    exif: Option<&[u8]>,
+    meta: &Metadata,
 ) -> Result<Vec<u8>> {
+    let (bytes, notes) = encode_noted(img, ext, quality, meta)?;
+    notes.iter().for_each(|n| eprintln!("twctl: note: {n}"));
+    Ok(bytes)
+}
+
+/// [`encode_with_meta`] returning the notes instead of printing them. The EXIF block and the
+/// XMP packet are normalised for the pixels being written, the ICC profile is written as is
+/// when it describes them (see [`carry::prepare`]). JPEG, PNG and WebP take all three, TIFF
+/// all three, AVIF only EXIF, JPEG XL EXIF and XMP; other targets ignore the metadata.
+pub fn encode_noted(
+    img: &DynamicImage,
+    ext: &str,
+    quality: Option<u8>,
+    meta: &Metadata,
+) -> Result<(Vec<u8>, Vec<String>)> {
+    let carried = carry::Target::of(ext)
+        .map(|t| carry::prepare(meta, t, img))
+        .unwrap_or_default();
+    let mut notes = carried.notes.clone();
+    let (exif, icc, xmp) = (
+        carried.exif.as_deref(),
+        carried.icc.as_deref(),
+        carried.xmp.as_deref(),
+    );
     if crate::modern::handles(ext) {
-        return crate::modern::encode(img, ext, quality);
+        return crate::modern::encode(img, ext, quality, &carried).map(|b| (b, notes));
     }
     let format = format_for_target(ext).ok_or_else(|| format!("no writer for .{ext}"))?;
     let dims = (img.width(), img.height());
-    let normalised = exif.and_then(|e| exif::normalise(e, dims));
     let mut out = Vec::new();
     match format {
         ImageFormat::Jpeg => {
@@ -245,15 +279,12 @@ pub fn encode_with_exif(
                 &mut out,
                 quality.unwrap_or(defaults().jpeg_quality).clamp(1, 100),
             );
-            match normalised {
-                Some(e) if e.len() <= MAX_JPEG_EXIF => {
-                    enc.set_exif_metadata(e).map_err(|e| e.to_string())?;
-                }
-                Some(e) => eprintln!(
-                    "twctl: note: EXIF block of {} bytes does not fit a JPEG segment; not carried over",
-                    e.len()
-                ),
-                None => {}
+            if let Some(e) = exif {
+                enc.set_exif_metadata(e.to_vec())
+                    .map_err(|e| e.to_string())?;
+            }
+            if let Some(p) = icc {
+                enc.set_icc_profile(p.to_vec()).map_err(|e| e.to_string())?;
             }
             enc.encode_image(&rgb).map_err(|e| e.to_string())?;
         }
@@ -263,16 +294,24 @@ pub fn encode_with_exif(
                 png_compression(defaults().png_compression),
                 image::codecs::png::FilterType::Adaptive,
             );
-            if let Some(e) = normalised {
-                enc.set_exif_metadata(e).map_err(|e| e.to_string())?;
+            if let Some(e) = exif {
+                enc.set_exif_metadata(e.to_vec())
+                    .map_err(|e| e.to_string())?;
+            }
+            if let Some(p) = icc {
+                enc.set_icc_profile(p.to_vec()).map_err(|e| e.to_string())?;
             }
             img.write_with_encoder(enc).map_err(|e| e.to_string())?;
         }
-        ImageFormat::WebP if normalised.is_some() => {
+        ImageFormat::WebP => {
             let rgba = img.to_rgba8();
             let mut enc = WebPEncoder::new_lossless(&mut out);
-            if let Some(e) = normalised {
-                enc.set_exif_metadata(e).map_err(|e| e.to_string())?;
+            if let Some(e) = exif {
+                enc.set_exif_metadata(e.to_vec())
+                    .map_err(|e| e.to_string())?;
+            }
+            if let Some(p) = icc {
+                enc.set_icc_profile(p.to_vec()).map_err(|e| e.to_string())?;
             }
             enc.write_image(&rgba, rgba.width(), rgba.height(), ExtendedColorType::Rgba8)
                 .map_err(|e| e.to_string())?;
@@ -287,11 +326,7 @@ pub fn encode_with_exif(
                 .write_to(&mut Cursor::new(&mut out), format)
                 .map_err(|e| e.to_string())?;
         }
-        ImageFormat::Bmp
-        | ImageFormat::Gif
-        | ImageFormat::Tga
-        | ImageFormat::Qoi
-        | ImageFormat::WebP => {
+        ImageFormat::Bmp | ImageFormat::Gif | ImageFormat::Tga | ImageFormat::Qoi => {
             img.to_rgba8()
                 .write_to(&mut Cursor::new(&mut out), format)
                 .map_err(|e| e.to_string())?;
@@ -299,14 +334,26 @@ pub fn encode_with_exif(
         _ => {
             img.write_to(&mut Cursor::new(&mut out), format)
                 .map_err(|e| e.to_string())?;
-            if format == ImageFormat::Tiff
-                && let Some(e) = exif
-            {
-                out = exif::embed_in_tiff(out, e, dims);
+            if format == ImageFormat::Tiff && (exif.is_some() || icc.is_some() || xmp.is_some()) {
+                out = exif::embed_in_tiff(out, exif, icc, xmp, dims);
             }
         }
     }
-    Ok(out)
+    if let Some(x) = xmp {
+        let add = match format {
+            ImageFormat::Jpeg => Some(carry::jpeg_add_xmp as fn(&[u8], &[u8]) -> Option<Vec<u8>>),
+            ImageFormat::Png => Some(carry::png_add_xmp as fn(&[u8], &[u8]) -> Option<Vec<u8>>),
+            ImageFormat::WebP => Some(carry::webp_add_xmp as fn(&[u8], &[u8]) -> Option<Vec<u8>>),
+            _ => None,
+        };
+        if let Some(add) = add {
+            match add(&out, x) {
+                Some(with_xmp) => out = with_xmp,
+                None => notes.push("XMP packet could not be written; not carried over".into()),
+            }
+        }
+    }
+    Ok((out, notes))
 }
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
@@ -436,8 +483,22 @@ pub fn write_new_like(
     bytes: &[u8],
     preserve: bool,
 ) -> Result<PathBuf> {
-    let stamp = source_stamp(src, preserve)?;
-    let out = write_new(src, suffix, ext, bytes)?;
+    write_new_dated(src, src, suffix, ext, bytes, preserve)
+}
+
+/// [`write_new`] named after `named` (a path next to which the output goes), with the
+/// modification time of `dated_from` when `preserve`. `batch convert --out DIR` names the
+/// output in `DIR` but takes the date from the real source.
+pub fn write_new_dated(
+    named: &Path,
+    dated_from: &Path,
+    suffix: &str,
+    ext: &str,
+    bytes: &[u8],
+    preserve: bool,
+) -> Result<PathBuf> {
+    let stamp = source_stamp(dated_from, preserve)?;
+    let out = write_new(named, suffix, ext, bytes)?;
     apply_stamp(&out, stamp)?;
     Ok(out)
 }
@@ -503,70 +564,87 @@ pub struct Rotated {
     pub bytes: Vec<u8>,
     /// Extension of the output.
     pub ext: String,
-    /// A notice for the user: the pixels were re-encoded although the input was a JPEG, or
-    /// data stored after the image could not be carried over.
-    pub note: Option<String>,
+    /// Notices for the user: the pixels were re-encoded although the input was a JPEG, edge
+    /// MCUs were trimmed, data stored after the image or metadata could not be carried over.
+    pub notes: Vec<String>,
 }
 
 /// Rotates or flips `p`. A JPEG is transformed in the DCT coefficient domain (no
-/// generational loss) with its EXIF orientation folded in and reset to 1. When that cannot
-/// be done losslessly (a partial edge MCU on a mirrored axis, progressive or unusual
-/// encodings the transform refuses, damaged data) the file is decoded and re-encoded at
-/// quality 95 instead, and `note` says why. Other formats are decoded, transformed and
-/// written as `fallback_ext`. EXIF travels with the image when `keep_exif` is set.
+/// generational loss) with its EXIF orientation folded in and reset to 1; its ICC profile
+/// and XMP packet stay (XMP orientation and dimensions are updated). When that cannot be
+/// done losslessly (a partial edge MCU on a mirrored axis without `trim`, progressive or
+/// unusual encodings the transform refuses, damaged data) the file is decoded and
+/// re-encoded at quality 95 instead, and a note says why. With `trim` a partial edge MCU
+/// row or column on a mirrored axis is dropped instead (like `jpegtran -trim`), so the
+/// rotation stays lossless; a note gives the new size. Other formats are decoded,
+/// transformed and written as `fallback_ext`. EXIF, ICC and XMP travel with the image when
+/// `keep_metadata` is set (a losslessly rotated JPEG is stripped of everything but its ICC
+/// profile when it is not).
 pub fn rotate_file(
     p: &Path,
     by: &str,
     max_bytes: u64,
-    keep_exif: bool,
+    keep_metadata: bool,
     fallback_ext: &str,
+    trim: bool,
 ) -> Result<Rotated> {
     let xf = Transform::by_name(by)
         .ok_or_else(|| format!("bad --by {by} (right|left|180|fliph|flipv)"))?;
     let data = read_input(p, max_bytes)?;
-    let mut note = None;
+    let mut notes = Vec::new();
     if data.starts_with(&[0xFF, 0xD8]) {
         let stored = exif::from_container(&data)
             .and_then(exif::orientation)
             .map_or(Transform::IDENTITY, Transform::from_exif);
-        match jpeg_lossless::transform_reporting(&data, stored.then(xf)) {
-            Ok((out, dropped)) => {
+        match jpeg_lossless::transform_reporting(&data, stored.then(xf), trim) {
+            Ok(done) => {
                 let ext = ext_of(p);
                 let ext = if format_for_target(&ext) == Some(ImageFormat::Jpeg) {
                     ext
                 } else {
                     "jpg".to_string()
                 };
-                let bytes = if keep_exif { out } else { strip::strip(&out)? };
-                let note = (dropped > 0).then(|| {
-                    format!(
-                        "{}: {dropped} bytes stored after the image (vendor extensions such as motion-photo video, depth maps or gain maps) were not carried over, because they describe the unrotated picture",
+                let bytes = if keep_metadata {
+                    done.bytes
+                } else {
+                    strip::strip(&done.bytes)?
+                };
+                if done.dropped > 0 {
+                    notes.push(format!(
+                        "{}: {} bytes stored after the image (vendor extensions such as motion-photo video, depth maps or gain maps) were not carried over, because they describe the unrotated picture",
+                        p.display(),
+                        done.dropped
+                    ));
+                }
+                if let Some(((fw, fh), (tw, th))) = done.trimmed {
+                    notes.push(format!(
+                        "{}: trimmed the partial edge MCUs, {fw}x{fh} became {tw}x{th} before turning",
                         p.display()
-                    )
-                });
-                return Ok(Rotated { bytes, ext, note });
+                    ));
+                }
+                return Ok(Rotated { bytes, ext, notes });
             }
             Err(why) => {
-                note = Some(format!(
+                notes.push(format!(
                     "{}: not rotated losslessly ({why}); re-encoded at quality {ROTATE_FALLBACK_QUALITY}",
                     p.display()
                 ));
             }
         }
     }
-    let exif = keep_exif
-        .then(|| exif::from_container(&data).map(<[u8]>::to_vec))
-        .flatten();
+    let meta = read_metadata(p, &data, keep_metadata);
     let img = rotate(&decode_bytes(p, data)?, by)?;
+    let (bytes, meta_notes) =
+        encode_noted(&img, fallback_ext, Some(ROTATE_FALLBACK_QUALITY), &meta)?;
+    notes.extend(
+        meta_notes
+            .into_iter()
+            .map(|n| format!("{}: {n}", p.display())),
+    );
     Ok(Rotated {
-        bytes: encode_with_exif(
-            &img,
-            fallback_ext,
-            Some(ROTATE_FALLBACK_QUALITY),
-            exif.as_deref(),
-        )?,
+        bytes,
         ext: fallback_ext.to_string(),
-        note,
+        notes,
     })
 }
 
@@ -588,8 +666,34 @@ pub fn parse_size(spec: &str) -> Result<u64> {
         .ok_or_else(|| format!("bad size {spec}"))
 }
 
-/// JPEG quality-and-scale search for the largest result not exceeding `max_bytes`.
-pub fn compress_to(img: &DynamicImage, max_bytes: u64) -> Result<Vec<u8>> {
+/// JPEG quality-and-scale search for the largest result not exceeding `max_bytes`; the
+/// metadata of the source (`meta`) is part of every candidate. When even the smallest
+/// candidate with metadata is too big, the search repeats without it and says so. Returns
+/// the file and the notes of the metadata that could not be carried.
+pub fn compress_to(
+    img: &DynamicImage,
+    max_bytes: u64,
+    meta: &Metadata,
+) -> Result<(Vec<u8>, Vec<String>)> {
+    if let Some(found) = compress_search(img, max_bytes, meta)? {
+        return Ok(found);
+    }
+    if !meta.is_empty()
+        && let Some((bytes, mut notes)) = compress_search(img, max_bytes, &Metadata::default())?
+    {
+        notes.push(format!(
+            "metadata dropped: {max_bytes} bytes is too small to hold the image and its metadata"
+        ));
+        return Ok((bytes, notes));
+    }
+    Err(format!("cannot compress below {max_bytes} bytes"))
+}
+
+fn compress_search(
+    img: &DynamicImage,
+    max_bytes: u64,
+    meta: &Metadata,
+) -> Result<Option<(Vec<u8>, Vec<String>)>> {
     for scale in [100u32, 85, 70, 55, 40, 30, 20] {
         let scaled = if scale == 100 {
             img.clone()
@@ -599,19 +703,19 @@ pub fn compress_to(img: &DynamicImage, max_bytes: u64) -> Result<Vec<u8>> {
         let (mut lo, mut hi, mut best) = (30u8, 95u8, None);
         while lo <= hi {
             let q = lo + (hi - lo) / 2;
-            let bytes = encode(&scaled, "jpg", Some(q))?;
+            let (bytes, notes) = encode_noted(&scaled, "jpg", Some(q), meta)?;
             if bytes.len() as u64 <= max_bytes {
-                best = Some(bytes);
+                best = Some((bytes, notes));
                 lo = q + 1;
             } else {
                 hi = q - 1;
             }
         }
-        if let Some(b) = best {
-            return Ok(b);
+        if best.is_some() {
+            return Ok(best);
         }
     }
-    Err(format!("cannot compress below {max_bytes} bytes"))
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -682,10 +786,12 @@ mod tests {
     #[test]
     fn compress_meets_target_or_fails() {
         let img = noisy(600, 600);
-        let out = compress_to(&img, 60 * 1024).unwrap();
+        let out = compress_to(&img, 60 * 1024, &Metadata::default())
+            .unwrap()
+            .0;
         assert!(out.len() <= 60 * 1024);
         assert!(image::load_from_memory(&out).is_ok());
-        assert!(compress_to(&img, 200).is_err());
+        assert!(compress_to(&img, 200, &Metadata::default()).is_err());
     }
 
     #[test]
@@ -819,8 +925,8 @@ mod tests {
         // get a 180 degree turn and Orientation becomes 1.
         let src = dir.join("cam.jpg");
         std::fs::write(&src, camera_jpeg(64, 48, 6)).unwrap();
-        let r = rotate_file(&src, "right", u64::MAX, true, "jpg").unwrap();
-        assert!(r.note.is_none() && r.ext == "jpg");
+        let r = rotate_file(&src, "right", u64::MAX, true, "jpg", false).unwrap();
+        assert!(r.notes.is_empty() && r.ext == "jpg");
         let shown_before = decode_full(&src, u64::MAX).unwrap();
         assert_eq!((shown_before.width(), shown_before.height()), (48, 64));
         let want = rotate(&shown_before, "right").unwrap().to_rgb8();
@@ -842,7 +948,7 @@ mod tests {
             (Some("Thumbcam"), Some("TC-100 Mark II"))
         );
         // Keep EXIF off: the lossless output carries no metadata at all.
-        let bare = rotate_file(&src, "right", u64::MAX, false, "jpg").unwrap();
+        let bare = rotate_file(&src, "right", u64::MAX, false, "jpg", false).unwrap();
         assert!(exif::from_container(&bare.bytes).is_none());
         assert_eq!(decode_as("jpg", &bare.bytes).to_rgb8(), got);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -855,8 +961,8 @@ mod tests {
         let mut path = dir.join("a.jpg");
         std::fs::write(&path, &plain).unwrap();
         for n in 0..4 {
-            let r = rotate_file(&path, "right", u64::MAX, true, "jpg").unwrap();
-            assert!(r.note.is_none(), "turn {n}");
+            let r = rotate_file(&path, "right", u64::MAX, true, "jpg", false).unwrap();
+            assert!(r.notes.is_empty(), "turn {n}");
             path = dir.join(format!("turn{n}.jpg"));
             std::fs::write(&path, r.bytes).unwrap();
         }
@@ -874,8 +980,8 @@ mod tests {
         // 50x30 is not a multiple of the 8x8 MCU; Orientation 6 means displayed 30x50.
         let src = dir.join("odd.jpg");
         std::fs::write(&src, camera_jpeg(50, 30, 6)).unwrap();
-        let r = rotate_file(&src, "right", u64::MAX, true, "jpg").unwrap();
-        let note = r.note.expect("a note explains the re-encode");
+        let r = rotate_file(&src, "right", u64::MAX, true, "jpg", false).unwrap();
+        let note = r.notes.first().expect("a note explains the re-encode");
         assert!(
             note.contains("not rotated losslessly") && note.contains("quality 95"),
             "{note}"
@@ -886,7 +992,7 @@ mod tests {
         let block = exif::from_container(&r.bytes).expect("EXIF carried");
         assert_eq!(exif::orientation(block), Some(1));
         assert_eq!(exif::summarize(block).make.as_deref(), Some("Thumbcam"));
-        assert!(rotate_file(&src, "sideways", u64::MAX, true, "jpg").is_err());
+        assert!(rotate_file(&src, "sideways", u64::MAX, true, "jpg", false).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -897,8 +1003,8 @@ mod tests {
         let mut data = camera_jpeg(64, 48, 1);
         data.extend_from_slice(&[0xAA; 5000]);
         std::fs::write(&src, data).unwrap();
-        let r = rotate_file(&src, "left", u64::MAX, true, "jpg").unwrap();
-        let note = r.note.expect("a note names the dropped data");
+        let r = rotate_file(&src, "left", u64::MAX, true, "jpg", false).unwrap();
+        let note = r.notes.first().expect("a note names the dropped data");
         assert!(note.contains("5000 bytes stored after the image"), "{note}");
         assert!(r.bytes.ends_with(&[0xFF, 0xD9]));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -909,8 +1015,8 @@ mod tests {
         let dir = temp_dir_for("rot-png");
         let src = dir.join("a.png");
         std::fs::write(&src, encode(&noisy(7, 3), "png", None).unwrap()).unwrap();
-        let r = rotate_file(&src, "left", u64::MAX, true, "png").unwrap();
-        assert!(r.note.is_none() && r.ext == "png");
+        let r = rotate_file(&src, "left", u64::MAX, true, "png", false).unwrap();
+        assert!(r.notes.is_empty() && r.ext == "png");
         let img = decode_as("png", &r.bytes);
         assert_eq!((img.width(), img.height()), (3, 7));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -921,15 +1027,15 @@ mod tests {
         let dir = temp_dir_for("exif-carry");
         let src = dir.join("cam.jpg");
         std::fs::write(&src, camera_jpeg(64, 48, 6)).unwrap();
-        let (img, exif_block) = decode_full_with_exif(&src, u64::MAX, true).unwrap();
+        let (img, meta) = decode_full_with_meta(&src, u64::MAX, true).unwrap();
         assert_eq!(
             (img.width(), img.height()),
             (48, 64),
             "the decoder applied Orientation 6"
         );
-        assert!(exif_block.is_some());
+        assert!(meta.exif.is_some());
         for ext in ["jpg", "png", "webp", "tiff"] {
-            let bytes = encode_with_exif(&img, ext, None, exif_block.as_deref()).unwrap();
+            let bytes = encode_with_meta(&img, ext, None, &meta).unwrap();
             let s = exif::summarize_file(&bytes);
             assert_eq!(s.make.as_deref(), Some("Thumbcam"), "{ext}");
             assert_eq!(s.model.as_deref(), Some("TC-100 Mark II"), "{ext}");
@@ -943,17 +1049,304 @@ mod tests {
             }
         }
         // Without the block, or for formats that cannot hold EXIF, nothing is written.
-        let plain = encode_with_exif(&img, "png", None, None).unwrap();
+        let plain = encode(&img, "png", None).unwrap();
         assert!(exif::from_container(&plain).is_none());
         for ext in ["bmp", "gif", "qoi", "tga", "ico"] {
-            assert!(encode_with_exif(&img, ext, None, exif_block.as_deref()).is_ok());
+            assert!(encode_with_meta(&img, ext, None, &meta).is_ok());
         }
         assert!(
-            decode_full_with_exif(&src, u64::MAX, false)
+            decode_full_with_meta(&src, u64::MAX, false)
                 .unwrap()
                 .1
-                .is_none()
+                .is_empty()
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A camera JPEG that also carries a 150 kB RGB ICC profile (three `APP2` chunks) and an
+    /// XMP packet saying orientation 6 and 640x480.
+    fn tagged_jpeg(w: u32, h: u32, orientation: u16, icc: &[u8]) -> Vec<u8> {
+        carry::testutil::inject_icc_xmp_into_jpeg(
+            &camera_jpeg(w, h, orientation),
+            Some(icc),
+            Some(&carry::testutil::xmp_packet()),
+        )
+    }
+
+    fn xmp_text(m: &Metadata) -> String {
+        String::from_utf8(m.xmp.clone().expect("XMP carried")).unwrap()
+    }
+
+    #[test]
+    fn conversion_carries_icc_and_xmp_into_every_container_and_places_them() {
+        let dir = temp_dir_for("icc-xmp");
+        let src = dir.join("tagged.jpg");
+        let icc = carry::testutil::icc_profile(b"RGB ", 150_000);
+        std::fs::write(&src, tagged_jpeg(64, 48, 6, &icc)).unwrap();
+        let (img, meta) = decode_full_with_meta(&src, u64::MAX, true).unwrap();
+        assert_eq!((img.width(), img.height()), (48, 64));
+        assert_eq!(meta.icc.as_deref(), Some(&icc[..]));
+        for ext in ["jpg", "png", "webp", "tiff"] {
+            let (bytes, notes) = encode_noted(&img, ext, None, &meta).unwrap();
+            assert!(notes.is_empty(), "{ext}: {notes:?}");
+            let back = Metadata::read(ext, &bytes);
+            assert_eq!(back.icc.as_deref(), Some(&icc[..]), "{ext}: ICC bytes");
+            let x = xmp_text(&back);
+            assert!(x.contains(r#"tiff:Orientation="1""#), "{ext}: {x}");
+            assert!(x.contains(r#"exif:PixelXDimension="48""#), "{ext}: {x}");
+            assert!(
+                x.contains("<exif:PixelYDimension>64</exif:PixelYDimension>"),
+                "{ext}: {x}"
+            );
+            assert!(x.contains("<dc:title>Thumbwright test</dc:title>"), "{ext}");
+            let block = back.exif.as_deref().expect(ext);
+            assert_eq!(exif::summarize(block).make.as_deref(), Some("Thumbcam"));
+            let shown = decode_as(ext, &bytes);
+            assert_eq!((shown.width(), shown.height()), (48, 64), "{ext}");
+        }
+        // JPEG placement: JFIF, Exif, three ICC chunks numbered 1..3 of 3, XMP, then the frame header.
+        let jpeg = encode_noted(&img, "jpg", None, &meta).unwrap().0;
+        let segs = exif::jpeg_segments(&jpeg);
+        let kinds: Vec<(u8, &[u8])> = segs
+            .iter()
+            .map(|(m, p)| (*m, &p[..p.len().min(4)]))
+            .collect();
+        assert_eq!(kinds[0].0, 0xE0);
+        assert_eq!(kinds[1], (0xE1, &b"Exif"[..]));
+        for (i, (m, p)) in segs[2..5].iter().enumerate() {
+            assert_eq!(
+                (*m, &p[..12], p[12], p[13]),
+                (0xE2, &b"ICC_PROFILE\0"[..], i as u8 + 1, 3)
+            );
+        }
+        assert_eq!(segs[5].0, 0xE1);
+        assert!(segs[5].1.starts_with(b"http://ns.adobe.com/xap/1.0/\0"));
+        assert_eq!(segs[6].0, 0xC0, "the frame header follows");
+        // PNG: both before the pixel data.
+        let png = encode_noted(&img, "png", None, &meta).unwrap().0;
+        let types: Vec<[u8; 4]> = exif::png_chunks(&png).map(|(t, _)| t).collect();
+        let pos = |t: &[u8; 4]| types.iter().position(|x| x == t).unwrap();
+        assert_eq!(pos(b"IHDR"), 0);
+        assert!(pos(b"iCCP") < pos(b"IDAT") && pos(b"iTXt") < pos(b"IDAT"));
+        // WebP: VP8X (ICC, EXIF, XMP flags), ICCP, image, EXIF, XMP; RIFF size is exact.
+        let webp = encode_noted(&img, "webp", None, &meta).unwrap().0;
+        let chunks: Vec<([u8; 4], &[u8])> = exif::webp_chunks(&webp).collect();
+        let order: Vec<&[u8; 4]> = chunks.iter().map(|(t, _)| t).collect();
+        assert_eq!(order, [b"VP8X", b"ICCP", b"VP8L", b"EXIF", b"XMP "]);
+        assert_eq!(chunks[0].1[0] & 0x2C, 0x2C, "ICC, EXIF and XMP flags");
+        assert_eq!(
+            u32::from_le_bytes(webp[4..8].try_into().unwrap()) as usize,
+            webp.len() - 8
+        );
+        // TIFF: tags 34675 and 700 in IFD0.
+        let tiff = encode_noted(&img, "tiff", None, &meta).unwrap().0;
+        assert_eq!(
+            exif::tiff_bytes(&tiff, exif::TAG_ICC_PROFILE),
+            Some(&icc[..])
+        );
+        assert!(exif::tiff_bytes(&tiff, exif::TAG_XMP).is_some());
+        // Metadata off: nothing is read, so nothing is written.
+        let (_, none) = decode_full_with_meta(&src, u64::MAX, false).unwrap();
+        assert!(none.is_empty());
+        let bare = encode_noted(&img, "png", None, &none).unwrap().0;
+        assert!(Metadata::read("png", &bare).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn email_and_compress_carry_exif_icc_and_xmp() {
+        let dir = temp_dir_for("email-compress");
+        let src = dir.join("tagged.jpg");
+        let icc = carry::testutil::icc_profile(b"RGB ", 3000);
+        std::fs::write(&src, tagged_jpeg(96, 64, 6, &icc)).unwrap();
+        let (img, meta) = decode_full_with_meta(&src, u64::MAX, true).unwrap();
+        // `email`: shrink, JPEG at quality 85.
+        let small = apply_resize(&img, Resize::Fit(32, 32));
+        let bytes = encode_with_meta(&small, "jpg", Some(85), &meta).unwrap();
+        let back = Metadata::read("jpg", &bytes);
+        assert_eq!(back.icc.as_deref(), Some(&icc[..]));
+        assert_eq!(
+            exif::summarize(back.exif.as_deref().unwrap())
+                .make
+                .as_deref(),
+            Some("Thumbcam")
+        );
+        assert_eq!(exif::orientation(back.exif.as_deref().unwrap()), Some(1));
+        let x = xmp_text(&back);
+        let (w, h) = (small.width(), small.height());
+        assert!(x.contains(&format!(r#"exif:PixelXDimension="{w}""#)), "{x}");
+        assert!(x.contains(&format!(">{h}</exif:PixelYDimension>")), "{x}");
+        // `compress`: metadata is in the file when it fits.
+        let big = noisy(600, 600);
+        let (bytes, notes) = compress_to(&big, 60 * 1024, &meta).unwrap();
+        assert!(bytes.len() <= 60 * 1024 && notes.is_empty(), "{notes:?}");
+        assert_eq!(Metadata::read("jpg", &bytes).icc.as_deref(), Some(&icc[..]));
+        // When the profile alone cannot fit the limit, the image wins and the note says so.
+        let huge_icc = carry::testutil::icc_profile(b"RGB ", 70_000);
+        let heavy = Metadata {
+            icc: Some(huge_icc),
+            ..meta.clone()
+        };
+        let (bytes, notes) = compress_to(&big, 60 * 1024, &heavy).unwrap();
+        assert!(bytes.len() <= 60 * 1024);
+        assert!(
+            notes.iter().any(|n| n.contains("metadata dropped")),
+            "{notes:?}"
+        );
+        assert!(Metadata::read("jpg", &bytes).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_profile_that_does_not_describe_the_written_pixels_is_dropped_with_a_note() {
+        let dir = temp_dir_for("cmyk-icc");
+        let src = dir.join("cmyk.jpg");
+        let icc = carry::testutil::icc_profile(b"CMYK", 4000);
+        std::fs::write(&src, tagged_jpeg(32, 32, 1, &icc)).unwrap();
+        let (img, meta) = decode_full_with_meta(&src, u64::MAX, true).unwrap();
+        assert_eq!(meta.icc.as_deref(), Some(&icc[..]), "read as found");
+        for ext in ["jpg", "png", "webp", "tiff", "avif", "jxl"] {
+            let (bytes, notes) = encode_noted(&img, ext, None, &meta).unwrap();
+            assert!(
+                notes.iter().any(|n| n.contains("ICC profile")),
+                "{ext}: {notes:?}"
+            );
+            if !matches!(ext, "avif" | "jxl") {
+                assert!(Metadata::read(ext, &bytes).icc.is_none(), "{ext}");
+            }
+        }
+        // A grey profile on grey PNG pixels is kept; the same profile for JPEG (written as
+        // RGB) is not.
+        let grey = DynamicImage::ImageLuma8(image::GrayImage::new(9, 9));
+        let gicc = carry::testutil::icc_profile(b"GRAY", 2000);
+        let gm = Metadata {
+            icc: Some(gicc.clone()),
+            ..Metadata::default()
+        };
+        let png = encode_noted(&grey, "png", None, &gm).unwrap();
+        assert!(png.1.is_empty());
+        assert_eq!(
+            Metadata::read("png", &png.0).icc.as_deref(),
+            Some(&gicc[..])
+        );
+        let jpg = encode_noted(&grey, "jpg", None, &gm).unwrap();
+        assert_eq!(jpg.1.len(), 1);
+        assert!(Metadata::read("jpg", &jpg.0).icc.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tiff_is_an_exif_icc_and_xmp_source() {
+        let dir = temp_dir_for("tiff-source");
+        let src = dir.join("cam.jpg");
+        let icc = carry::testutil::icc_profile(b"RGB ", 5000);
+        std::fs::write(&src, tagged_jpeg(64, 48, 1, &icc)).unwrap();
+        let (img, meta) = decode_full_with_meta(&src, u64::MAX, true).unwrap();
+        let tiff_path = dir.join("cam.tif");
+        std::fs::write(
+            &tiff_path,
+            encode_with_meta(&img, "tiff", None, &meta).unwrap(),
+        )
+        .unwrap();
+        let (img2, from_tiff) = decode_full_with_meta(&tiff_path, u64::MAX, true).unwrap();
+        assert_eq!((img2.width(), img2.height()), (64, 48));
+        let block = from_tiff
+            .exif
+            .as_deref()
+            .expect("EXIF from IFD0, ExifIFD and GPS");
+        let s = exif::summarize(block);
+        assert_eq!(s.make.as_deref(), Some("Thumbcam"));
+        assert_eq!(s.datetime.as_deref(), Some("2023:07:04 12:34:56"));
+        assert!(s.gps.is_some());
+        assert_eq!(s.dpi, Some((300.0, 300.0)));
+        assert!(block.len() < 2000, "a compact block, not the whole TIFF");
+        assert_eq!(from_tiff.icc.as_deref(), Some(&icc[..]));
+        assert!(xmp_text(&from_tiff).contains(r#"tiff:Orientation="1""#));
+        // Into every writer that holds EXIF.
+        for ext in ["jpg", "png", "webp", "tiff"] {
+            let bytes = encode_with_meta(&img2, ext, None, &from_tiff).unwrap();
+            let s = exif::summarize_file(&bytes);
+            assert_eq!(s.make.as_deref(), Some("Thumbcam"), "{ext}");
+            assert!(s.gps.is_some(), "{ext}");
+            assert_eq!(
+                Metadata::read(ext, &bytes).icc.as_deref(),
+                Some(&icc[..]),
+                "{ext}"
+            );
+        }
+        // Only a .tif/.tiff file is a TIFF source: a TIFF-based RAW container is not.
+        let raw_like = std::fs::read(&tiff_path).unwrap();
+        assert!(Metadata::read("dng", &raw_like).is_empty());
+        assert!(Metadata::read("nef", &raw_like).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rotate_trim_keeps_a_partial_mcu_image_lossless_and_carries_metadata() {
+        let dir = temp_dir_for("rotate-trim");
+        let src = dir.join("odd.jpg");
+        let icc = carry::testutil::icc_profile(b"RGB ", 70_000);
+        // Stored 50x30 with Orientation 6, turned right: net 180 degrees, both axes mirrored.
+        std::fs::write(&src, tagged_jpeg(50, 30, 6, &icc)).unwrap();
+        let plain = rotate_file(&src, "right", u64::MAX, true, "jpg", false).unwrap();
+        assert!(
+            plain.notes[0].contains("not rotated losslessly"),
+            "{:?}",
+            plain.notes
+        );
+        // The fallback re-encode also carries the profile and the packet.
+        let m = Metadata::read("jpg", &plain.bytes);
+        assert_eq!(m.icc.as_deref(), Some(&icc[..]));
+        assert!(xmp_text(&m).contains(r#"tiff:Orientation="1""#));
+
+        let r = rotate_file(&src, "right", u64::MAX, true, "jpg", true).unwrap();
+        assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+        assert!(
+            r.notes[0].contains("trimmed the partial edge MCUs, 50x30 became 48x24"),
+            "{:?}",
+            r.notes
+        );
+        let img = decode_as("jpg", &r.bytes);
+        assert_eq!((img.width(), img.height()), (48, 24));
+        let m = Metadata::read("jpg", &r.bytes);
+        assert_eq!(
+            m.icc.as_deref(),
+            Some(&icc[..]),
+            "ICC passes through the lossless path"
+        );
+        let x = xmp_text(&m);
+        assert!(
+            x.contains(r#"exif:PixelXDimension="48""#) && x.contains(">24</exif:PixelYDimension>")
+        );
+        let block = m.exif.as_deref().unwrap();
+        assert_eq!(exif::orientation(block), Some(1));
+        assert_eq!(exif::summarize(block).make.as_deref(), Some("Thumbcam"));
+        // The kept pixels are the source's: the 180 degree turn of its top-left 48x24
+        // (stored pixels, before the Orientation 6 the decoder would apply).
+        let stored =
+            image::load_from_memory_with_format(&std::fs::read(&src).unwrap(), ImageFormat::Jpeg)
+                .unwrap()
+                .to_rgb8();
+        let want = image::imageops::rotate180(
+            &image::imageops::crop_imm(&stored, 0, 0, 48, 24).to_image(),
+        );
+        let got = img.to_rgb8();
+        let worst = want
+            .pixels()
+            .zip(got.pixels())
+            .flat_map(|(a, b)| {
+                a.0.iter()
+                    .zip(b.0)
+                    .map(|(x, y)| (i32::from(*x) - i32::from(y)).abs())
+            })
+            .max()
+            .unwrap();
+        assert!(worst <= 3, "decoder rounding only, got {worst}");
+        // Keep-metadata off with trim: stripped of EXIF/XMP, ICC stays (like `strip`).
+        let bare = rotate_file(&src, "right", u64::MAX, false, "jpg", true).unwrap();
+        let m = Metadata::read("jpg", &bare.bytes);
+        assert!(m.exif.is_none() && m.xmp.is_none());
+        assert_eq!(m.icc.as_deref(), Some(&icc[..]));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

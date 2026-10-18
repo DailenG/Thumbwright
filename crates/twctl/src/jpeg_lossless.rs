@@ -17,7 +17,9 @@
 //!
 //! Partial edge MCUs: a transform that mirrors an axis would move the padding of a partial
 //! MCU to the near edge, so it is only lossless when that dimension is a multiple of the
-//! MCU size. Such a transform is refused instead of trimming pixels; the caller re-encodes.
+//! MCU size. Such a transform is refused (the caller re-encodes), unless the caller asks to
+//! trim: then the partial edge MCU row or column on each mirrored axis is dropped first, as
+//! `jpegtran -trim` does, and the result stays lossless.
 //!
 //! Dropped from the output: data after the end-of-image marker (e.g. MPO secondary
 //! images) and the MPF segment, whose offsets would be invalid. The EXIF segment is
@@ -27,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use tw_core::decode::{check_alloc, check_dimensions};
 
+use crate::carry;
 use crate::exif;
 
 pub type Result<T, E = String> = std::result::Result<T, E>;
@@ -981,6 +984,48 @@ fn parse(d: &[u8], deadline: Instant) -> Result<Parsed> {
 // Transform
 // ---------------------------------------------------------------------------------------
 
+/// Drops the partial edge MCU row and column on each source axis that `xf` mirrors, like
+/// `jpegtran -trim`: the kept size on such an axis is the largest whole number of MCUs. The
+/// coefficient blocks of the kept area are copied unchanged, so no pixel inside it changes.
+/// Axes `xf` does not mirror keep their partial edge MCU (it stays at the far edge).
+fn trim_frame(mut f: Frame, xf: Transform) -> Result<Frame> {
+    let dim = [f.width, f.height];
+    let mcu = [8 * f.hmax, 8 * f.vmax];
+    let mut keep = dim;
+    for i in 0..2 {
+        let s = usize::from(xf.src[i]);
+        if xf.neg[i] && !dim[s].is_multiple_of(mcu[s]) {
+            keep[s] = dim[s] / mcu[s] * mcu[s];
+            if keep[s] == 0 {
+                return Err(format!(
+                    "{}x{} is smaller than one {}x{} MCU along a mirrored axis, so nothing would be left after trimming",
+                    f.width, f.height, mcu[0], mcu[1]
+                ));
+            }
+        }
+    }
+    if keep == dim {
+        return Ok(f);
+    }
+    let (mcus_x, mcus_y) = (ceil_div(keep[0], mcu[0]), ceil_div(keep[1], mcu[1]));
+    for c in &mut f.comps {
+        let (bw, bh) = (mcus_x * c.h, mcus_y * c.v);
+        let mut coefs = Vec::with_capacity(bw * bh * 64);
+        for by in 0..bh {
+            let row = by * c.blocks_w * 64;
+            coefs.extend_from_slice(&c.coefs[row..row + bw * 64]);
+        }
+        c.coefs = coefs;
+        c.blocks_w = bw;
+        c.blocks_h = bh;
+    }
+    f.width = keep[0];
+    f.height = keep[1];
+    f.mcus_x = mcus_x;
+    f.mcus_y = mcus_y;
+    Ok(f)
+}
+
 fn transform_frame(f: Frame, xf: Transform) -> Result<Frame> {
     let dim = [f.width, f.height];
     let mcu = [8 * f.hmax, 8 * f.vmax];
@@ -1324,18 +1369,6 @@ fn push_segment(out: &mut Vec<u8>, marker: u8, payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Sets a one-digit XMP `tiff:Orientation` to 1 in place (same length).
-fn reset_xmp_orientation(xmp: &mut [u8]) {
-    for pat in [&b"tiff:Orientation=\""[..], &b"<tiff:Orientation>"[..]] {
-        if let Some(i) = xmp.windows(pat.len()).position(|w| w == pat)
-            && let Some(digit) = xmp.get_mut(i + pat.len())
-            && digit.is_ascii_digit()
-        {
-            *digit = b'1';
-        }
-    }
-}
-
 fn encode(meta: Meta, out_frame: &Frame, deadline: Instant) -> Result<Vec<u8>> {
     let Meta {
         segments,
@@ -1427,8 +1460,11 @@ fn encode(meta: Meta, out_frame: &Frame, deadline: Instant) -> Result<Vec<u8>> {
                 payload.truncate(6);
                 payload.extend_from_slice(&fixed);
             }
-            0xE1 if payload.starts_with(b"http://ns.adobe.com/xap/1.0/\0") => {
-                reset_xmp_orientation(&mut payload);
+            0xE1 if payload.starts_with(carry::JPEG_XMP_NS) => {
+                let ns = carry::JPEG_XMP_NS.len();
+                let fixed = carry::normalise_xmp(&payload[ns..], (f.width as u32, f.height as u32));
+                payload.truncate(ns);
+                payload.extend_from_slice(&fixed);
             }
             0xE2 if payload.starts_with(b"MPF\0") => continue,
             _ => {}
@@ -1498,24 +1534,42 @@ fn encode(meta: Meta, out_frame: &Frame, deadline: Instant) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// A transformed JPEG and what it did not keep.
+#[derive(Debug)]
+pub struct Transformed {
+    pub bytes: Vec<u8>,
+    /// Bytes after the end-of-image marker that were not carried over.
+    pub dropped: usize,
+    /// `(width, height)` before and after trimming partial edge MCUs (source orientation);
+    /// `None` when nothing was trimmed.
+    pub trimmed: Option<((usize, usize), (usize, usize))>,
+}
+
 /// Applies `xf` to the JPEG `data` without recompressing it. See the module docs for what
-/// is supported, what is preserved and when this refuses. Also returns the number of
-/// bytes after the end-of-image marker that were not carried over.
-pub fn transform_reporting(data: &[u8], xf: Transform) -> Result<(Vec<u8>, usize)> {
+/// is supported, what is preserved and when this refuses. With `trim`, a partial edge MCU
+/// on a mirrored axis is dropped (see [`trim_frame`]) instead of refusing.
+pub fn transform_reporting(data: &[u8], xf: Transform, trim: bool) -> Result<Transformed> {
     let deadline = Instant::now() + BUDGET;
     let Parsed { frame, meta } = parse(data, deadline)?;
     let blocks_per_mcu: usize = frame.comps.iter().map(|c| c.h * c.v).sum();
     if frame.comps.len() > 1 && blocks_per_mcu > 10 {
         return Err("more than 10 blocks per MCU".into());
     }
+    let before = (frame.width, frame.height);
+    let frame = if trim { trim_frame(frame, xf)? } else { frame };
+    let after = (frame.width, frame.height);
     let out_frame = transform_frame(frame, xf)?;
-    let trailer = meta.trailer;
-    encode(meta, &out_frame, deadline).map(|bytes| (bytes, trailer))
+    let dropped = meta.trailer;
+    Ok(Transformed {
+        bytes: encode(meta, &out_frame, deadline)?,
+        dropped,
+        trimmed: (before != after).then_some((before, after)),
+    })
 }
 
 #[cfg(test)]
 fn transform(data: &[u8], xf: Transform) -> Result<Vec<u8>> {
-    transform_reporting(data, xf).map(|(bytes, _)| bytes)
+    transform_reporting(data, xf, false).map(|t| t.bytes)
 }
 
 #[cfg(test)]
@@ -1937,18 +1991,128 @@ mod tests {
         assert_planes_exact(&data, &out, transpose, "partial transpose");
     }
 
+    /// `out` is the top-left `keep` area of `data` (source pixels, whole MCUs on every
+    /// trimmed axis) with `xf` applied: the exact dequantised IDCT of the kept blocks.
+    fn assert_trimmed_planes(data: &[u8], out: &[u8], xf: Transform, keep: (usize, usize)) {
+        let fi = parse(data, deadline()).unwrap().frame;
+        let fo = parse(out, deadline()).unwrap().frame;
+        for ci in 0..fi.comps.len() {
+            let c = &fi.comps[ci];
+            let (p, w, _) = plane(&fi, ci);
+            let kw = keep.0.div_ceil(8 * fi.hmax) * c.h * 8;
+            let kh = keep.1.div_ceil(8 * fi.vmax) * c.v * 8;
+            let cropped: Vec<f64> = (0..kh)
+                .flat_map(|y| p[y * w..y * w + kw].to_vec())
+                .collect();
+            let (e, ew, eh) = apply_plane(&cropped, kw, kh, xf);
+            let (g, gw, gh) = plane(&fo, ci);
+            assert_eq!((ew, eh), (gw, gh), "component {ci} grid");
+            let worst = e
+                .iter()
+                .zip(&g)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max);
+            assert!(worst < 1e-6, "component {ci} IDCT differs by {worst}");
+        }
+    }
+
+    #[test]
+    fn trim_drops_the_partial_edge_mcus_of_mirrored_axes_only() {
+        let transpose = Transform::from_exif(5);
+        // (name, transform, kept source size, output size) for a 50x50 source.
+        let cases = [
+            ("right", Transform::RIGHT, (50, 48), (48, 50)),
+            ("left", Transform::LEFT, (48, 50), (50, 48)),
+            ("180", Transform::ROTATE_180, (48, 48), (48, 48)),
+            ("fliph", Transform::FLIP_H, (48, 50), (48, 50)),
+            ("flipv", Transform::FLIP_V, (50, 48), (50, 48)),
+        ];
+        for (data, mcu) in [
+            (jpeg(&picture(50, 50), 85), 8),
+            (subsampled_jpeg(50, 50, 2, 2), 16),
+        ] {
+            for (name, xf, keep, size) in cases {
+                // 16x16 MCUs keep 48 as well, but an axis that is not trimmed stays 50.
+                let r = transform_reporting(&data, xf, true).unwrap();
+                assert_eq!(r.trimmed, Some(((50, 50), keep)), "{name} mcu {mcu}");
+                let f = parse(&r.bytes, deadline()).unwrap().frame;
+                assert_eq!((f.width, f.height), size, "{name} mcu {mcu}");
+                assert_trimmed_planes(&data, &r.bytes, xf, keep);
+                let img = decode(&r.bytes);
+                assert_eq!(
+                    (img.width() as usize, img.height() as usize),
+                    size,
+                    "{name} mcu {mcu}: decodes at the new size"
+                );
+                // Without trim the same turn is still refused.
+                assert!(transform_reporting(&data, xf, false).is_err(), "{name}");
+            }
+            // A transpose never mirrors, so nothing is trimmed and nothing is lost.
+            let r = transform_reporting(&data, transpose, true).unwrap();
+            assert_eq!(r.trimmed, None);
+            assert_planes_exact(&data, &r.bytes, transpose, "transpose with trim");
+        }
+        // Aligned input: trim is a no-op and the bytes are those of the plain transform.
+        let data = jpeg(&picture(64, 40), 85);
+        for name in ALL {
+            let xf = Transform::by_name(name).unwrap();
+            let r = transform_reporting(&data, xf, true).unwrap();
+            assert_eq!(r.trimmed, None, "{name}");
+            assert_eq!(r.bytes, transform(&data, xf).unwrap(), "{name}");
+        }
+        // Only the mirrored axis is trimmed with a mixed grid: 4:2:0 64x40 right turn
+        // mirrors the input's y axis, 40 is partial in 16-pixel MCUs.
+        let data = subsampled_jpeg(64, 40, 2, 2);
+        let r = transform_reporting(&data, Transform::RIGHT, true).unwrap();
+        assert_eq!(r.trimmed, Some(((64, 40), (64, 32))));
+        assert_trimmed_planes(&data, &r.bytes, Transform::RIGHT, (64, 32));
+    }
+
+    #[test]
+    fn trim_refuses_an_image_smaller_than_one_mcu_on_a_mirrored_axis() {
+        let data = jpeg(&picture(6, 20), 85);
+        let err = transform_reporting(&data, Transform::FLIP_H, true).unwrap_err();
+        assert!(err.contains("nothing would be left"), "{err}");
+        // The other axis is fine: a vertical flip trims only the height 20 to 16.
+        let r = transform_reporting(&data, Transform::FLIP_V, true).unwrap();
+        assert_eq!(r.trimmed, Some(((6, 20), (6, 16))));
+    }
+
+    #[test]
+    fn trim_keeps_icc_and_rewrites_xmp_for_the_new_size() {
+        use crate::carry::Metadata;
+        use crate::carry::testutil::{icc_profile, inject_icc_xmp_into_jpeg};
+        let icc = icc_profile(b"RGB ", 90_000);
+        let xmp =
+            br#"<x tiff:Orientation="6" exif:PixelXDimension="50" exif:PixelYDimension="50"/>"#;
+        let data = inject_icc_xmp_into_jpeg(&jpeg(&picture(50, 50), 85), Some(&icc), Some(xmp));
+        let r = transform_reporting(&data, Transform::ROTATE_180, true).unwrap();
+        let m = Metadata::read("jpg", &r.bytes);
+        assert_eq!(m.icc.as_deref(), Some(&icc[..]), "ICC passes through whole");
+        let x = String::from_utf8(m.xmp.unwrap()).unwrap();
+        assert!(x.contains(r#"tiff:Orientation="1""#), "{x}");
+        assert!(x.contains(r#"exif:PixelXDimension="48""#), "{x}");
+        assert!(x.contains(r#"exif:PixelYDimension="48""#), "{x}");
+    }
+
     #[test]
     fn data_after_the_image_is_reported_and_dropped() {
         let plain = jpeg(&picture(32, 32), 80);
         let mut with_trailer = plain.clone();
         with_trailer.extend_from_slice(b"SEFHvendor-extension-data....SEFT");
-        let (out, dropped) = transform_reporting(&with_trailer, Transform::RIGHT).unwrap();
+        let done = transform_reporting(&with_trailer, Transform::RIGHT, false).unwrap();
+        let (out, dropped) = (done.bytes, done.dropped);
         assert_eq!(dropped, 33);
         assert!(out.ends_with(&[0xFF, 0xD9]), "output ends at EOI");
         // Padding is not data.
         let mut padded = plain;
         padded.extend_from_slice(&[0, 0, b'\n']);
-        assert_eq!(transform_reporting(&padded, Transform::RIGHT).unwrap().1, 0);
+        assert_eq!(
+            transform_reporting(&padded, Transform::RIGHT, false)
+                .unwrap()
+                .dropped,
+            0
+        );
     }
 
     #[test]
