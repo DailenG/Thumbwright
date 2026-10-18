@@ -96,10 +96,35 @@ The branches `wip/perf`, `wip/conv-fidelity`, `wip/raw-jxl-verify`, `wip/setting
 - **Not verified:**
   - Everything that needs elevation: the MSI install, upgrade, repair and uninstall (`scripts/test-install.ps1`), `DllRegisterServer` against HKLM, and the signing steps of `scripts/release.ps1`.
   - The preview handler inside `prevhost.exe`, the property handler in the real property system, the sparse MSIX package and the Windows 11 menu in a real Explorer.
-  - The settings window's Rebuild thumbnail cache, Repair and Turn on actions against a live Explorer, and the owner-drawn menu preview.
+  - The settings window's Rebuild thumbnail cache, Repair and Turn on actions against a live Explorer. The owner-drawn menu preview was checked only in a probe process that hosts the menu class (see the live run below), not in Explorer's own menu.
   - Upload to any public host (hosts are from public API knowledge, never contacted).
   - Most of the 155 formats added by the format-coverage branch were checked only against synthetic fixtures or external tools, not real files from the applications (see the unverified-layout list in section 5 and the branch notes).
   - Release-profile numbers: `docs/performance.md` is from the perf branch's own runs and was not repeated on the integrated tree.
+
+### Live run (release build, medium integrity, 2026-10-18)
+
+Release build (`--release`, own target dir) staged in a portable folder with an empty `Thumbwright.ini`, Windows 11 build 10.0.26340, non-elevated session (Mandatory Label: Medium). `twctl register` (315 file types), then throwaway probes (C# via `csc`, PowerShell, Python; kept outside the repo) drove the real OS thumbnail cache and a menu host. Registry baseline taken before, `twctl register --off` after.
+
+- **Thumbnails** through `IThumbnailCache::GetThumbnail(WTS_FORCEEXTRACTION | WTS_EXTRACTDONOTCACHE, 256)`: every case below returned `S_OK` with alpha type 2 (`WTSAT_ARGB`) and a non-blank bitmap.
+
+  | File | Thumbnail size |
+  |---|---|
+  | PNG, JPEG (real 7 MB photo), SVG | 256x171, 192x256, 256x171 |
+  | TGA, QOI, KRA | 64x48, 64x48, 200x150 |
+  | MP3 with cover art | 120x120 |
+  | CRW fixture, real HEIC, JXR (written through WIC `WmpBitmapEncoder`) | 256x192, 192x256, 256x192 |
+  | MP4 (three real files, 0.36, 4.6 and 138 MB) | 256x106, 144x256, 256x144 |
+  | PDF (made with `twctl pdf`) | 256x171 |
+  | JXL fixtures `sunset_logo`, `bicycles` | 171x256, 256x158 |
+
+  An MP3 without cover art returned `0x8004B200`. Corrupt PNG, JPEG, SVG and MP4 (random bytes, an unclosed `<svg`, `ZZZ...`) returned `0x8004B200` and each produced a `GetThumbnail: failed ... ext=...` line in `%LOCALAPPDATA%\Thumbwright.log` from the surrogate's pid, which shows the product provider (not a Windows handler) served PNG, JPEG, SVG and MP4. The DLL logs failures only: `VerboseLog=1` adds no success lines (`verbose_log` is read by the settings schema and the settings window, not by the DLL).
+- **Hosting:** the provider ran inside `DllHost.exe /Processid:{AB8902B4-09CA-4BB6-B78D-A8F59079A8D5}`, parent `svchost -k DcomLaunch`, with `thumbwright_shell.dll` in its module list. `tw-worker.exe` children with the surrogate as parent were seen during the MP3 cover-art, MP4, PDF, JXL and slow-SVG requests. The surrogate exits when idle, so its pid changed between runs.
+- **Hostile corpus** (files built as in `REVIEW_FINDINGS.md`: 16-byte farbfeld 20000x20000, 512-byte SGI 20000x20000x4, 200,000-deep nested `CHAP` MP3 of 5.6 MB, 64 MiB zlib `APIC` MP3 of 65 KB), interleaved with a good PNG: all four returned `0x8004B200` in 85, 91, 286 and 94 ms; the surrogate (one pid, 103068) survived all of them and the PNG kept thumbnailing through that same pid (256x171, alpha 2). Log causes: `input exceeds resource budget` (ff, sgi), `unsupported input` (zbomb), `malformed input: worker failed: failed to fill whole buffer` (deep.mp3, the worker died).
+- **Job Object:** `IsProcessInJob` was true for every `tw-worker.exe` seen (pre-spawned idle ones included, and the ones serving a 10.8 s filter-heavy SVG and a 138 MB MP4), and for the surrogate itself, so the worker's job nests inside the surrogate's job and the assignment works. After the hostile run (deep-CHAP MP3 included) and the slow run: no `WerFault.exe` process (polled every 15 ms), no Application Error or Windows Error Reporting event, no new file in `%LOCALAPPDATA%\CrashDumps`.
+- **Owner-drawn menu preview** (probe CoCreates the menu class, `IShellExtInit` with a PNG data object, `QueryContextMenu` on a popup, `TrackPopupMenu` on its own window, forwards `WM_INITMENUPOPUP`/`WM_MEASUREITEM`/`WM_DRAWITEM` through `IContextMenu3::HandleMenuMsg2`, screen capture of the `#32768` windows): `MenuPreview=2` shows the 140x140 preview above the "Thumbwright" entry; `MenuPreview=1` shows it at the top of the submenu with the full tree below it (screenshots `menu_preview_mode2.png`, `menu_preview_mode1.png` in the run folder). Every message returned success. 200 `QueryContextMenu`/measure/draw/destroy cycles per setting (mode 1, mode 2, and mode 2 with a second `QueryContextMenu` on the same object): process GDI object count 0 before and after, USER objects flat at 3 to 7, handle count flat (384 or 392). The harness was checked by leaking one bitmap per cycle on purpose: GDI rose by 2 per cycle.
+- **Registry:** after `register --off`, `twctl register --status` reported OFF and `HKCU\Software\Thumbwright` did not exist. Against the baseline export of `HKCU\Software\Classes` (16,184 keys): zero product keys added or removed. 6 keys added and 19 changed, all under `Local Settings\Software\Microsoft\Windows\Shell` (Explorer folder-view state for the folder windows the probe opened, `MuiCache` strings, `PCT`/`PTT`/`ICT`/`ITT` timestamps, `MRUListEx`). The one product-name reference that exists (a `MuiCache` `FriendlyAppName` for an earlier `thumbwright-settings.exe` run) is in both exports.
+- **Not done, Explorer's own menu:** this build's Windows 11 context menu has no "Show more options" item (UI Automation lists `App extensions` and `Customize menu`), `Shift+F10` opens the new XAML menu, and after five attempts `thumbwright_shell.dll` was not loaded in `explorer.exe`, so the classic `IContextMenu` handler is never reached without the sparse package. The 50-cycle `explorer.exe` GDI sample was therefore not taken (`explorer_gdi.ps1` is in the run folder; it aborts safely when no classic menu opens).
+- **Timing seen:** first requests after registration were slow while the DLL and worker were first launched (PNG/JPEG/SVG about 3.2 to 3.4 s, first PDF 18.8 s); the same PDF took 0.4 s on the next run.
 
 ## 5. Known gaps (by design for this milestone; don't report as bugs, but do report if they cause harm)
 
