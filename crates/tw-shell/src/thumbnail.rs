@@ -24,7 +24,7 @@ use windows::core::{Ref, Result, implement};
 
 use tw_core::config::Settings;
 use tw_core::decode::{DecodeError, Thumbnail};
-use tw_core::pipeline::Engine;
+use tw_core::pipeline::{Engine, Trace};
 use tw_core::{ids, limits, log, worker};
 
 use crate::ModuleRef;
@@ -92,13 +92,21 @@ impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
             return Err(E_POINTER.into());
         }
         let stream = self.stream.borrow().clone().ok_or(E_UNEXPECTED)?;
-        write_thumbnail(&stream, None, cx, phbmp, pdwalpha)
+        write_thumbnail(
+            &stream,
+            None,
+            cx,
+            phbmp,
+            pdwalpha,
+            ("thumbnail", Instant::now()),
+        )
     }
 }
 
 /// Produces the thumbnail for `stream` and hands it out per the `IThumbnailProvider`
 /// contract (REQ-COM-6/7). `name_hint` supplies the file name for streams whose `Stat`
-/// reports none.
+/// reports none. `request` is the diagnostics-log class and the instant the request began,
+/// for the `VerboseLog` success line.
 ///
 /// `phbmp` and `pdwalpha` must be non-null; callers check.
 pub(crate) fn write_thumbnail(
@@ -107,17 +115,30 @@ pub(crate) fn write_thumbnail(
     cx: u32,
     phbmp: *mut HBITMAP,
     pdwalpha: *mut WTS_ALPHATYPE,
+    request: (&'static str, Instant),
 ) -> Result<()> {
     let outcome = catch_unwind(AssertUnwindSafe(|| produce(stream, name_hint, cx)))
         .unwrap_or_else(|_| Err(Failure::new("panic", None, 0)));
     match outcome {
-        Ok(thumb) => {
-            let hbmp = crate::bitmap::create(&thumb)?;
+        Ok(done) => {
+            let hbmp = crate::bitmap::create(&done.thumb)?;
             // SAFETY: the caller guarantees both out-pointers are non-null.
             unsafe {
                 *phbmp = hbmp;
                 *pdwalpha = WTSAT_ARGB;
             }
+            let (class, started) = request;
+            log::verbose(done.verbose, || {
+                format!(
+                    "GetThumbnail: ok class={class} ext={} size={} req={cx} {} ms={} out={}x{}",
+                    done.ext.as_deref().unwrap_or("?"),
+                    done.size,
+                    done.trace,
+                    started.elapsed().as_millis(),
+                    done.thumb.width,
+                    done.thumb.height
+                )
+            });
             Ok(())
         }
         Err(f) => {
@@ -132,6 +153,15 @@ pub(crate) fn write_thumbnail(
             Err(E_FAIL.into())
         }
     }
+}
+
+/// A successful decode and what the `VerboseLog` line reports about it.
+struct Produced {
+    thumb: Thumbnail,
+    trace: Trace,
+    ext: Option<String>,
+    size: u64,
+    verbose: bool,
 }
 
 struct Failure {
@@ -222,7 +252,7 @@ fn produce(
     stream: &IStream,
     name_hint: Option<&str>,
     cx: u32,
-) -> std::result::Result<Thumbnail, Failure> {
+) -> std::result::Result<Produced, Failure> {
     let dir = crate::install_dir();
     let settings = Settings::load(&dir);
     let mut info = stat(stream).map_err(|e| Failure::new(format!("stat: {e}"), None, 0))?;
@@ -261,8 +291,8 @@ fn produce(
         .with_video_percent(settings.video_frame_percent)
         .with_prefer_embedded(settings.use_embedded_thumbs);
     let edge = cx.clamp(1, settings.max_thumb_px);
-    engine
-        .thumbnail(Arc::new(data), ext.as_deref(), edge)
+    let (thumb, trace) = engine
+        .thumbnail_traced(Arc::new(data), ext.as_deref(), edge)
         .map_err(|e: DecodeError| {
             if !info.name.is_empty()
                 && let Ok(mut f) = FAILED.lock()
@@ -273,7 +303,14 @@ fn produce(
                 f.insert(key.clone(), failure_expiry(&e, Instant::now()));
             }
             fail(&e.to_string())
-        })
+        })?;
+    Ok(Produced {
+        thumb,
+        trace,
+        ext: ext.clone(),
+        size: info.size,
+        verbose: settings.verbose_log,
+    })
 }
 
 #[cfg(test)]

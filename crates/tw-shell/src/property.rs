@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{
     E_FAIL, E_INVALIDARG, E_POINTER, ERROR_ALREADY_INITIALIZED, FILETIME, PROPERTYKEY,
@@ -173,9 +174,18 @@ impl IInitializeWithStream_Impl for PropertyHandler_Impl {
     }
 }
 
+/// What a successful probe reports to the `VerboseLog` line.
+struct Probed {
+    info: ImageInfo,
+    ext: Option<String>,
+    size: u64,
+    verbose: bool,
+}
+
 /// Reads and probes the stream; any failure means "no properties".
 fn load(stream: &IStream) -> Vec<(PROPERTYKEY, PROPVARIANT)> {
-    let probe = || -> std::result::Result<ImageInfo, String> {
+    let started = Instant::now();
+    let probe = || -> std::result::Result<Probed, String> {
         let settings = Settings::load(&crate::install_dir());
         let info = crate::thumbnail::stat(stream).map_err(|e| format!("stat: {e}"))?;
         if info.size > settings.max_file_bytes() || info.size > limits::MAX_INPUT_BYTES {
@@ -186,15 +196,35 @@ fn load(stream: &IStream) -> Vec<(PROPERTYKEY, PROPVARIANT)> {
             .map(|e| e.to_string_lossy().to_ascii_lowercase());
         let data =
             crate::thumbnail::read_all(stream, info.size).map_err(|e| format!("read: {e}"))?;
-        pipeline::run_probe(
+        let image = pipeline::run_probe(
             Arc::new(data),
             ext.as_deref(),
             limits::INPROC_DECODE_TIMEOUT,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        Ok(Probed {
+            info: image,
+            ext,
+            size: info.size,
+            verbose: settings.verbose_log,
+        })
     };
     match probe() {
-        Ok(info) => properties(&info),
+        Ok(p) => {
+            let props = properties(&p.info);
+            log::verbose(p.verbose, || {
+                format!(
+                    "property handler: ok class=property ext={} size={} decoder=probe ms={} props={} dims={}x{}",
+                    p.ext.as_deref().unwrap_or("?"),
+                    p.size,
+                    started.elapsed().as_millis(),
+                    props.len(),
+                    p.info.width,
+                    p.info.height
+                )
+            });
+            props
+        }
         Err(cause) => {
             log::info(&format!("property handler: no properties ({cause})"));
             Vec::new()

@@ -8,6 +8,7 @@
 //! download it. Decoding then goes through the same pipeline as the stream class.
 
 use std::cell::RefCell;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{E_FAIL, E_POINTER, E_UNEXPECTED, ERROR_ALREADY_INITIALIZED};
 use windows::Win32::Graphics::Gdi::HBITMAP;
@@ -118,6 +119,7 @@ impl IThumbnailProvider_Impl for CloudThumbnailProvider_Impl {
         if phbmp.is_null() || pdwalpha.is_null() {
             return Err(E_POINTER.into());
         }
+        let started = Instant::now();
         let item = self.item.borrow().clone().ok_or(E_UNEXPECTED)?;
         // REQ-COM-7: every refusal is a failure HRESULT, never a placeholder.
         let (stream, path) = open(&item, cx).map_err(|e| {
@@ -126,7 +128,14 @@ impl IThumbnailProvider_Impl for CloudThumbnailProvider_Impl {
             }
             windows::core::Error::from(E_FAIL)
         })?;
-        crate::thumbnail::write_thumbnail(&stream, Some(&path), cx, phbmp, pdwalpha)
+        crate::thumbnail::write_thumbnail(
+            &stream,
+            Some(&path),
+            cx,
+            phbmp,
+            pdwalpha,
+            ("cloud", started),
+        )
     }
 }
 

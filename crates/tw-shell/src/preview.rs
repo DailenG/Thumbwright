@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{
     E_FAIL, E_UNEXPECTED, ERROR_ALREADY_INITIALIZED, HWND, LPARAM, LRESULT, RECT, S_FALSE, WPARAM,
@@ -312,11 +313,15 @@ struct Loaded {
     data: Vec<u8>,
     ext: Option<String>,
     edge: u32,
+    /// `VerboseLog`: whether the decode logs a success line, and when the request began.
+    verbose: bool,
+    started: Instant,
 }
 
 /// Applies the same metadata gates as the thumbnail class (type enabled, size limits) and
 /// reads the stream.
 fn load(stream: &IStream) -> std::result::Result<Loaded, String> {
+    let started = Instant::now();
     let settings = Settings::load(&crate::install_dir());
     let info = crate::thumbnail::stat(stream).map_err(|e| format!("stat: {e}"))?;
     let ext = Path::new(&info.name)
@@ -333,6 +338,8 @@ fn load(stream: &IStream) -> std::result::Result<Loaded, String> {
         data,
         ext,
         edge: settings.max_thumb_px,
+        verbose: settings.verbose_log,
+        started,
     })
 }
 
@@ -396,14 +403,26 @@ fn spawn_decode(loaded: Loaded, hwnd: HWND, shared: Arc<Shared>) -> Option<JoinH
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let engine = Engine::new(crate::install_dir().join(ids::WORKER_EXE_NAME));
+                let edge = loaded.edge.max(16);
+                let size = loaded.data.len();
                 engine
-                    .thumbnail(
-                        Arc::new(loaded.data),
-                        loaded.ext.as_deref(),
-                        loaded.edge.max(16),
-                    )
+                    .thumbnail_traced(Arc::new(loaded.data), loaded.ext.as_deref(), edge)
                     .map_err(|e| e.to_string())
-                    .and_then(|t| crate::bitmap::create(&t).map_err(|e| e.to_string()))
+                    .and_then(|(t, trace)| {
+                        crate::bitmap::create(&t)
+                            .inspect(|_| {
+                                log::verbose(loaded.verbose, || {
+                                    format!(
+                                        "DoPreview: ok class=preview ext={} size={size} req={edge} {trace} ms={} out={}x{}",
+                                        loaded.ext.as_deref().unwrap_or("?"),
+                                        loaded.started.elapsed().as_millis(),
+                                        t.width,
+                                        t.height
+                                    )
+                                });
+                            })
+                            .map_err(|e| e.to_string())
+                    })
             }))
             .unwrap_or_else(|_| Err("panic".into()));
             let mut inner = shared.lock();

@@ -51,6 +51,9 @@ type GetClassObject =
 
 const PRF_CLIENT: usize = 0x4;
 
+/// Directory (inside the staged install) standing in for `%LOCALAPPDATA%`.
+const LOG_HOME: &str = "localappdata";
+
 /// Stages the shipped layout from Cargo's outputs: the cdylib from `deps/`, the worker, and
 /// a copy of the worker standing in for `twctl.exe` (so `Invoke` has something to spawn).
 fn install_dir() -> PathBuf {
@@ -72,6 +75,12 @@ fn install_dir() -> PathBuf {
     std::fs::copy(&dll, dir.join(ids::SHELL_DLL_NAME)).unwrap();
     std::fs::copy(worker, dir.join(ids::WORKER_EXE_NAME)).unwrap();
     std::fs::copy(worker, dir.join(ids::CTL_EXE_NAME)).unwrap();
+    // The diagnostics log of this test process, kept out of the real `%LOCALAPPDATA%`.
+    let home = dir.join(LOG_HOME);
+    std::fs::create_dir_all(&home).unwrap();
+    // SAFETY: runs inside the `INSTALL` initialiser, before the DLL is loaded or any
+    // thread of this process reads the environment through a test fixture.
+    unsafe { std::env::set_var("LOCALAPPDATA", &home) };
     dir
 }
 
@@ -853,4 +862,218 @@ fn every_new_class_is_creatable() {
     drop(create::<IPreviewHandler>(ids::CLSID_PREVIEW));
     drop(create::<IPropertyStore>(ids::CLSID_PROPERTY));
     drop(create::<IExplorerCommand>(ids::CLSID_EXPLORER_COMMAND));
+}
+
+// ---------------------------------------------------------------- VerboseLog (issue #20)
+
+fn log_file() -> PathBuf {
+    INSTALL.join(LOG_HOME).join("Thumbwright.log")
+}
+
+fn log_len() -> usize {
+    std::fs::metadata(log_file()).map_or(0, |m| m.len() as usize)
+}
+
+/// What the DLL appended to the diagnostics log after `offset`.
+fn log_since(offset: usize) -> String {
+    let bytes = std::fs::read(log_file()).unwrap_or_default();
+    String::from_utf8_lossy(bytes.get(offset..).unwrap_or_default()).into_owned()
+}
+
+/// The success lines (`TRACE` level) in `log`.
+fn trace_lines(log: &str) -> Vec<&str> {
+    log.lines().filter(|l| l.contains(" TRACE ")).collect()
+}
+
+fn stream_thumbnail(path: &Path) {
+    let p: IThumbnailProvider = create(ids::CLSID_THUMBNAIL);
+    let mut hbmp = windows::Win32::Graphics::Gdi::HBITMAP::default();
+    let mut alpha = WTS_ALPHATYPE::default();
+    // SAFETY: plain COM calls; the bitmap is deleted here.
+    unsafe {
+        p.cast::<IInitializeWithStream>()
+            .unwrap()
+            .Initialize(&file_stream(path), STGM_READ.0)
+            .unwrap();
+        p.GetThumbnail(256, &mut hbmp, &mut alpha).unwrap();
+        let _ = DeleteObject(HGDIOBJ(hbmp.0));
+    }
+}
+
+const RED_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="red"/></svg>"#;
+
+#[test]
+fn verbose_log_records_a_thumbnail_success_with_decoder_and_worker() {
+    let s = Scratch::new("verbose-thumb");
+    let png = s.file("pic.png", &red_png(40, 20));
+    let svg = s.file("pic.svg", RED_SVG);
+    {
+        let _on = Settings::set("VerboseLog=1");
+        let before = log_len();
+        stream_thumbnail(&png);
+        let log = log_since(before);
+        let lines = trace_lines(&log);
+        assert_eq!(lines.len(), 1, "{log}");
+        let line = lines[0];
+        for part in [
+            "GetThumbnail: ok",
+            "class=thumbnail",
+            "ext=png",
+            "size=",
+            "req=256",
+            "decoder=Raster",
+            "attempt=1",
+            "worker_pid=-",
+            "ms=",
+            "out=40x20",
+        ] {
+            assert!(line.contains(part), "{part:?} missing from {line}");
+        }
+
+        let before = log_len();
+        stream_thumbnail(&svg);
+        let log = log_since(before);
+        let line = trace_lines(&log)[0].to_owned();
+        assert!(line.contains("decoder=Svg"), "{line}");
+        let pid = line.split("worker_pid=").nth(1).unwrap();
+        let pid: String = pid.chars().take_while(char::is_ascii_digit).collect();
+        assert!(
+            pid.parse::<u32>().is_ok_and(|p| p != 0),
+            "worker pid in {line}"
+        );
+    }
+    let _off = Settings::set("VerboseLog=0");
+    let before = log_len();
+    stream_thumbnail(&png);
+    stream_thumbnail(&svg);
+    let log = log_since(before);
+    assert!(
+        trace_lines(&log).is_empty(),
+        "verbose off logs nothing: {log}"
+    );
+}
+
+#[test]
+fn verbose_log_keeps_failures_and_never_logs_paths() {
+    let s = Scratch::new("verbose-fail");
+    let png = s.file("pic.png", &red_png(40, 20));
+    let bad = s.file("noise.png", &[0x5A; 2048]);
+    let _on = Settings::set("VerboseLog=1");
+    let before = log_len();
+    stream_thumbnail(&png);
+    let p: IThumbnailProvider = create(ids::CLSID_THUMBNAIL);
+    // SAFETY: plain COM calls.
+    unsafe {
+        p.cast::<IInitializeWithStream>()
+            .unwrap()
+            .Initialize(&file_stream(&bad), STGM_READ.0)
+            .unwrap();
+        let mut hbmp = windows::Win32::Graphics::Gdi::HBITMAP::default();
+        let mut alpha = WTS_ALPHATYPE::default();
+        assert!(p.GetThumbnail(256, &mut hbmp, &mut alpha).is_err());
+    }
+    let log = log_since(before);
+    assert_eq!(trace_lines(&log).len(), 1, "{log}");
+    assert!(log.contains("ERROR GetThumbnail: failed"), "{log}");
+    assert!(!log.contains("tw-cls-verbose"), "no file path in {log}");
+}
+
+#[test]
+fn verbose_log_records_cloud_property_and_preview_successes() {
+    let s = Scratch::new("verbose-others");
+    let png = s.file("pic.png", &red_png(40, 20));
+    let _on = Settings::set("CloudThumbnails=1\nVerboseLog=1");
+
+    let before = log_len();
+    assert_eq!(cloud_thumbnail(&png).unwrap(), (40, 20));
+    let log = log_since(before);
+    let lines = trace_lines(&log);
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(
+        lines[0].contains("class=cloud") && lines[0].contains("decoder=Raster"),
+        "{}",
+        lines[0]
+    );
+
+    let before = log_len();
+    let store = property_store(&red_png(40, 20), &s, "prop.png");
+    drop(value(&store, pkey(FMT_IMAGE, 3)));
+    let log = log_since(before);
+    let lines = trace_lines(&log);
+    assert_eq!(lines.len(), 1, "{log}");
+    for part in ["class=property", "ext=png", "dims=40x20", "ms="] {
+        assert!(
+            lines[0].contains(part),
+            "{part:?} missing from {}",
+            lines[0]
+        );
+    }
+
+    let before = log_len();
+    let handler: IPreviewHandler = create(ids::CLSID_PREVIEW);
+    let parent = hidden_parent();
+    let rect = RECT {
+        left: 0,
+        top: 0,
+        right: 200,
+        bottom: 100,
+    };
+    // SAFETY: plain COM calls against windows and objects this test owns.
+    unsafe {
+        handler
+            .cast::<IInitializeWithStream>()
+            .unwrap()
+            .Initialize(&file_stream(&png), STGM_READ.0)
+            .unwrap();
+        handler.SetWindow(parent, &rect).unwrap();
+        handler.DoPreview().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !log_since(before).contains(" TRACE ") && Instant::now() < deadline {
+            pump();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        handler.Unload().unwrap();
+        let _ = DestroyWindow(parent);
+    }
+    let log = log_since(before);
+    let lines = trace_lines(&log);
+    assert_eq!(lines.len(), 1, "{log}");
+    for part in ["class=preview", "ext=png", "decoder=Raster", "out=40x20"] {
+        assert!(
+            lines[0].contains(part),
+            "{part:?} missing from {}",
+            lines[0]
+        );
+    }
+}
+
+#[test]
+fn verbose_log_records_a_menu_verb_launch() {
+    let s = Scratch::new("verbose-menu");
+    let png = s.file("pic.png", &red_png(8, 8));
+    let items = items_for(&png);
+    let root: IExplorerCommand = create(ids::CLSID_EXPLORER_COMMAND);
+    let convert = &children(&root)[0];
+    let png_cmd = &children(convert)[0];
+    {
+        let _on = Settings::set("VerboseLog=1");
+        let before = log_len();
+        // SAFETY: plain COM call; launches the stand-in `twctl.exe`.
+        unsafe { png_cmd.Invoke(&items, None).unwrap() };
+        let log = log_since(before);
+        let lines = trace_lines(&log);
+        assert_eq!(lines.len(), 1, "{log}");
+        for part in ["class=menu", "files=1", "ext=png", "twctl_pid=", "verb="] {
+            assert!(
+                lines[0].contains(part),
+                "{part:?} missing from {}",
+                lines[0]
+            );
+        }
+    }
+    let _off = Settings::set("VerboseLog=0");
+    let before = log_len();
+    // SAFETY: as above.
+    unsafe { png_cmd.Invoke(&items, None).unwrap() };
+    assert!(trace_lines(&log_since(before)).is_empty());
 }
