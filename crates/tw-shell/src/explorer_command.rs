@@ -26,15 +26,16 @@ use tw_core::config::Settings;
 use tw_core::ids;
 
 use crate::ModuleRef;
-use crate::menu::{Node, TREE, Verb, launch, menu_applies};
+use crate::menu::{Node, SETTINGS_ID, Verb, display_nodes, launch, menu_applies};
 
 /// One command in the tree.
 #[derive(Clone, Copy)]
 enum Entry {
     /// The root, "Thumbwright".
     Top,
-    /// A direct child of the root.
-    Node(&'static Node),
+    /// A direct child of the root and its position in the displayed (ordered) list, which
+    /// tells the separators apart.
+    Node(&'static Node, usize),
     /// A verb inside a submenu node.
     Item(&'static Verb),
 }
@@ -66,14 +67,22 @@ fn paths(items: Option<&IShellItemArray>) -> Option<Vec<PathBuf>> {
     }
 }
 
-/// The nodes of the tree that show for this selection, with separators collapsed
-/// (none leading, trailing or doubled), as the classic menu builds it.
-fn visible_nodes(settings: &Settings, single: bool) -> Vec<&'static Node> {
-    let hidden = |id: &str| settings.hidden_menu_items.iter().any(|h| h == id);
-    let mut out: Vec<&'static Node> = Vec::new();
-    for node in TREE {
-        let show = match node {
-            Node::Separator => !matches!(out.last(), None | Some(Node::Separator)),
+/// Which of `nodes` (in display order) show for this selection: hidden items and single-only
+/// items on a multi-selection drop out, Settings never hides, and separators collapse (none
+/// leading, trailing or doubled), as the classic menu builds it.
+fn visible_flags(settings: &Settings, single: bool, nodes: &[&'static Node]) -> Vec<bool> {
+    let hidden =
+        |id: &str| id != SETTINGS_ID && settings.hidden_menu_items.iter().any(|h| h == id);
+    let mut flags = vec![false; nodes.len()];
+    let mut pending_separator = None;
+    let mut any = false;
+    for (i, node) in nodes.iter().enumerate() {
+        match node {
+            Node::Separator => {
+                if any && pending_separator.is_none() {
+                    pending_separator = Some(i);
+                }
+            }
             Node::Leaf {
                 id,
                 single: needs_one,
@@ -83,32 +92,46 @@ fn visible_nodes(settings: &Settings, single: bool) -> Vec<&'static Node> {
                 id,
                 single: needs_one,
                 ..
-            } => !hidden(id) && !(*needs_one && !single),
-        };
-        if show {
-            out.push(node);
+            } => {
+                if !hidden(id) && !(*needs_one && !single) {
+                    if let Some(s) = pending_separator.take() {
+                        flags[s] = true;
+                    }
+                    flags[i] = true;
+                    any = true;
+                }
+            }
         }
     }
-    if matches!(out.last(), Some(Node::Separator)) {
-        out.pop();
-    }
-    out
+    flags
+}
+
+/// The nodes that show for this selection, in the saved menu order.
+#[cfg(test)]
+fn visible_nodes(settings: &Settings, single: bool) -> Vec<&'static Node> {
+    let nodes = display_nodes(&settings.menu_order);
+    let flags = visible_flags(settings, single, &nodes);
+    nodes
+        .into_iter()
+        .zip(flags)
+        .filter_map(|(n, show)| show.then_some(n))
+        .collect()
 }
 
 impl Entry {
     fn title(self) -> &'static str {
         match self {
             Self::Top => ids::PRODUCT_NAME,
-            Self::Node(Node::Leaf { verb, .. }) | Self::Item(verb) => verb.label,
-            Self::Node(Node::Sub { label, .. }) => label,
-            Self::Node(Node::Separator) => "",
+            Self::Node(Node::Leaf { verb, .. }, _) | Self::Item(verb) => verb.label,
+            Self::Node(Node::Sub { label, .. }, _) => label,
+            Self::Node(Node::Separator, _) => "",
         }
     }
 
     fn flags(self) -> i32 {
         match self {
-            Self::Top | Self::Node(Node::Sub { .. }) => ECF_HASSUBCOMMANDS.0,
-            Self::Node(Node::Separator) => ECF_ISSEPARATOR.0,
+            Self::Top | Self::Node(Node::Sub { .. }, _) => ECF_HASSUBCOMMANDS.0,
+            Self::Node(Node::Separator, _) => ECF_ISSEPARATOR.0,
             _ => ECF_DEFAULT.0,
         }
     }
@@ -117,13 +140,18 @@ impl Entry {
         let visible = match self {
             // Inside a submenu the parent already gated visibility.
             Self::Item(_) => true,
-            Self::Top | Self::Node(_) => {
+            Self::Top | Self::Node(..) => {
                 let settings = Settings::load(&crate::install_dir());
                 match paths(items) {
                     Some(files) if menu_applies(&files, &settings) => match self {
-                        Self::Node(node) => visible_nodes(&settings, files.len() == 1)
-                            .iter()
-                            .any(|v| std::ptr::eq(*v, node)),
+                        Self::Node(_, pos) => visible_flags(
+                            &settings,
+                            files.len() == 1,
+                            &display_nodes(&settings.menu_order),
+                        )
+                        .get(pos)
+                        .copied()
+                        .unwrap_or(false),
                         _ => true,
                     },
                     _ => false,
@@ -135,15 +163,22 @@ impl Entry {
 
     fn children(self) -> Vec<Entry> {
         match self {
-            Self::Top => TREE.iter().map(Self::Node).collect(),
-            Self::Node(Node::Sub { items, .. }) => items.iter().map(Self::Item).collect(),
+            Self::Top => {
+                let settings = Settings::load(&crate::install_dir());
+                display_nodes(&settings.menu_order)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, n)| Self::Node(n, i))
+                    .collect()
+            }
+            Self::Node(Node::Sub { items, .. }, _) => items.iter().map(Self::Item).collect(),
             _ => Vec::new(),
         }
     }
 
     fn verb(self) -> Option<&'static Verb> {
         match self {
-            Self::Node(Node::Leaf { verb, .. }) | Self::Item(verb) => Some(verb),
+            Self::Node(Node::Leaf { verb, .. }, _) | Self::Item(verb) => Some(verb),
             _ => None,
         }
     }
@@ -289,7 +324,7 @@ mod tests {
     fn labels(nodes: &[&'static Node]) -> Vec<&'static str> {
         nodes
             .iter()
-            .map(|n| Entry::Node(n).title())
+            .map(|n| Entry::Node(n, 0).title())
             .collect::<Vec<_>>()
     }
 
@@ -326,6 +361,28 @@ mod tests {
             nodes
                 .windows(2)
                 .all(|w| !(matches!(w[0], Node::Separator) && matches!(w[1], Node::Separator)))
+        );
+    }
+
+    #[test]
+    fn saved_order_hidden_items_and_an_always_present_settings_shape_the_menu() {
+        let settings = Settings {
+            menu_order: ["wallpaper", "resize"].map(String::from).to_vec(),
+            hidden_menu_items: ["email", "settings"].map(String::from).to_vec(),
+            ..Settings::default()
+        };
+        let l = labels(&visible_nodes(&settings, true));
+        let items: Vec<_> = l.iter().copied().filter(|t| !t.is_empty()).collect();
+        assert_eq!(&items[..2], ["Set as wallpaper", "Resize"], "{l:?}");
+        assert!(!l.contains(&"Shrink for email"), "{l:?}");
+        assert!(l.contains(&"Settings"), "Settings never hides: {l:?}");
+        let nodes = display_nodes(&settings.menu_order);
+        let flags = visible_flags(&settings, true, &nodes);
+        assert_eq!(flags.len(), nodes.len());
+        assert_eq!(
+            flags.iter().filter(|f| **f).count(),
+            l.len(),
+            "state flags agree with the visible list"
         );
     }
 }

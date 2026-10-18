@@ -733,13 +733,26 @@ fn explorer_command_enumerates_the_menu_tree_for_a_png() {
             "Strip metadata (EXIF/GPS)",
             "-",
             "Copy to clipboard",
+            "Copy text (OCR)",
             "Copy as data URI",
+            "Upload (copy link)",
             "-",
+            "Combine into PDF",
+            "Combine into searchable PDF (OCR)",
+            "Combine into CBZ (comic)",
+            "-",
+            "Rename",
             "Files to folder",
+            "Sort into folders",
             "-",
             "Image info",
+            "Pick color (eyedropper)\u{2026}",
             "-",
             "Set as wallpaper",
+            "Set as lock screen",
+            "Set as folder icon",
+            "-",
+            "Settings",
         ]
     );
 
@@ -752,6 +765,8 @@ fn explorer_command_enumerates_the_menu_tree_for_a_png() {
             "PNG",
             "JPG",
             "WebP (lossless)",
+            "AVIF",
+            "JPEG XL (lossless)",
             "BMP",
             "GIF",
             "TIFF",
@@ -774,6 +789,35 @@ fn explorer_command_enumerates_the_menu_tree_for_a_png() {
             "a submenu is not invokable"
         );
     }
+}
+
+#[test]
+fn explorer_command_follows_menu_order_and_hidden_items() {
+    let _settings = Settings::set("MenuOrder=wallpaper,resize\nHiddenMenuItems=email,settings,copy");
+    let s = Scratch::new("xcmd-order");
+    let png = s.file("pic.png", &red_png(8, 8));
+    let items = items_for(&png);
+    let root: IExplorerCommand = create(ids::CLSID_EXPLORER_COMMAND);
+    let titles: Vec<String> = children(&root)
+        .iter()
+        // SAFETY: plain COM calls.
+        .filter(|c| unsafe { c.GetState(&items, false) }.unwrap() == ECS_ENABLED.0 as u32)
+        .map(|c| {
+            // SAFETY: plain COM call.
+            if unsafe { c.GetFlags() }.unwrap() as i32 & ECF_ISSEPARATOR.0 != 0 {
+                "-".to_owned()
+            } else {
+                title(c, &items)
+            }
+        })
+        .collect();
+    assert_eq!(&titles[..3], ["Set as wallpaper", "-", "Resize"], "{titles:?}");
+    assert!(!titles.iter().any(|t| t == "Shrink for email" || t == "Copy to clipboard"));
+    assert_eq!(titles.last().map(String::as_str), Some("Settings"), "Settings never hides");
+    assert!(
+        titles.windows(2).all(|w| !(w[0] == "-" && w[1] == "-")) && titles[0] != "-",
+        "{titles:?}"
+    );
 }
 
 #[test]

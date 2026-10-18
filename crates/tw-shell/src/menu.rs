@@ -380,7 +380,7 @@ impl Node {
 /// `TREE` itself. Otherwise each item keeps the separator-delimited group it has in `TREE`
 /// and a separator goes wherever consecutive items belong to different groups, so the
 /// default order renders exactly as the default tree.
-fn display_nodes(order: &[String]) -> Vec<&'static Node> {
+pub(crate) fn display_nodes(order: &[String]) -> Vec<&'static Node> {
     if order.is_empty() {
         return TREE.iter().collect();
     }
@@ -410,7 +410,7 @@ fn display_nodes(order: &[String]) -> Vec<&'static Node> {
 const FOLDER_VERB: Verb = v("tw.prebuild", "Build thumbnails here", &["prebuild"]);
 
 /// Item id that is always shown regardless of the hidden-items setting.
-const SETTINGS_ID: &str = "settings";
+pub(crate) const SETTINGS_ID: &str = "settings";
 
 /// Every verb in the tree, in a stable order (for string-verb lookup and tests).
 fn all_verbs() -> impl Iterator<Item = Verb> {
