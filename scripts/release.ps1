@@ -56,6 +56,10 @@
 .PARAMETER DistDir
     Output directory, emptied first. Default: dist\ in the repository.
 
+.PARAMETER TrustedSigningDlib
+    Azure.CodeSigning.Dlib.dll (x64) from the Microsoft.Trusted.Signing.Client NuGet package,
+    used with signtool for the sparse .msix. Default: $env:TW_TRUSTED_SIGNING_DLIB.
+
 .PARAMETER AcceptWixEula
     Pass `-acceptEula wix7` to the MSI build (see packaging\wix\README.md for the terms).
 
@@ -75,6 +79,7 @@ param(
     [string]$SignTool,
     [string]$DevPublisher = 'CN=Thumbwright Unsigned Development',
     [string]$DistDir,
+    [string]$TrustedSigningDlib = $env:TW_TRUSTED_SIGNING_DLIB,
     [switch]$AcceptWixEula
 )
 
@@ -199,6 +204,10 @@ function Get-SigningMethod {
     $missing = @($azureVars | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
     $haveTool = [bool](Get-Command AzureTrustedSignTool -ErrorAction SilentlyContinue)
     if ((Test-Path -LiteralPath $SignHelper) -and $haveTool -and $missing.Count -eq 0) {
+        if (-not $TrustedSigningDlib -or -not (Test-Path -LiteralPath $TrustedSigningDlib)) {
+            throw ('Azure Trusted Signing also needs -TrustedSigningDlib (Azure.CodeSigning.Dlib.dll, ' +
+                'bin\x64 of the Microsoft.Trusted.Signing.Client NuGet package) to sign the sparse package.')
+        }
         return 'azure'
     }
     if ($CertThumbprint) {
@@ -212,10 +221,34 @@ function Get-SigningMethod {
         'signtool: pass -CertThumbprint. For an unsigned development build pass -SkipSign.')
 }
 
+# AzureTrustedSignTool signs PE files and MSIs, but repacks app packages with MakeAppx, which
+# rejects a sparse package (its Application executable is outside the package). For .msix it
+# uses signtool with the Trusted Signing dlib instead (Microsoft's documented route for
+# packages), with the same account and profile.
+function Invoke-AzurePackageSign {
+    param([string]$File, [string]$Tool)
+    $endpoint = $env:AZURE_TRUSTED_SIGNING_ENDPOINT
+    if ([string]::IsNullOrWhiteSpace($endpoint)) { $endpoint = 'https://eus.codesigning.azure.net' }
+    $metadata = Join-Path ([System.IO.Path]::GetTempPath()) ("tw-sign-{0}.json" -f [guid]::NewGuid())
+    @{ Endpoint = $endpoint
+       CodeSigningAccountName = $env:AZURE_TRUSTED_SIGNING_ACCOUNT
+       CertificateProfileName = $env:AZURE_TRUSTED_SIGNING_PROFILE } |
+        ConvertTo-Json | Set-Content -LiteralPath $metadata -Encoding ASCII
+    try {
+        Invoke-Native $Tool @('sign', '/fd', 'SHA256', '/tr', 'http://timestamp.acs.microsoft.com',
+            '/td', 'SHA256', '/dlib', $TrustedSigningDlib, '/dmdf', $metadata, $File)
+    } finally {
+        Remove-Item -LiteralPath $metadata -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-Sign {
     param([string[]]$Files, [string]$Method, [string]$Scope, [string]$Tool)
     if ($Method -eq 'azure') {
-        & $SignHelper -FilePaths $Files -Scope $Scope
+        $packages = @($Files | Where-Object { [System.IO.Path]::GetExtension($_) -in '.msix', '.appx' })
+        $others = @($Files | Where-Object { $packages -notcontains $_ })
+        if ($others.Count -gt 0) { & $SignHelper -FilePaths $others -Scope $Scope }
+        foreach ($p in $packages) { Invoke-AzurePackageSign -File $p -Tool $Tool }
         return
     }
     foreach ($file in $Files) {
