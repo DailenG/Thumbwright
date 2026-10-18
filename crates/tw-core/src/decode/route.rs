@@ -39,6 +39,10 @@ pub enum Decoder {
     /// Legacy bitmap formats: XBM/XPM, Sun raster, MacPaint, IFF ILBM, PIX, CUT, TIM, VTF,
     /// PFM/PHM, PGX, SCR, ANI, CALS (pure Rust, bounded).
     Bitmap = 30,
+    /// Legacy Office / OLE compound files: SummaryInformation thumbnail (DIB, PNG, JPEG).
+    Ole = 50,
+    /// DjVu: first page rendered via `djvu-rs`, `TH44` thumbnail fallback.
+    Djvu = 51,
 }
 
 /// Where a decoder may run (REQ-ISO-2 / REQ-ISO-3).
@@ -54,7 +58,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 14] = [
+    pub const ALL: [Decoder; 16] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -69,11 +73,13 @@ impl Decoder {
         Self::Cad,
         Self::Mesh,
         Self::Bitmap,
+        Self::Ole,
+        Self::Djvu,
     ];
 
     pub fn placement(self) -> Placement {
         match self {
-            Self::Svg | Self::Wic | Self::Audio => Placement::Worker,
+            Self::Svg | Self::Wic | Self::Audio | Self::Djvu => Placement::Worker,
             _ => Placement::InProc,
         }
     }
@@ -103,6 +109,8 @@ impl Decoder {
             Self::Cad => super::cad::decode(data, ext),
             Self::Mesh => super::mesh::decode(data, ext),
             Self::Bitmap => super::bitmap::decode(data, ext),
+            Self::Ole => super::ole::extract(data),
+            Self::Djvu => super::djvu::render(data, edge),
             #[cfg(windows)]
             Self::Wic => super::wic::decode(data, edge),
             #[cfg(not(windows))]
@@ -138,6 +146,8 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
         (super::zip_preview::EXTENSIONS, &[Zip]),
         (super::design::EXTENSIONS, &[Design]),
         (super::bitmap::EXTENSIONS, &[Bitmap]),
+        (super::ole::EXTENSIONS, &[Ole]),
+        (super::djvu::EXTENSIONS, &[Djvu]),
     ];
     single
         .iter()
@@ -209,6 +219,8 @@ mod tests {
             .chain(super::super::cad::EXTENSIONS)
             .chain(super::super::mesh::EXTENSIONS)
             .chain(super::super::bitmap::EXTENSIONS)
+            .chain(super::super::ole::EXTENSIONS)
+            .chain(super::super::djvu::EXTENSIONS)
         {
             assert!(formats::lookup(ext).is_some(), "{ext} not in matrix");
         }
@@ -220,6 +232,8 @@ mod tests {
         assert_eq!(Decoder::Svg.placement(), Placement::Worker);
         assert_eq!(Decoder::Audio.placement(), Placement::Worker);
         assert_eq!(Decoder::Raster.placement(), Placement::InProc);
+        assert_eq!(Decoder::Djvu.placement(), Placement::Worker);
+        assert_eq!(Decoder::Ole.placement(), Placement::InProc);
     }
 
     #[test]

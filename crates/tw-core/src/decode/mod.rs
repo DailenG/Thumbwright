@@ -9,11 +9,13 @@
 //!   next tier can try.
 
 pub mod audio;
-pub mod design;
-pub mod cad;
 pub mod bitmap;
+pub mod cad;
+pub mod design;
+pub mod djvu;
 pub mod jxl;
 pub mod mesh;
+pub mod ole;
 pub mod pcx;
 pub mod psd;
 pub mod raster;
