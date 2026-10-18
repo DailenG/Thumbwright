@@ -135,6 +135,12 @@ const TOOLS: &[Tool] = &[
         fixed: &[],
         params: &[
             p("by", Kind::Opt, true, "right | left | 180 | fliph | flipv"),
+            p(
+                "trim",
+                Kind::Flag,
+                false,
+                "Drop the partial edge MCU row/column of a JPEG instead of re-encoding when a flip or turn needs whole MCUs",
+            ),
             p("files", Kind::Args, true, FILES),
         ],
     },

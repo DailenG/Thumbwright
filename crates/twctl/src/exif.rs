@@ -308,7 +308,7 @@ pub fn jpeg_segments(d: &[u8]) -> Vec<(u8, &[u8])> {
     out
 }
 
-fn png_chunks(d: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> {
+pub fn png_chunks(d: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> {
     let mut i = 8;
     std::iter::from_fn(move || {
         let len = u32::from_be_bytes(d.get(i..i + 4)?.try_into().ok()?) as usize;
@@ -319,7 +319,7 @@ fn png_chunks(d: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> {
     })
 }
 
-fn webp_chunks(d: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> {
+pub fn webp_chunks(d: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> {
     let mut i = 12;
     std::iter::from_fn(move || {
         let typ: [u8; 4] = d.get(i..i + 4)?.try_into().ok()?;
@@ -330,12 +330,29 @@ fn webp_chunks(d: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> {
     })
 }
 
-fn is_png(d: &[u8]) -> bool {
+pub fn is_png(d: &[u8]) -> bool {
     d.starts_with(b"\x89PNG\r\n\x1a\n")
 }
 
-fn is_webp(d: &[u8]) -> bool {
+pub fn is_webp(d: &[u8]) -> bool {
     d.len() >= 12 && &d[..4] == b"RIFF" && &d[8..12] == b"WEBP"
+}
+
+/// ICC profile (TIFF tag 34675) and XMP packet (tag 700) are stored as byte arrays in IFD0.
+pub const TAG_ICC_PROFILE: u16 = 0x8773;
+pub const TAG_XMP: u16 = 0x02BC;
+
+/// The raw bytes of a BYTE, ASCII or UNDEFINED tag of a TIFF file's IFD0 (an ICC profile
+/// or an XMP packet); `None` when absent, of another type, or out of bounds.
+pub fn tiff_bytes(file: &[u8], tag: u16) -> Option<&[u8]> {
+    let t = Tiff::parse(file)?;
+    let e = t.find(t.ifd0()?, tag)?;
+    matches!(e.typ, 1 | 2 | 7).then(|| t.data(&e))?
+}
+
+/// Whether `file` is a classic TIFF (the structure `from_tiff` reads).
+pub fn is_tiff(file: &[u8]) -> bool {
+    Tiff::parse(file).is_some()
 }
 
 /// The TIFF-structured EXIF block of a JPEG, PNG or WebP file (no `Exif\0\0` prefix).
@@ -486,14 +503,23 @@ struct OutEntry {
     data: Vec<u8>,
 }
 
-/// Entries of `ifd` as little-endian `OutEntry`s, minus those `skip` rejects.
+/// Most value bytes `read_entries` copies out of one IFD. Entries may share the bytes they
+/// point at, so hostile counts could otherwise multiply a small file.
+const MAX_IFD_BYTES: usize = 4 << 20;
+
+/// Entries of `ifd` as little-endian `OutEntry`s, minus those `skip` rejects. `None` when
+/// a kept entry is out of bounds or the copied values would exceed [`MAX_IFD_BYTES`].
 fn read_entries(t: &Tiff, ifd: usize, skip: impl Fn(u16) -> bool) -> Option<Vec<OutEntry>> {
     let mut out = Vec::new();
+    let mut total = 0usize;
     for e in t.entries(ifd)? {
         if skip(e.tag) {
             continue;
         }
         let mut data = t.data(&e)?.to_vec();
+        total = total
+            .checked_add(data.len())
+            .filter(|&n| n <= MAX_IFD_BYTES)?;
         let unit = swap_unit(e.typ)?;
         if !t.le && unit > 1 {
             data.chunks_exact_mut(unit).for_each(<[u8]>::reverse);
@@ -562,67 +588,145 @@ const TIFF_CARRY: [u16; 7] = [
     TAG_COPYRIGHT,
 ];
 
-/// Adds the camera/capture metadata of `exif` (a source EXIF block) to a little-endian
-/// TIFF file written by the `image` crate: descriptive IFD0 tags, resolution when the
-/// file has none, the EXIF IFD (without maker note or interop pointer) and the GPS IFD.
-/// A new IFD0 is appended and the header repointed; the old directory stays as unused
-/// bytes. Orientation is not copied (the pixels are already upright). Returns the input
-/// unchanged when either side cannot be parsed.
-pub fn embed_in_tiff(tiff: Vec<u8>, exif: &[u8], dims: (u32, u32)) -> Vec<u8> {
-    embed(&tiff, exif, dims).unwrap_or(tiff)
-}
-
-fn embed(tiff: &[u8], exif: &[u8], dims: (u32, u32)) -> Option<Vec<u8>> {
-    let dst = Tiff::parse(tiff).filter(|t| t.le)?;
-    let src = Tiff::parse(exif)?;
-    let src0 = src.ifd0()?;
-    let mut entries = read_entries(&dst, dst.ifd0()?, |_| false)?;
-    // The TIFF writer records a placeholder 1/1 resolution with "no absolute unit";
-    // the source's real resolution replaces it.
-    let res_tags = [TAG_X_RESOLUTION, TAG_Y_RESOLUTION, TAG_RESOLUTION_UNIT];
+/// A compact EXIF block for a TIFF *file* (the file is not an EXIF block itself: its IFD0
+/// also describes strips, tiles and compression, and its offsets point into the pixel
+/// data). IFD0 keeps the descriptive tags, resolution and Orientation, the EXIF IFD keeps
+/// everything but the maker note (its offsets are relative to the whole file) and the
+/// interop pointer, and the GPS IFD is copied whole. `None` when the file carries none of
+/// these or cannot be parsed.
+pub fn from_tiff(file: &[u8]) -> Option<Vec<u8>> {
+    let t = Tiff::parse(file)?;
+    let ifd0 = t.ifd0()?;
+    let mut entries = read_entries(&t, ifd0, |tag| {
+        !(TIFF_CARRY.contains(&tag)
+            || [
+                TAG_X_RESOLUTION,
+                TAG_Y_RESOLUTION,
+                TAG_RESOLUTION_UNIT,
+                TAG_ORIENTATION,
+            ]
+            .contains(&tag))
+    })?;
+    // The writers of plain TIFFs record a placeholder 1/1 resolution with "no absolute unit".
     if entries
         .iter()
         .any(|e| e.tag == TAG_RESOLUTION_UNIT && e.data.first() == Some(&1))
     {
+        entries.retain(|e| {
+            ![TAG_X_RESOLUTION, TAG_Y_RESOLUTION, TAG_RESOLUTION_UNIT].contains(&e.tag)
+        });
+    }
+    let mut out = b"II*\0\x08\0\0\0".to_vec();
+    for (pointer, skip_maker) in [(TAG_EXIF_IFD, true), (TAG_GPS_IFD, false)] {
+        let Some(off) = t.pointer(ifd0, pointer) else {
+            continue;
+        };
+        let mut sub = read_entries(&t, off, |tag| {
+            skip_maker && (tag == TAG_MAKER_NOTE || tag == TAG_INTEROP_IFD)
+        })?;
+        if !sub.is_empty() {
+            let at = write_ifd(&mut out, &mut sub, 0)?;
+            entries.push(long_entry(pointer, at));
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    let at = write_ifd(&mut out, &mut entries, 0)?;
+    out[4..8].copy_from_slice(&at.to_le_bytes());
+    Some(out)
+}
+
+/// Adds metadata to a little-endian TIFF file written by the `image` crate.
+///
+/// `exif` (a source EXIF block) contributes descriptive IFD0 tags, resolution when the file
+/// has none, the EXIF IFD (without maker note or interop pointer) and the GPS IFD.
+/// Orientation is not copied (the pixels are already upright). `icc` becomes tag 34675 and
+/// `xmp` tag 700. A new IFD0 is appended and the header repointed; the old directory stays
+/// as unused bytes. Returns the input unchanged when the file cannot be parsed; an `exif`
+/// block that cannot be parsed is skipped, `icc` and `xmp` are still added.
+pub fn embed_in_tiff(
+    tiff: Vec<u8>,
+    exif: Option<&[u8]>,
+    icc: Option<&[u8]>,
+    xmp: Option<&[u8]>,
+    dims: (u32, u32),
+) -> Vec<u8> {
+    embed(&tiff, exif, icc, xmp, dims).unwrap_or(tiff)
+}
+
+fn byte_entry(tag: u16, typ: u16, data: &[u8]) -> Option<OutEntry> {
+    Some(OutEntry {
+        tag,
+        typ,
+        count: u32::try_from(data.len()).ok()?,
+        data: data.to_vec(),
+    })
+}
+
+fn embed(
+    tiff: &[u8],
+    exif: Option<&[u8]>,
+    icc: Option<&[u8]>,
+    xmp: Option<&[u8]>,
+    dims: (u32, u32),
+) -> Option<Vec<u8>> {
+    let dst = Tiff::parse(tiff).filter(|t| t.le)?;
+    let src = exif
+        .and_then(Tiff::parse)
+        .and_then(|t| Some((t, t.ifd0()?)));
+    let mut entries = read_entries(&dst, dst.ifd0()?, |_| false)?;
+    // The TIFF writer records a placeholder 1/1 resolution with "no absolute unit";
+    // the source's real resolution replaces it.
+    let res_tags = [TAG_X_RESOLUTION, TAG_Y_RESOLUTION, TAG_RESOLUTION_UNIT];
+    if src.is_some()
+        && entries
+            .iter()
+            .any(|e| e.tag == TAG_RESOLUTION_UNIT && e.data.first() == Some(&1))
+    {
         entries.retain(|e| !res_tags.contains(&e.tag));
     }
     let has = |entries: &[OutEntry], tag| entries.iter().any(|e| e.tag == tag);
-    let has_res = [TAG_X_RESOLUTION, TAG_Y_RESOLUTION, TAG_RESOLUTION_UNIT]
-        .iter()
-        .any(|&t| has(&entries, t));
-    let carried = read_entries(&src, src0, |tag| {
-        !(TIFF_CARRY.contains(&tag)
-            || (!has_res
-                && [TAG_X_RESOLUTION, TAG_Y_RESOLUTION, TAG_RESOLUTION_UNIT].contains(&tag)))
-    })?;
+    let has_res = res_tags.iter().any(|&t| has(&entries, t));
     let mut out = tiff.to_vec();
-    let existing: Vec<u16> = entries.iter().map(|e| e.tag).collect();
-    entries.extend(carried.into_iter().filter(|c| !existing.contains(&c.tag)));
-    if !has(&entries, TAG_EXIF_IFD)
-        && let Some(off) = src.pointer(src0, TAG_EXIF_IFD)
-    {
-        let mut sub = read_entries(&src, off, |t| t == TAG_MAKER_NOTE || t == TAG_INTEROP_IFD)?;
-        for e in &mut sub {
-            let v = match e.tag {
-                TAG_PIXEL_X => dims.0,
-                TAG_PIXEL_Y => dims.1,
-                _ => continue,
-            };
-            *e = long_entry(e.tag, v);
+    if let Some((src, src0)) = src {
+        let carried = read_entries(&src, src0, |tag| {
+            !(TIFF_CARRY.contains(&tag) || (!has_res && res_tags.contains(&tag)))
+        })?;
+        let existing: Vec<u16> = entries.iter().map(|e| e.tag).collect();
+        entries.extend(carried.into_iter().filter(|c| !existing.contains(&c.tag)));
+        if !has(&entries, TAG_EXIF_IFD)
+            && let Some(off) = src.pointer(src0, TAG_EXIF_IFD)
+        {
+            let mut sub = read_entries(&src, off, |t| t == TAG_MAKER_NOTE || t == TAG_INTEROP_IFD)?;
+            for e in &mut sub {
+                let v = match e.tag {
+                    TAG_PIXEL_X => dims.0,
+                    TAG_PIXEL_Y => dims.1,
+                    _ => continue,
+                };
+                *e = long_entry(e.tag, v);
+            }
+            if !sub.is_empty() {
+                let at = write_ifd(&mut out, &mut sub, 0)?;
+                entries.push(long_entry(TAG_EXIF_IFD, at));
+            }
         }
-        if !sub.is_empty() {
-            let at = write_ifd(&mut out, &mut sub, 0)?;
-            entries.push(long_entry(TAG_EXIF_IFD, at));
+        if !has(&entries, TAG_GPS_IFD)
+            && let Some(off) = src.pointer(src0, TAG_GPS_IFD)
+        {
+            let mut sub = read_entries(&src, off, |_| false)?;
+            if !sub.is_empty() {
+                let at = write_ifd(&mut out, &mut sub, 0)?;
+                entries.push(long_entry(TAG_GPS_IFD, at));
+            }
         }
     }
-    if !has(&entries, TAG_GPS_IFD)
-        && let Some(off) = src.pointer(src0, TAG_GPS_IFD)
-    {
-        let mut sub = read_entries(&src, off, |_| false)?;
-        if !sub.is_empty() {
-            let at = write_ifd(&mut out, &mut sub, 0)?;
-            entries.push(long_entry(TAG_GPS_IFD, at));
-        }
+    if let Some(icc) = icc.filter(|_| !has(&entries, TAG_ICC_PROFILE)) {
+        entries.push(byte_entry(TAG_ICC_PROFILE, 7, icc)?);
+    }
+    if let Some(xmp) = xmp.filter(|_| !has(&entries, TAG_XMP)) {
+        entries.push(byte_entry(TAG_XMP, 1, xmp)?);
     }
     let at = write_ifd(&mut out, &mut entries, 0)?;
     out[4..8].copy_from_slice(&at.to_le_bytes());
@@ -865,7 +969,7 @@ mod tests {
         )
         .unwrap();
         let exif = camera_exif(6, (64, 48));
-        let out = embed_in_tiff(tiff.clone(), &exif, (8, 6));
+        let out = embed_in_tiff(tiff.clone(), Some(&exif), None, None, (8, 6));
         assert!(out.len() > tiff.len());
         let s = summarize(&out);
         assert_eq!(s.make.as_deref(), Some("Thumbcam"));
@@ -887,5 +991,158 @@ mod tests {
         );
         let back = image::load_from_memory_with_format(&out, image::ImageFormat::Tiff).unwrap();
         assert_eq!((back.width(), back.height()), (8, 6));
+    }
+
+    /// A little-endian TIFF with one IFD0 of `(tag, type, count, value-or-offset)` entries
+    /// at offset 8, followed by `tail` (so offsets into it start at `8 + 2 + 12 * n + 4`).
+    fn raw_tiff(entries: &[(u16, u16, u32, u32)], tail: &[u8]) -> Vec<u8> {
+        let mut d = b"II*\0\x08\0\0\0".to_vec();
+        d.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for &(tag, typ, count, value) in entries {
+            d.extend_from_slice(&tag.to_le_bytes());
+            d.extend_from_slice(&typ.to_le_bytes());
+            d.extend_from_slice(&count.to_le_bytes());
+            d.extend_from_slice(&value.to_le_bytes());
+        }
+        d.extend_from_slice(&[0; 4]);
+        d.extend_from_slice(tail);
+        d
+    }
+
+    fn tiff_file_with_metadata() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 6));
+        let mut tiff = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut tiff),
+            image::ImageFormat::Tiff,
+        )
+        .unwrap();
+        let icc = vec![0x5A; 700];
+        let xmp = b"<x:xmpmeta/>".to_vec();
+        let out = embed_in_tiff(
+            tiff,
+            Some(&camera_exif(6, (64, 48))),
+            Some(&icc),
+            Some(&xmp),
+            (8, 6),
+        );
+        (out, icc, xmp)
+    }
+
+    #[test]
+    fn embed_in_tiff_adds_icc_and_xmp_even_without_exif() {
+        let (with_all, icc, xmp) = tiff_file_with_metadata();
+        assert_eq!(tiff_bytes(&with_all, TAG_ICC_PROFILE), Some(&icc[..]));
+        assert_eq!(tiff_bytes(&with_all, TAG_XMP), Some(&xmp[..]));
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 6));
+        let mut plain = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut plain),
+            image::ImageFormat::Tiff,
+        )
+        .unwrap();
+        let only = embed_in_tiff(plain.clone(), None, Some(&icc), None, (8, 6));
+        assert_eq!(tiff_bytes(&only, TAG_ICC_PROFILE), Some(&icc[..]));
+        assert!(tiff_bytes(&only, TAG_XMP).is_none());
+        assert!(image::load_from_memory_with_format(&only, image::ImageFormat::Tiff).is_ok());
+        // An unparsable EXIF block is skipped, the profile still lands.
+        let bad = embed_in_tiff(plain, Some(b"garbage"), Some(&icc), None, (8, 6));
+        assert_eq!(tiff_bytes(&bad, TAG_ICC_PROFILE), Some(&icc[..]));
+    }
+
+    #[test]
+    fn from_tiff_is_a_compact_block_without_strip_layout_or_maker_note() {
+        let (file, ..) = tiff_file_with_metadata();
+        let block = from_tiff(&file).expect("EXIF from a TIFF file");
+        assert!(block.len() < 800, "{} bytes", block.len());
+        let s = summarize(&block);
+        assert_eq!(s.make.as_deref(), Some("Thumbcam"));
+        assert_eq!(s.model.as_deref(), Some("TC-100 Mark II"));
+        assert_eq!(s.datetime.as_deref(), Some("2023:07:04 12:34:56"));
+        assert!(s.gps.is_some());
+        assert_eq!(s.dpi, Some((300.0, 300.0)));
+        let t = Tiff::parse(&block).unwrap();
+        let ifd0 = t.ifd0().unwrap();
+        // Only descriptive tags and the two sub-IFD pointers: no StripOffsets (273),
+        // ImageWidth (256) or the ICC and XMP arrays, whose bytes belong to the file.
+        for e in t.entries(ifd0).unwrap() {
+            assert!(
+                TIFF_CARRY.contains(&e.tag)
+                    || [
+                        TAG_X_RESOLUTION,
+                        TAG_Y_RESOLUTION,
+                        TAG_RESOLUTION_UNIT,
+                        TAG_ORIENTATION,
+                        TAG_EXIF_IFD,
+                        TAG_GPS_IFD
+                    ]
+                    .contains(&e.tag),
+                "unexpected IFD0 tag {:#x}",
+                e.tag
+            );
+        }
+        let exif_ifd = t.pointer(ifd0, TAG_EXIF_IFD).unwrap();
+        assert!(t.find(exif_ifd, TAG_MAKER_NOTE).is_none());
+        // normalise accepts it like any EXIF block.
+        assert!(normalise(&block, (8, 6)).is_some());
+        // No EXIF at all: nothing to carry.
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4));
+        let mut bare = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bare),
+            image::ImageFormat::Tiff,
+        )
+        .unwrap();
+        assert!(from_tiff(&bare).is_none());
+    }
+
+    #[test]
+    fn hostile_tiff_sources_yield_nothing_instead_of_panicking_or_ballooning() {
+        // EXIF IFD pointer past the end of the file.
+        let f = raw_tiff(&[(TAG_EXIF_IFD, TYPE_LONG, 1, 0x00FF_FFFF)], &[]);
+        assert!(from_tiff(&f).is_none());
+        // Entry count promising more entries than the file holds.
+        let mut f = raw_tiff(&[], &[]);
+        f[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(from_tiff(&f).is_none());
+        assert!(tiff_bytes(&f, TAG_XMP).is_none());
+        // IFD0 offset past the end.
+        let mut f = raw_tiff(&[], &[]);
+        f[4..8].copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
+        assert!(from_tiff(&f).is_none());
+        // A kept value whose offset and length leave the file.
+        let f = raw_tiff(&[(TAG_MAKE, TYPE_ASCII, 1000, 0x4000)], b"short");
+        assert!(from_tiff(&f).is_none());
+        // A count whose byte length overflows 32 bits.
+        let f = raw_tiff(&[(TAG_MAKE, TYPE_RATIONAL, u32::MAX, 18)], b"short");
+        assert!(from_tiff(&f).is_none());
+        // Seven descriptive tags pointing at the same 1 MiB: 7 MiB of copies would be
+        // built from a 1 MiB file, so the cap refuses.
+        let tail = vec![b'a'; 1 << 20];
+        let base = 2 + 12 * 7 + 4 + 8;
+        let tags = [
+            TAG_IMAGE_DESCRIPTION,
+            TAG_MAKE,
+            TAG_MODEL,
+            TAG_SOFTWARE,
+            TAG_DATE_TIME,
+            TAG_ARTIST,
+            TAG_COPYRIGHT,
+        ];
+        let entries: Vec<_> = tags
+            .iter()
+            .map(|&t| (t, TYPE_ASCII, 1 << 20, base as u32))
+            .collect();
+        assert!(from_tiff(&raw_tiff(&entries, &tail)).is_none());
+        // The same file with one such tag is fine.
+        let one = raw_tiff(&[(TAG_MAKE, TYPE_ASCII, 1 << 20, 26)], &tail);
+        assert!(from_tiff(&one).is_some());
+        // ICC/XMP tags of the wrong type or out of bounds are not bytes to carry.
+        let f = raw_tiff(&[(TAG_ICC_PROFILE, TYPE_SHORT, 4, 18)], &[0; 16]);
+        assert!(tiff_bytes(&f, TAG_ICC_PROFILE).is_none());
+        let f = raw_tiff(&[(TAG_XMP, 1, 100, 0x00FF_0000)], &[0; 16]);
+        assert!(tiff_bytes(&f, TAG_XMP).is_none());
+        let f = raw_tiff(&[(TAG_XMP, 7, 4, 0x41424344)], &[]);
+        assert_eq!(tiff_bytes(&f, TAG_XMP), Some(&b"DCBA"[..]));
     }
 }

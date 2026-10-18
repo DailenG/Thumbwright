@@ -5,6 +5,7 @@
 //! stderr as `twctl: <message>`; with `--notify` (menu invocations) they are also shown
 //! in a message box.
 
+mod carry;
 mod cmds;
 mod doctor;
 mod exif;
@@ -42,7 +43,7 @@ const USAGE: &str = "usage: twctl <command> [args]
   convert <in> <out> [--quality N] [--resize WxH|N%]
   convert-to <ext> <file...> [--quality N]
   resize --to WxH|N% <file...>
-  rotate --by right|left|180|fliph|flipv <file...>
+  rotate --by right|left|180|fliph|flipv [--trim] <file...>
   email --edge N <file...>
   compress --max-size 1MB|500KB|N <file...>
   strip <file...>
@@ -120,6 +121,7 @@ const FLAG_OPTS: &[&str] = &[
     "--auto",
     "--window",
     "--ask",
+    "--trim",
 ];
 
 fn parse(args: Vec<String>) -> Result<Cli> {
@@ -351,11 +353,11 @@ fn run(cli: &Cli) -> Result<String> {
                 return Err("output must differ from input".into());
             }
             let quality = parse_quality(cli)?;
-            let (mut img, exif) = ops::decode_full_with_exif(input, max, settings.keep_metadata)?;
+            let (mut img, meta) = ops::decode_full_with_meta(input, max, settings.keep_metadata)?;
             if let Some(r) = cli.opt("--resize") {
                 img = ops::apply_resize(&img, ops::parse_resize(r)?);
             }
-            let bytes = ops::encode_with_exif(&img, &ops::ext_of(out), quality, exif.as_deref())?;
+            let bytes = ops::encode_with_meta(&img, &ops::ext_of(out), quality, &meta)?;
             ops::write_atomic_like(input, out, &bytes, settings.preserve_file_date)?;
             Ok(out.display().to_string())
         }
@@ -375,8 +377,8 @@ fn run(cli: &Cli) -> Result<String> {
             }
             let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
             batch(&files, |f| {
-                let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_metadata)?;
-                let bytes = ops::encode_with_exif(&img, &target, quality, exif.as_deref())?;
+                let (img, meta) = ops::decode_full_with_meta(f, max, settings.keep_metadata)?;
+                let bytes = ops::encode_with_meta(&img, &target, quality, &meta)?;
                 ops::write_new_like(f, "", &target, &bytes, settings.preserve_file_date)
             })
         }
@@ -385,22 +387,30 @@ fn run(cli: &Cli) -> Result<String> {
             let spec = ops::parse_resize(cli.require("--to")?)?;
             batch(&cli.files()?, |f| {
                 let ext = writable_ext(f);
-                let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_metadata)?;
+                let (img, meta) = ops::decode_full_with_meta(f, max, settings.keep_metadata)?;
                 let img = ops::apply_resize(&img, spec);
-                let bytes = ops::encode_with_exif(&img, &ext, None, exif.as_deref())?;
+                let bytes = ops::encode_with_meta(&img, &ext, None, &meta)?;
                 ops::write_new_like(f, " (resized)", &ext, &bytes, settings.preserve_file_date)
             })
         }
         "rotate" => {
-            cli.allow(&["--by"], &[])?;
+            cli.allow(&["--by"], &["--trim"])?;
             let by = cli.require("--by")?.to_owned();
             ops::rotate(&image::DynamicImage::new_rgb8(1, 1), &by)?;
             let notes = std::sync::Mutex::new(Vec::<String>::new());
             let result = batch(&cli.files()?, |f| {
-                let r = ops::rotate_file(f, &by, max, settings.keep_metadata, &writable_ext(f))?;
-                if let Some(n) = r.note {
-                    notes.lock().unwrap_or_else(|e| e.into_inner()).push(n);
-                }
+                let r = ops::rotate_file(
+                    f,
+                    &by,
+                    max,
+                    settings.keep_metadata,
+                    &writable_ext(f),
+                    cli.flag("--trim"),
+                )?;
+                notes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend(r.notes);
                 ops::write_new_like(
                     f,
                     " (edited)",
@@ -423,17 +433,22 @@ fn run(cli: &Cli) -> Result<String> {
                 .filter(|n| *n > 0)
                 .ok_or("bad --edge")?;
             batch(&cli.files()?, |f| {
-                let img =
-                    ops::apply_resize(&ops::decode_full(f, max)?, ops::Resize::Fit(edge, edge));
-                ops::write_new(f, " (email)", "jpg", &ops::encode(&img, "jpg", Some(85))?)
+                let (img, meta) = ops::decode_full_with_meta(f, max, settings.keep_metadata)?;
+                let img = ops::apply_resize(&img, ops::Resize::Fit(edge, edge));
+                let bytes = ops::encode_with_meta(&img, "jpg", Some(85), &meta)?;
+                ops::write_new(f, " (email)", "jpg", &bytes)
             })
         }
         "compress" => {
             cli.allow(&["--max-size"], &[])?;
             let limit = ops::parse_size(cli.require("--max-size")?)?;
             batch(&cli.files()?, |f| {
-                let bytes = ops::compress_to(&ops::decode_full(f, max)?, limit)
+                let (img, meta) = ops::decode_full_with_meta(f, max, settings.keep_metadata)?;
+                let (bytes, notes) = ops::compress_to(&img, limit, &meta)
                     .map_err(|e| format!("{}: {e}", f.display()))?;
+                notes
+                    .iter()
+                    .for_each(|n| eprintln!("twctl: note: {}: {n}", f.display()));
                 ops::write_new(f, " (compressed)", "jpg", &bytes)
             })
         }
@@ -1061,6 +1076,37 @@ mod tests {
         }
         let json = run_args(&["info", &dir.join("out.png").to_string_lossy(), "--json"]).unwrap();
         assert!(json.contains("\"make\":\"Thumbcam\""), "{json}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rotate_trim_flag_trims_instead_of_re_encoding() {
+        let dir = std::env::temp_dir().join(format!("twctl-rottrim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("odd.jpg");
+        std::fs::write(&src, jpeg_bytes(50, 30, None)).unwrap();
+        let path = src.to_string_lossy().into_owned();
+        // 50x30 is not a whole number of 8x8 MCUs, and a half turn mirrors both axes.
+        let plain = run_args(&["rotate", "--by", "180", &path]).unwrap();
+        assert!(plain.contains("not rotated losslessly"), "{plain}");
+        let trimmed = run_args(&["rotate", "--by", "180", "--trim", &path]).unwrap();
+        assert!(
+            trimmed.contains("trimmed the partial edge MCUs, 50x30 became 48x24"),
+            "{trimmed}"
+        );
+        assert!(!trimmed.contains("not rotated losslessly"), "{trimmed}");
+        let out = dir.join("odd (edited) (1).jpg");
+        let shown = image::open(&out).unwrap();
+        assert_eq!((shown.width(), shown.height()), (48, 24));
+        // The flag belongs to rotate only.
+        let err = run_args(&[
+            "convert",
+            "--trim",
+            &path,
+            &dir.join("x.png").to_string_lossy(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("does not take --trim"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
