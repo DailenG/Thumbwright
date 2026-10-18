@@ -92,29 +92,44 @@ impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
             return Err(E_POINTER.into());
         }
         let stream = self.stream.borrow().clone().ok_or(E_UNEXPECTED)?;
-        let outcome = catch_unwind(AssertUnwindSafe(|| produce(&stream, cx)))
-            .unwrap_or_else(|_| Err(Failure::new("panic", None, 0)));
-        match outcome {
-            Ok(thumb) => {
-                let hbmp = crate::bitmap::create(&thumb)?;
-                // SAFETY: both out-pointers checked non-null above.
-                unsafe {
-                    *phbmp = hbmp;
-                    *pdwalpha = WTSAT_ARGB;
-                }
-                Ok(())
+        write_thumbnail(&stream, None, cx, phbmp, pdwalpha)
+    }
+}
+
+/// Produces the thumbnail for `stream` and hands it out per the `IThumbnailProvider`
+/// contract (REQ-COM-6/7). `name_hint` supplies the file name for streams whose `Stat`
+/// reports none.
+///
+/// `phbmp` and `pdwalpha` must be non-null; callers check.
+pub(crate) fn write_thumbnail(
+    stream: &IStream,
+    name_hint: Option<&str>,
+    cx: u32,
+    phbmp: *mut HBITMAP,
+    pdwalpha: *mut WTS_ALPHATYPE,
+) -> Result<()> {
+    let outcome = catch_unwind(AssertUnwindSafe(|| produce(stream, name_hint, cx)))
+        .unwrap_or_else(|_| Err(Failure::new("panic", None, 0)));
+    match outcome {
+        Ok(thumb) => {
+            let hbmp = crate::bitmap::create(&thumb)?;
+            // SAFETY: the caller guarantees both out-pointers are non-null.
+            unsafe {
+                *phbmp = hbmp;
+                *pdwalpha = WTSAT_ARGB;
             }
-            Err(f) => {
-                log::error(&format!(
-                    "GetThumbnail: failed hr=0x{:08X} ext={} size={} cause={}",
-                    E_FAIL.0 as u32,
-                    f.ext.as_deref().unwrap_or("?"),
-                    f.size,
-                    f.cause
-                ));
-                // REQ-COM-7: a failure HRESULT, never a placeholder bitmap.
-                Err(E_FAIL.into())
-            }
+            Ok(())
+        }
+        Err(f) => {
+            log::error(&format!(
+                "GetThumbnail: failed hr=0x{:08X} ext={} size={} cause={}",
+                E_FAIL.0 as u32,
+                f.ext.as_deref().unwrap_or("?"),
+                f.size,
+                f.cause
+            ));
+            // REQ-COM-7: a failure HRESULT, never a placeholder bitmap.
+            Err(E_FAIL.into())
         }
     }
 }
@@ -135,13 +150,13 @@ impl Failure {
     }
 }
 
-struct StreamInfo {
-    name: String,
-    size: u64,
-    mtime: u64,
+pub(crate) struct StreamInfo {
+    pub(crate) name: String,
+    pub(crate) size: u64,
+    pub(crate) mtime: u64,
 }
 
-fn stat(stream: &IStream) -> Result<StreamInfo> {
+pub(crate) fn stat(stream: &IStream) -> Result<StreamInfo> {
     let mut st = STATSTG::default();
     // SAFETY: `st` is a valid out-parameter; pwcsName is CoTaskMem-allocated and freed here.
     unsafe {
@@ -165,7 +180,7 @@ fn stat(stream: &IStream) -> Result<StreamInfo> {
 /// allocation. A stream that yields more than it declared is rejected. (A 1 MiB bounce
 /// buffer cost 0.4-0.7 ms per call, ten times the read itself on small files:
 /// docs/performance.md.)
-fn read_all(stream: &IStream, size: u64) -> Result<Vec<u8>> {
+pub(crate) fn read_all(stream: &IStream, size: u64) -> Result<Vec<u8>> {
     // SAFETY: seeking a stream we hold a reference to.
     unsafe { stream.Seek(0, STREAM_SEEK_SET, None)? };
     // One byte beyond the declared size, so a stream that yields more is noticed.
@@ -203,10 +218,19 @@ fn read_all(stream: &IStream, size: u64) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn produce(stream: &IStream, cx: u32) -> std::result::Result<Thumbnail, Failure> {
+fn produce(
+    stream: &IStream,
+    name_hint: Option<&str>,
+    cx: u32,
+) -> std::result::Result<Thumbnail, Failure> {
     let dir = crate::install_dir();
     let settings = Settings::load(&dir);
-    let info = stat(stream).map_err(|e| Failure::new(format!("stat: {e}"), None, 0))?;
+    let mut info = stat(stream).map_err(|e| Failure::new(format!("stat: {e}"), None, 0))?;
+    if info.name.is_empty()
+        && let Some(hint) = name_hint
+    {
+        info.name = hint.to_owned();
+    }
     let ext = Path::new(&info.name)
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());

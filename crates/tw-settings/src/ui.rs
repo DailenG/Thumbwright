@@ -1209,6 +1209,7 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
     let settings = Settings {
         thumbnails_enabled: false,
         use_embedded_thumbs: false,
+        cloud_thumbnails: true,
         max_file_mb: 250,
         max_thumb_px: 512,
         jpeg_quality: 72,

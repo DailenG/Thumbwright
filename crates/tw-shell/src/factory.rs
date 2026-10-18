@@ -6,7 +6,7 @@ use windows::Win32::Foundation::{CLASS_E_NOAGGREGATION, E_POINTER};
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 use windows::core::{BOOL, GUID, IUnknown, Interface, Ref, Result, implement};
 
-use tw_core::ids;
+use tw_core::ids::{self, ClassId};
 
 use crate::ModuleRef;
 
@@ -14,17 +14,27 @@ use crate::ModuleRef;
 pub(crate) enum Kind {
     Thumbnail,
     ContextMenu,
+    CloudThumbnail,
+    Preview,
+    Property,
+    ExplorerCommand,
 }
 
 impl Kind {
+    const ALL: [(ClassId, Kind); 6] = [
+        (ids::CLSID_THUMBNAIL, Kind::Thumbnail),
+        (ids::CLSID_CONTEXT_MENU, Kind::ContextMenu),
+        (ids::CLSID_CLOUD_THUMBNAIL, Kind::CloudThumbnail),
+        (ids::CLSID_PREVIEW, Kind::Preview),
+        (ids::CLSID_PROPERTY, Kind::Property),
+        (ids::CLSID_EXPLORER_COMMAND, Kind::ExplorerCommand),
+    ];
+
     pub(crate) fn from_clsid(clsid: &GUID) -> Option<Self> {
-        if *clsid == GUID::from_u128(ids::CLSID_THUMBNAIL.guid) {
-            Some(Self::Thumbnail)
-        } else if *clsid == GUID::from_u128(ids::CLSID_CONTEXT_MENU.guid) {
-            Some(Self::ContextMenu)
-        } else {
-            None
-        }
+        Self::ALL
+            .iter()
+            .find(|(class, _)| *clsid == GUID::from_u128(class.guid))
+            .map(|&(_, kind)| kind)
     }
 }
 
@@ -61,6 +71,10 @@ impl IClassFactory_Impl for ClassFactory_Impl {
         let object: IUnknown = match self.kind {
             Kind::Thumbnail => crate::thumbnail::ThumbnailProvider::new().into(),
             Kind::ContextMenu => crate::menu::ContextMenu::new().into(),
+            Kind::CloudThumbnail => crate::cloud::CloudThumbnailProvider::new().into(),
+            Kind::Preview => crate::preview::PreviewHandler::new().into(),
+            Kind::Property => crate::property::PropertyHandler::new().into(),
+            Kind::ExplorerCommand => crate::explorer_command::ExplorerCommand::new().into(),
         };
         // SAFETY: riid/ppv valid per the COM contract.
         unsafe { object.query(riid, ppv).ok() }

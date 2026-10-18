@@ -99,6 +99,8 @@ pub fn register_user(dir: &Path, layout: &Layout, settings: &Settings) -> Result
             dll_path: &dll,
             extensions,
             context_menu: settings.menu_enabled,
+            cloud: true,
+            installer: None,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -144,6 +146,8 @@ mod tests {
                 classes: format!("{base}\\Classes"),
                 product: format!("{base}\\Product"),
                 approve: false,
+                preview_handlers: format!("{base}\\PreviewHandlers"),
+                property_handlers: format!("{base}\\PropertyHandlers"),
                 notify: false,
             };
             Self { base, dir, layout }
@@ -156,6 +160,8 @@ mod tests {
                     dll_path: Path::new(r"C:\x\thumbwright_shell.dll"),
                     extensions: extensions.to_vec(),
                     context_menu: menu,
+                    cloud: true,
+                    installer: None,
                 },
             )
             .unwrap();

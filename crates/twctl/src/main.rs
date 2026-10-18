@@ -702,6 +702,8 @@ fn register(cli: &Cli, dir: &Path, settings: &Settings) -> Result<String> {
             dll_path: &dll,
             extensions,
             context_menu: settings.menu_enabled,
+            cloud: true,
+            installer: None,
         },
     )
     .map_err(|e| e.to_string())?;

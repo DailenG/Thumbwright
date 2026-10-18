@@ -57,18 +57,18 @@ const PREVIEW_WAIT: Duration = Duration::from_millis(1500);
 
 /// One invokable command: `twctl <args...> --notify <files...>`.
 #[derive(Clone, Copy)]
-struct Verb {
+pub(crate) struct Verb {
     /// Canonical verb name (GetCommandString / string invocation).
-    name: &'static str,
-    label: &'static str,
-    args: &'static [&'static str],
+    pub(crate) name: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) args: &'static [&'static str],
 }
 
 const fn v(name: &'static str, label: &'static str, args: &'static [&'static str]) -> Verb {
     Verb { name, label, args }
 }
 
-enum Node {
+pub(crate) enum Node {
     Separator,
     /// `id` is the visibility key (settings `HiddenMenuItems`), `single` = one file only.
     Leaf {
@@ -86,7 +86,7 @@ enum Node {
 
 /// Submenu in the default order of FUNCTIONAL_SPEC.md 6.2, limited to the verbs this
 /// product implements (`twctl` back ends).
-const TREE: &[Node] = &[
+pub(crate) const TREE: &[Node] = &[
     Node::Sub {
         id: "convert_into",
         label: "Convert into",
@@ -452,7 +452,7 @@ fn ext_of(p: &Path) -> String {
 }
 
 /// The menu shows only for supported types unless "Show menu on all file types" is on.
-fn menu_applies(files: &[PathBuf], settings: &Settings) -> bool {
+pub(crate) fn menu_applies(files: &[PathBuf], settings: &Settings) -> bool {
     if files.is_empty() || !settings.menu_enabled {
         return false;
     }
@@ -877,7 +877,7 @@ impl IContextMenu3_Impl for ContextMenu_Impl {
 /// selections go through a temporary list file.
 const CMDLINE_BUDGET: usize = 30_000;
 
-fn launch(verb: &Verb, files: &[PathBuf], _hwnd: HWND) -> Result<()> {
+pub(crate) fn launch(verb: &Verb, files: &[PathBuf], _hwnd: HWND) -> Result<()> {
     let exe = crate::install_dir().join(ids::CTL_EXE_NAME);
     let mut cmd = std::process::Command::new(exe);
     cmd.args(verb.args).arg("--notify");

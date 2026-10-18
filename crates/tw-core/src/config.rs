@@ -101,6 +101,9 @@ pub struct Settings {
     pub thumbnails_enabled: bool,
     /// Prefer a camera-embedded thumbnail over decoding the full image.
     pub use_embedded_thumbs: bool,
+    /// "Thumbnails in cloud folders" (spec 4.3): the cloud-folder class refuses every
+    /// request while this is off.
+    pub cloud_thumbnails: bool,
     pub max_file_mb: u64,
     pub max_thumb_px: u32,
     /// Conversion default: JPEG quality, 1-100.
@@ -130,6 +133,7 @@ impl Default for Settings {
         Self {
             thumbnails_enabled: true,
             use_embedded_thumbs: true,
+            cloud_thumbnails: false,
             max_file_mb: limits::DEFAULT_MAX_FILE_MB,
             max_thumb_px: limits::DEFAULT_MAX_THUMB_EDGE,
             jpeg_quality: 90,
@@ -205,6 +209,7 @@ impl Settings {
         match key.trim() {
             "ThumbnailsEnabled" => self.thumbnails_enabled = parse_bool(v).unwrap_or(true),
             "UseEmbeddedThumbs" => self.use_embedded_thumbs = parse_bool(v).unwrap_or(true),
+            "CloudThumbnails" => self.cloud_thumbnails = parse_bool(v).unwrap_or(false),
             "MaxFileMB" => {
                 if let Ok(n) = v.parse::<u64>() {
                     self.max_file_mb = n.clamp(1, limits::DEFAULT_MAX_FILE_MB);
@@ -260,6 +265,7 @@ impl Settings {
                 Stored::Number(self.max_file_mb.min(u64::from(u32::MAX)) as u32),
             ),
             ("MaxThumbPx", Stored::Number(self.max_thumb_px)),
+            ("CloudThumbnails", Stored::flag(self.cloud_thumbnails)),
             ("JpegQuality", Stored::Number(u32::from(self.jpeg_quality))),
             (
                 "PngCompression",
@@ -429,6 +435,10 @@ mod tests {
         assert_eq!(s.max_file_bytes(), 4096 * 1024 * 1024);
         assert_eq!(s.max_thumb_px, 1024);
         assert!(s.menu_enabled && !s.menu_all_file_types && s.thumbnails_enabled);
+        assert!(
+            !s.cloud_thumbnails,
+            "cloud folders are off by default (spec 4.3)"
+        );
         assert_eq!(s.menu_preview, MenuPreview::InSubmenu);
         assert!(s.keep_metadata, "Keep metadata defaults on");
         assert!(!Settings::from_ini("[Settings]\nKeepMetadata=0\n").keep_metadata);
@@ -475,6 +485,7 @@ mod tests {
         Settings {
             thumbnails_enabled: false,
             use_embedded_thumbs: false,
+            cloud_thumbnails: true,
             max_file_mb: 250,
             max_thumb_px: 512,
             jpeg_quality: 72,
