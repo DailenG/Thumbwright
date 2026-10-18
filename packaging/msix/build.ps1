@@ -141,10 +141,13 @@ $tokens = @{
     '@VERSION@'                = $Version
     '@EXPLORER_COMMAND_CLSID@' = Get-ExplorerCommandClsid
     '@SHELL_DLL@'              = 'thumbwright_shell.dll'
-    '@CTL_EXE@'                = 'twctl.exe'
+    '@APP_EXE@'                = 'thumbwright-settings.exe'
 }
 
+# The template's header comment describes the tokens and would be filled in like the rest;
+# the shipped manifest does not need it.
 $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'AppxManifest.xml') -Raw
+$manifest = [regex]::Replace($manifest, '(?s)<!--.*?-->\s*', '')
 foreach ($name in $tokens.Keys) {
     $manifest = $manifest.Replace($name, $tokens[$name])
 }

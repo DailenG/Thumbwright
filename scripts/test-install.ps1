@@ -32,10 +32,19 @@
       Repair            install, `msiexec /fa`, verify, confirm the footprint is unchanged,
                         uninstall, no residue.
 
+    Sparse package (Windows 11 modern menu, issue #19). The MSI ships Thumbwright.msix and
+    provisions it for all users (stage with the install directory as external location, then
+    Add-AppxProvisionedPackage). After each install the elevated run checks that the installed
+    package is provisioned and that the staged copy registers for the current user (the step
+    Windows does for each user at sign-in); after each uninstall, that it is neither provisioned
+    nor registered for any user. Both checks apply only to a signed package: an unsigned
+    (-SkipSign) one cannot be registered, which is reported and skipped.
+
     -DryRun is the non-elevated mode: it builds an MSI from -SourceDir (or inspects -Msi) and checks
     its tables through the Windows Installer API (files, no INI, no Registry rows, the deferred
-    register action after InstallFiles, the unregister action before RemoveFiles), extracts it with
-    an administrative install into the work directory and runs `wix msi validate` (ICE). Nothing is
+    register action after InstallFiles, the unregister action before RemoveFiles, the package
+    register/unregister actions), extracts it with an administrative install into the work
+    directory, inspects the Thumbwright.msix in it, and runs `wix msi validate` (ICE). Nothing is
     installed and no registry is touched.
 
 .PARAMETER Msi
@@ -155,7 +164,9 @@ function Get-MsiProperty {
 # ---------------------------------------------------------------------------------------------
 # Package inspection (used by -DryRun, and as a precondition of the elevated run)
 # ---------------------------------------------------------------------------------------------
-$script:RequiredFiles = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe', 'LICENSE', 'THIRD_PARTY_LICENSES.md')
+$script:RequiredFiles = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe', 'Thumbwright.msix', 'LICENSE', 'THIRD_PARTY_LICENSES.md')
+# Identity name of the sparse package as the MSI's package actions know it; set by Test-MsiPackage.
+$script:CaPackageName = $null
 
 function Test-MsiPackage {
     param([string]$Path)
@@ -217,6 +228,60 @@ function Test-MsiPackage {
             [int]$sequence['RemoveExistingProducts'][2] -lt [int]$sequence['InstallFiles'][2])
     }
 
+    # Sparse package actions: removal (deprovision, remove), install (stage, provision) and the
+    # rollbacks of the install pair.
+    $packageActions = 'DeprovisionPackage', 'RemovePackage', 'StagePackage', 'ProvisionPackage', 'StagePackageRollback', 'ProvisionPackageRollback'
+    foreach ($name in $packageActions) {
+        Assert-Check "CustomAction $name exists" ($actions.ContainsKey($name))
+    }
+    if (-not ($packageActions | Where-Object { -not $actions.ContainsKey($_) })) {
+        # Type bits: 256 = rollback, 1024 = deferred, 2048 = no impersonation, 64 = ignore the exit code.
+        foreach ($name in $packageActions) {
+            $a = $actions[$name]
+            $type = [int]$a[1]
+            $kind = if ($name -like '*Rollback') { 'rollback' } else { 'deferred' }
+            $kindBit = if ($kind -eq 'rollback') { 256 } else { 1024 }
+            Assert-Check "$name is a $kind, non-impersonated, exit-code-ignoring EXE action" (
+                (($type -band $kindBit) -ne 0) -and (($type -band 2048) -ne 0) -and (($type -band 64) -ne 0) -and (($type -band 7) -eq 2))
+            Assert-Check "$name runs the 64-bit Windows PowerShell with -Command" (
+                $a[3] -match '^\[System64Folder\]WindowsPowerShell\\v1\.0\\powershell\.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[^"]+"$')
+            # The text after -Command is formatted by Windows Installer and parsed by the command
+            # line; braces and inner double quotes would be mangled.
+            $inner = if ($a[3] -match ' -Command "([^"]+)"$') { $Matches[1] } else { '' }
+            Assert-Check "$name has no braces or inner double quotes in its command" (($inner.Length -gt 0) -and ($inner -notmatch '[{}"]'))
+            # ICE03: the CustomAction.Target column holds 255 characters.
+            Assert-Check "$name fits the 255-character Target column" ($a[3].Length -le 255) "$($a[3].Length) characters"
+        }
+        $deprovision = 'Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq '
+        $remove = 'Get-AppxPackage -AllUsers -Name '
+        Assert-Check 'DeprovisionPackage and ProvisionPackageRollback deprovision the package' (
+            $actions['DeprovisionPackage'][3].Contains($deprovision) -and $actions['DeprovisionPackage'][3].EndsWith(' | Remove-AppxProvisionedPackage -Online"') -and
+            $actions['ProvisionPackageRollback'][3] -eq $actions['DeprovisionPackage'][3])
+        Assert-Check 'RemovePackage and StagePackageRollback remove the package for all users' (
+            $actions['RemovePackage'][3].Contains($remove) -and $actions['RemovePackage'][3].EndsWith(' | Remove-AppxPackage -AllUsers"') -and
+            $actions['StagePackageRollback'][3] -eq $actions['RemovePackage'][3])
+        Assert-Check 'StagePackage stages Thumbwright.msix with the install directory as external location' (
+            $actions['StagePackage'][3].Contains("Add-AppxPackage -Stage '[INSTALLFOLDER]Thumbwright.msix' -ExternalLocation ('[INSTALLFOLDER]'.TrimEnd('\'))"))
+        Assert-Check 'ProvisionPackage provisions the staged package for all users' (
+            $actions['ProvisionPackage'][3].Contains("Add-AppxProvisionedPackage -Online -PackagePath '[INSTALLFOLDER]Thumbwright.msix' -SkipLicense"))
+        $names = @(foreach ($name in 'DeprovisionPackage', 'RemovePackage') { [regex]::Matches($actions[$name][3], "'([^'\[]+)'") | ForEach-Object { $_.Groups[1].Value } })
+        $script:CaPackageName = $names | Select-Object -First 1
+        Assert-Check 'The removal actions name one package identity' ($names.Count -eq 2 -and @($names | Select-Object -Unique).Count -eq 1) ($names -join ', ')
+        $seq = { param($n) [int]$sequence[$n][2] }
+        Assert-Check 'Removal runs before UnregisterShell: DeprovisionPackage, RemovePackage, UnregisterShell, RemoveFiles' (
+            (& $seq 'DeprovisionPackage') -lt (& $seq 'RemovePackage') -and (& $seq 'RemovePackage') -lt (& $seq 'UnregisterShell') -and
+            (& $seq 'UnregisterShell') -lt (& $seq 'RemoveFiles'))
+        Assert-Check 'Removal also runs on install, before InstallFiles, to clear a stale registration' (
+            (& $seq 'RemovePackage') -lt (& $seq 'InstallFiles') -and -not $sequence['DeprovisionPackage'][1] -and -not $sequence['RemovePackage'][1])
+        Assert-Check 'Staging then provisioning run after InstallFiles and RegisterShell, on install only' (
+            (& $seq 'StagePackage') -gt (& $seq 'InstallFiles') -and (& $seq 'StagePackage') -gt (& $seq 'RegisterShell') -and
+            (& $seq 'ProvisionPackage') -gt (& $seq 'StagePackage') -and
+            $sequence['StagePackage'][1] -match 'NOT \(REMOVE="ALL"\)' -and $sequence['ProvisionPackage'][1] -match 'NOT \(REMOVE="ALL"\)')
+        Assert-Check 'Each rollback action is scheduled just before the action it undoes' (
+            (& $seq 'StagePackageRollback') -lt (& $seq 'StagePackage') -and (& $seq 'ProvisionPackageRollback') -lt (& $seq 'ProvisionPackage') -and
+            (& $seq 'StagePackageRollback') -gt (& $seq 'RegisterShell'))
+    }
+
     Assert-Check 'Package is per-machine (ALLUSERS=1)' ((Get-MsiProperty $db 'ALLUSERS') -eq '1')
     $version = Get-MsiProperty $db 'ProductVersion'
     Assert-Check 'ProductVersion is major.minor.build' ($version -match '^\d+\.\d+\.\d+$') $version
@@ -224,6 +289,55 @@ function Test-MsiPackage {
         Version     = $version
         UpgradeCode = (Get-MsiProperty $db 'UpgradeCode')
         ProductCode = (Get-MsiProperty $db 'ProductCode')
+    }
+}
+
+# Inspects a sparse package file without installing it: identity, the executable that carries it,
+# external-content flag, and that the verb and the COM class behind it use CLSID_EXPLORER_COMMAND
+# from crates\tw-core\src\ids.rs. Returns Name, Publisher, Executable and Signed.
+function Test-SparsePackageFile {
+    param([string]$Path, [string]$Label)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entries = @($zip.Entries | ForEach-Object { $_.FullName })
+        $part = $zip.GetEntry('AppxManifest.xml')
+        if ($null -eq $part) { throw "$Path has no AppxManifest.xml" }
+        $reader = New-Object System.IO.StreamReader ($part.Open())
+        try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally {
+        $zip.Dispose()
+    }
+    $ns = New-Object System.Xml.XmlNamespaceManager $manifest.NameTable
+    $ns.AddNamespace('m', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+    $ns.AddNamespace('uap10', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/10')
+    $ns.AddNamespace('desktop5', 'http://schemas.microsoft.com/appx/manifest/desktop/windows10/5')
+    $ns.AddNamespace('com', 'http://schemas.microsoft.com/appx/manifest/com/windows10')
+    $identity = $manifest.SelectSingleNode('/m:Package/m:Identity', $ns)
+    $application = $manifest.SelectSingleNode('/m:Package/m:Applications/m:Application', $ns)
+    $verb = $manifest.SelectSingleNode('//desktop5:Verb', $ns)
+    $class = $manifest.SelectSingleNode('//com:Class', $ns)
+    $external = $manifest.SelectSingleNode('/m:Package/m:Properties/uap10:AllowExternalContent', $ns)
+    $explorerCommand = ((Get-ProductClasses | Where-Object { $_.Const -eq 'CLSID_EXPLORER_COMMAND' }).Clsid).Trim('{', '}')
+
+    Assert-Check "[$Label] package is a sparse package (AllowExternalContent, no payload besides assets)" (
+        ($null -ne $external -and $external.InnerText -eq 'true') -and
+        -not ($entries | Where-Object { $_ -match '\.(dll|exe)$' }))
+    Assert-Check "[$Label] package has an identity name and a CN= publisher" (
+        $identity.Name -match '^[A-Za-z0-9][A-Za-z0-9.\-]+$' -and $identity.Publisher -like 'CN=*') "$($identity.Name) / $($identity.Publisher)"
+    Assert-Check "[$Label] package Application is thumbwright-settings.exe (the exe with the embedded msix manifest)" (
+        $null -ne $application -and $application.Executable -eq 'thumbwright-settings.exe')
+    Assert-Check "[$Label] explorer verb uses CLSID_EXPLORER_COMMAND $explorerCommand" (
+        $null -ne $verb -and $verb.Clsid -eq $explorerCommand)
+    Assert-Check "[$Label] COM surrogate class is CLSID_EXPLORER_COMMAND in thumbwright_shell.dll (STA)" (
+        $null -ne $class -and $class.Id -eq $explorerCommand -and $class.Path -eq 'thumbwright_shell.dll' -and $class.ThreadingModel -eq 'STA')
+    $signed = $entries -contains 'AppxSignature.p7x'
+    Write-Host ("    package {0}, publisher {1}, {2}" -f $identity.Name, $identity.Publisher, $(if ($signed) { 'signed' } else { 'UNSIGNED (cannot be registered)' }))
+    return [pscustomobject]@{
+        Name       = $identity.Name
+        Publisher  = $identity.Publisher
+        Executable = $application.Executable
+        Signed     = $signed
     }
 }
 
@@ -250,6 +364,12 @@ function Test-AdminImage {
         Assert-Check "Extracted payload has $name" ($names -contains $name)
     }
     Assert-Check 'Extracted payload has no .ini file' (-not ($names | Where-Object { $_ -like '*.ini' }))
+    $msixFile = Get-ChildItem -LiteralPath $target -Recurse -File -Filter 'Thumbwright.msix' | Select-Object -First 1
+    if ($msixFile) {
+        $package = Test-SparsePackageFile $msixFile.FullName 'extracted'
+        Assert-Check 'Package identity equals the one the register/unregister actions manage' ($package.Name -eq $script:CaPackageName) "$($package.Name) vs $($script:CaPackageName)"
+        Assert-Check 'MSI ships the executable that the package Application names' ($names -contains $package.Executable) $package.Executable
+    }
 }
 
 function Test-IceValidation {
@@ -527,6 +647,26 @@ function Test-Installed {
         }
     }
     Assert-Check "[$Label] context menu handler" ((Get-RegistryValue 'HKLM' 'SOFTWARE\Classes\*\shellex\ContextMenuHandlers\Thumbwright') -eq $menu)
+
+    $package = Test-SparsePackageFile (Join-Path $script:InstallDir 'Thumbwright.msix') $Label
+    Assert-Check "[$Label] sparse package identity equals the one the MSI actions manage" ($package.Name -eq $script:CaPackageName) "$($package.Name) vs $($script:CaPackageName)"
+    if ($package.Signed) {
+        # The MSI stages the package with the install directory as its external location and
+        # provisions it; Windows then registers it for each user at their next sign-in.
+        $provisioned = @(Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq $package.Name)
+        Assert-Check "[$Label] sparse package is provisioned for all users" ($provisioned.Count -eq 1) "$($provisioned.Count) provisioned entries"
+        if ($provisioned.Count -eq 1) {
+            # What the sign-in does for this user, done now: register the staged package.
+            # PackageName is Name_Version_Architecture_ResourceId_PublisherId.
+            $parts = $provisioned[0].PackageName -split '_'
+            $family = '{0}_{1}' -f $parts[0], $parts[-1]
+            Add-AppxPackage -RegisterByFamilyName -MainPackage $family -ErrorAction Stop
+            $registered = @(Get-AppxPackage -Name $package.Name)
+            Assert-Check "[$Label] staged sparse package registers for the current user" ($registered.Count -eq 1) "$($registered.Count) registrations of $family"
+        }
+    } else {
+        Write-Warning "[$Label] Thumbwright.msix is unsigned (a -SkipSign build): Windows cannot register it, so provisioning checks are skipped."
+    }
 }
 
 function Test-Uninstalled {
@@ -539,6 +679,10 @@ function Test-Uninstalled {
         Assert-Check "[$Label] $($class.Const) CLSID key is gone" (-not (Test-RegistryKeyExists 'HKLM' "SOFTWARE\Classes\CLSID\$($class.Clsid)"))
         Assert-Check "[$Label] $($class.Const) Approved entry is gone" ($null -eq (Get-RegistryValue 'HKLM' $script:ApprovedPath $class.Clsid))
     }
+    Assert-Check "[$Label] sparse package is no longer provisioned" (
+        @(Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq $script:CaPackageName).Count -eq 0)
+    Assert-Check "[$Label] sparse package is registered for no user" (
+        @(Get-AppxPackage -AllUsers -Name $script:CaPackageName -ErrorAction SilentlyContinue).Count -eq 0)
 }
 
 function Get-InstalledProductCount {
