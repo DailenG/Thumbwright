@@ -133,6 +133,7 @@
     <?define CmdDeprovision="Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq '$(PackageName)' | Remove-AppxProvisionedPackage -Online" ?>
     <?define CmdRemove="Get-AppxPackage -AllUsers -Name '$(PackageName)' | Remove-AppxPackage -AllUsers" ?>
     <?define CmdStage="Add-AppxPackage -Stage '[INSTALLFOLDER]Thumbwright.msix' -ExternalLocation ('[INSTALLFOLDER]'.TrimEnd('\'))" ?>
+    <?define CmdRegisterUser="Add-AppxPackage -Path '[INSTALLFOLDER]Thumbwright.msix' -ExternalLocation ('[INSTALLFOLDER]'.TrimEnd('\'))" ?>
     <?define CmdProvision="Add-AppxProvisionedPackage -Online -PackagePath '[INSTALLFOLDER]Thumbwright.msix' -SkipLicense" ?>
 
     <!-- Removal: deprovision (so nobody new is registered), then remove for every user, which
@@ -163,6 +164,19 @@
         Execute="rollback" Impersonate="no" Return="ignore"
         ExeCommand="$(PowerShell) &quot;$(CmdDeprovision)&quot;" />
 
+    <!-- The user who ran the installer gets the modern-menu verb immediately, by the per-user
+         route the sparse-package documentation gives installers: register the .msix with the
+         install directory as its external location, for that user (Add-AppxPackage registers
+         for the account that runs it). Impersonated, so it runs as that user, not LocalSystem
+         (which Windows cannot register a package for); it needs no elevation. In a silent
+         deployment with no interactive user the action fails and is ignored, and every user
+         still gets the verb at their next sign-in (the provisioned family), so nothing
+         depends on it. If the same version is already registered for that user (a repair),
+         Add-AppxPackage fails and the action is ignored; the earlier registration stands. -->
+    <CustomAction Id="RegisterPackageForUser" Directory="INSTALLFOLDER"
+        Execute="deferred" Impersonate="yes" Return="ignore"
+        ExeCommand="$(PowerShell) &quot;$(CmdRegisterUser)&quot;" />
+
     <InstallExecuteSequence>
       <!-- Remove the package first, so none of our code is loaded when the DLL is unregistered
            and its files are deleted: deprovision, remove, unregister the DLL, remove files.
@@ -179,8 +193,9 @@
            the external location's content, are in place. -->
       <Custom Action="StagePackageRollback" Before="StagePackage" Condition='NOT (REMOVE="ALL")' />
       <Custom Action="StagePackage" After="RegisterShell" Condition='NOT (REMOVE="ALL")' />
-      <Custom Action="ProvisionPackageRollback" Before="ProvisionPackage" Condition='NOT (REMOVE="ALL")' />
       <Custom Action="ProvisionPackage" After="StagePackage" Condition='NOT (REMOVE="ALL")' />
+      <Custom Action="ProvisionPackageRollback" Before="ProvisionPackage" Condition='NOT (REMOVE="ALL")' />
+      <Custom Action="RegisterPackageForUser" After="ProvisionPackage" Condition='NOT (REMOVE="ALL")' />
     </InstallExecuteSequence>
   </Package>
 </Wix>
