@@ -203,15 +203,16 @@ mod tests {
     struct TempDir(PathBuf);
 
     impl TempDir {
+        /// A directory of its own per call. Tests run in parallel and the system clock can
+        /// return the same value to two of them, so a counter makes the name unique.
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let dir = std::env::temp_dir().join(format!(
                 "tw-cache-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
+            let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
