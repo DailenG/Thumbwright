@@ -30,6 +30,9 @@ pub struct Settings {
     /// Menu verb ids the user hid.
     pub hidden_menu_items: Vec<String>,
     pub verbose_log: bool,
+    /// Carry EXIF into converted/rotated images (spec: "Keep EXIF and other metadata when
+    /// converting", default on).
+    pub keep_exif: bool,
 }
 
 impl Default for Settings {
@@ -44,6 +47,7 @@ impl Default for Settings {
             disabled_types: Vec::new(),
             hidden_menu_items: Vec::new(),
             verbose_log: false,
+            keep_exif: true,
         }
     }
 }
@@ -99,6 +103,7 @@ impl Settings {
             "DisabledTypes" => self.disabled_types = parse_list(v),
             "HiddenMenuItems" => self.hidden_menu_items = parse_list(v),
             "VerboseLog" => self.verbose_log = parse_bool(v).unwrap_or(false),
+            "KeepExif" => self.keep_exif = parse_bool(v).unwrap_or(true),
             _ => {}
         }
     }
@@ -168,6 +173,9 @@ mod tests {
         assert_eq!(s.max_thumb_px, 1024);
         assert!(s.menu_enabled && !s.menu_all_file_types && s.thumbnails_enabled);
         assert_eq!(s.menu_preview, MenuPreview::InSubmenu);
+        assert!(s.keep_exif, "Keep EXIF defaults on");
+        assert!(!Settings::from_ini("[Settings]\nKeepExif=0\n").keep_exif);
+        assert!(Settings::from_ini("[Settings]\nKeepExif=junk\n").keep_exif);
     }
 
     #[test]

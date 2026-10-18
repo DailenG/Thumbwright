@@ -44,7 +44,7 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 |---|---|---|
 | `crates/tw-core` | rlib | IDs/GUIDs (`ids.rs`), format matrix (`formats/`), budgets (`limits.rs`), settings (`config.rs`), log (`log.rs`), routing + decoders (`decode/`), worker wire protocol (`protocol.rs`), worker client with Job Object (`worker.rs`), tier pipeline (`pipeline.rs`), registry engine (`registration.rs`) |
 | `crates/tw-shell` | `thumbwright_shell.dll` + `tw-worker.exe` | COM exports and class factory (`lib.rs`, `factory.rs`), thumbnail provider (`thumbnail.rs`), DIB creation (`bitmap.rs`), context menu (`menu.rs`), worker main (`src/bin/tw-worker.rs`), integration tests (`tests/`) |
-| `crates/twctl` | `twctl.exe` | CLI and menu-verb back end (`main.rs`), image operations (`ops.rs`), lossless metadata strip (`strip.rs`), clipboard/wallpaper/message box (`win.rs`) |
+| `crates/twctl` | `twctl.exe` | CLI and menu-verb back end (`main.rs`), image operations (`ops.rs`), lossless JPEG rotate/flip in the DCT coefficient domain (`jpeg_lossless.rs`), EXIF reader/normaliser/carry-over (`exif.rs`), lossless metadata strip (`strip.rs`), clipboard/wallpaper/message box (`win.rs`) |
 | `xtask` | dev tool | License audit that generates `THIRD_PARTY_LICENSES.md` |
 
 **Key invariants (verify they hold):**
@@ -83,10 +83,10 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 - **Coverage:** 160 of 363 spec formats are routed. Unrouted types are never registered, so Windows' own handlers stay in charge. Not handled: video, PDF/DjVu, legacy binary Office, WMA/DSF, APK, most of the legacy raster long tail.
 - **Missing COM classes:** cloud-folder, preview handler, property handler, Windows 11 modern menu.
 - **Missing menu verbs:** OCR, upload, combine PDF/CBZ, rename, sort, pick color, lock screen, folder icon, settings, AVIF/JXL output. `doctor`, `batch` and `--mcp` CLI commands are also missing.
-- **Simplifications:**
-  - Rotation re-encodes JPEG at quality 95 instead of rotating losslessly.
-  - EXIF is not carried over on conversion.
-  - `info` reports a reduced key set.
+- **Conversion fidelity limits (issue #11):**
+  - JPEG rotate/flip is lossless (coefficients are permuted, never re-quantised). It folds the EXIF Orientation into the transform and writes Orientation 1. It refuses, and `rotate` then re-encodes at quality 95 with a `note:` line, when a mirrored axis is not a whole number of MCUs (the partial edge MCU would move to the near edge; nothing is trimmed), for arithmetic/12-bit/lossless/hierarchical JPEG, or when the data is damaged. A progressive input is written as a sequential JPEG with identical pixels. Data after EOI (MPO secondary images, vendor trailers such as Samsung motion-photo/depth data, which describe the unrotated picture) and the MPF segment are dropped, reported by a `note:` line; the embedded EXIF thumbnail is dropped too.
+  - EXIF (`KeepExif`, default on) is carried from JPEG/PNG/WebP sources into JPEG, PNG (`eXIf`), WebP and TIFF outputs by `convert`, `convert-to`, `resize` and the rotate fallback, with Orientation set to 1 and the EXIF pixel dimensions updated. The embedded thumbnail is dropped. `email` and `compress` do not carry metadata; ICC profiles and XMP are not carried by conversion. TIFF output gets IFD0 descriptive tags, resolution, the EXIF IFD (without maker note) and GPS.
+  - `info` reports `bit_depth, datetime, dpi_x, dpi_y, gps, height, make, model, width` (null when unrecorded) plus `channels, file_size, format`; `gps` is `"lat,lon"` in signed decimal degrees.
 
 ## 6. Review focus (prioritised)
 

@@ -5,6 +5,8 @@
 //! stderr as `twctl: <message>`; with `--notify` (menu invocations) they are also shown
 //! in a message box.
 
+mod exif;
+mod jpeg_lossless;
 mod ops;
 mod strip;
 mod win;
@@ -274,11 +276,12 @@ fn run(cli: &Cli) -> Result<String> {
                 return Err("output must differ from input".into());
             }
             let quality = parse_quality(cli)?;
-            let mut img = ops::decode_full(input, max)?;
+            let (mut img, exif) = ops::decode_full_with_exif(input, max, settings.keep_exif)?;
             if let Some(r) = cli.opt("--resize") {
                 img = ops::apply_resize(&img, ops::parse_resize(r)?);
             }
-            ops::write_atomic(out, &ops::encode(&img, &ops::ext_of(out), quality)?)?;
+            let bytes = ops::encode_with_exif(&img, &ops::ext_of(out), quality, exif.as_deref())?;
+            ops::write_atomic(out, &bytes)?;
             Ok(out.display().to_string())
         }
         "convert-to" => {
@@ -295,8 +298,9 @@ fn run(cli: &Cli) -> Result<String> {
             }
             let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
             batch(&files, |f| {
-                let img = ops::decode_full(f, max)?;
-                ops::write_new(f, "", &target, &ops::encode(&img, &target, quality)?)
+                let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_exif)?;
+                let bytes = ops::encode_with_exif(&img, &target, quality, exif.as_deref())?;
+                ops::write_new(f, "", &target, &bytes)
             })
         }
         "resize" => {
@@ -304,19 +308,28 @@ fn run(cli: &Cli) -> Result<String> {
             let spec = ops::parse_resize(cli.require("--to")?)?;
             batch(&cli.files()?, |f| {
                 let ext = writable_ext(f);
-                let img = ops::apply_resize(&ops::decode_full(f, max)?, spec);
-                ops::write_new(f, " (resized)", &ext, &ops::encode(&img, &ext, None)?)
+                let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_exif)?;
+                let img = ops::apply_resize(&img, spec);
+                let bytes = ops::encode_with_exif(&img, &ext, None, exif.as_deref())?;
+                ops::write_new(f, " (resized)", &ext, &bytes)
             })
         }
         "rotate" => {
             cli.allow(&["--by"], &[])?;
             let by = cli.require("--by")?.to_owned();
             ops::rotate(&image::DynamicImage::new_rgb8(1, 1), &by)?;
-            batch(&cli.files()?, |f| {
-                let ext = writable_ext(f);
-                let img = ops::rotate(&ops::decode_full(f, max)?, &by)?;
-                ops::write_new(f, " (edited)", &ext, &ops::encode(&img, &ext, Some(95))?)
-            })
+            let notes = std::sync::Mutex::new(Vec::<String>::new());
+            let result = batch(&cli.files()?, |f| {
+                let r = ops::rotate_file(f, &by, max, settings.keep_exif, &writable_ext(f))?;
+                if let Some(n) = r.note {
+                    notes.lock().unwrap_or_else(|e| e.into_inner()).push(n);
+                }
+                ops::write_new(f, " (edited)", &r.ext, &r.bytes)
+            });
+            let mut notes = notes.into_inner().unwrap_or_else(|e| e.into_inner());
+            notes.sort();
+            let with_notes = |s: String| notes.iter().fold(s, |acc, n| format!("{acc}\nnote: {n}"));
+            result.map(with_notes).map_err(with_notes)
         }
         "email" => {
             cli.allow(&["--edge"], &[])?;
@@ -401,26 +414,26 @@ fn run(cli: &Cli) -> Result<String> {
                 unreachable!()
             };
             let p = Path::new(input);
-            let img = ops::decode_full(p, max)?;
+            let data = ops::read_input(p, max)?;
+            let meta = exif::summarize_file(&data);
+            let img = ops::decode_bytes(p, data)?;
             let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
             let bits = img.color().bits_per_pixel() / u16::from(img.color().channel_count());
             let fmt = formats::lookup(&ops::ext_of(p)).map_or("unknown", |f| f.description);
+            let report = InfoReport {
+                path: p,
+                format: fmt,
+                width: img.width(),
+                height: img.height(),
+                channels: img.color().channel_count(),
+                bit_depth: bits,
+                file_size: size,
+                meta: &meta,
+            };
             let text = if cli.flag("--json") {
-                format!(
-                    "{{\"width\":{},\"height\":{},\"bit_depth\":{bits},\"channels\":{},\"format\":{},\"file_size\":{size}}}",
-                    img.width(),
-                    img.height(),
-                    img.color().channel_count(),
-                    json_str(fmt)
-                )
+                report.json()
             } else {
-                format!(
-                    "{}\n{fmt}\n{} x {} pixels, {} channel(s), {bits}-bit\n{size} bytes",
-                    p.display(),
-                    img.width(),
-                    img.height(),
-                    img.color().channel_count()
-                )
+                report.text()
             };
             if cli.flag("--gui") {
                 win::message(&text, false);
@@ -455,6 +468,87 @@ fn run(cli: &Cli) -> Result<String> {
             register(cli, &dir, &settings)
         }
         other => Err(format!("unknown command {other}\n{USAGE}")),
+    }
+}
+
+/// What `info` prints: spec keys `bit_depth, datetime, dpi_x, dpi_y, gps, height, make,
+/// model, width` (null when the file does not record them) plus `channels`, `file_size`
+/// and `format`.
+struct InfoReport<'a> {
+    path: &'a Path,
+    format: &'a str,
+    width: u32,
+    height: u32,
+    channels: u8,
+    bit_depth: u16,
+    file_size: u64,
+    meta: &'a exif::Summary,
+}
+
+/// Whole numbers without a fraction, otherwise two decimals trimmed.
+fn fmt_num(v: f64) -> String {
+    ((v * 100.0).round() / 100.0).to_string()
+}
+
+impl InfoReport<'_> {
+    fn gps_text(&self) -> Option<String> {
+        self.meta.gps.map(|(lat, lon)| format!("{lat:.6},{lon:.6}"))
+    }
+
+    fn json(&self) -> String {
+        let m = self.meta;
+        let s = |v: &Option<String>| v.as_deref().map_or("null".to_string(), json_str);
+        let n = |v: Option<f64>| v.map_or("null".to_string(), fmt_num);
+        format!(
+            "{{\"bit_depth\":{},\"channels\":{},\"datetime\":{},\"dpi_x\":{},\"dpi_y\":{},\"file_size\":{},\"format\":{},\"gps\":{},\"height\":{},\"make\":{},\"model\":{},\"width\":{}}}",
+            self.bit_depth,
+            self.channels,
+            s(&m.datetime),
+            n(m.dpi.map(|d| d.0)),
+            n(m.dpi.map(|d| d.1)),
+            self.file_size,
+            json_str(self.format),
+            s(&self.gps_text()),
+            self.height,
+            s(&m.make),
+            s(&m.model),
+            self.width,
+        )
+    }
+
+    fn text(&self) -> String {
+        let m = self.meta;
+        let mut out = format!(
+            "{}\n{}\n{} x {} pixels, {} channel(s), {}-bit\n{} bytes",
+            self.path.display(),
+            self.format,
+            self.width,
+            self.height,
+            self.channels,
+            self.bit_depth,
+            self.file_size
+        );
+        let camera: Vec<&str> = [&m.make, &m.model]
+            .into_iter()
+            .filter_map(|v| v.as_deref())
+            .collect();
+        if !camera.is_empty() {
+            out.push_str(&format!("\nCamera: {}", camera.join(" ")));
+        }
+        if let Some(d) = &m.datetime {
+            out.push_str(&format!("\nTaken: {d}"));
+        }
+        if let Some((x, y)) = m.dpi {
+            out.push_str(&format!(
+                "\nResolution: {} x {} dpi",
+                fmt_num(x),
+                fmt_num(y)
+            ));
+        }
+        if let Some(g) = self.gps_text() {
+            out.push_str(&format!("\nGPS: {g}"));
+        }
+        out
     }
 }
 
@@ -765,5 +859,105 @@ mod tests {
         .unwrap();
         assert_eq!(cli.positional, vec!["a.png", "b.png"]);
         assert!(!list.exists());
+    }
+
+    fn jpeg_bytes(w: u32, h: u32, exif: Option<&[u8]>) -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(w, h));
+        let plain = ops::encode(&img, "jpg", None).unwrap();
+        match exif {
+            Some(e) => exif::testutil::inject_into_jpeg(&plain, e),
+            None => plain,
+        }
+    }
+
+    fn run_args(args: &[&str]) -> Result<String> {
+        run(&parse(args.iter().map(|s| s.to_string()).collect()).unwrap())
+    }
+
+    #[test]
+    fn info_reports_the_spec_keys_for_a_camera_jpeg() {
+        let dir = std::env::temp_dir().join(format!("twctl-info-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cam = dir.join("cam.jpg");
+        let block = exif::testutil::camera_exif(6, (64, 48));
+        std::fs::write(&cam, jpeg_bytes(64, 48, Some(&block))).unwrap();
+        let cam = cam.to_string_lossy().into_owned();
+        let json = run_args(&["info", &cam, "--json"]).unwrap();
+        for expected in [
+            "\"bit_depth\":8",
+            "\"datetime\":\"2023:07:04 12:34:56\"",
+            "\"dpi_x\":300",
+            "\"dpi_y\":300",
+            "\"gps\":\"47.606200,-122.332100\"",
+            "\"make\":\"Thumbcam\"",
+            "\"model\":\"TC-100 Mark II\"",
+            // Orientation 6 is applied by the decoder, so the displayed size is swapped.
+            "\"width\":48",
+            "\"height\":64",
+        ] {
+            assert!(json.contains(expected), "{expected} missing from {json}");
+        }
+        let text = run_args(&["info", &cam]).unwrap();
+        for expected in [
+            "Camera: Thumbcam TC-100 Mark II",
+            "Taken: 2023:07:04 12:34:56",
+            "Resolution: 300 x 300 dpi",
+            "GPS: 47.606200,-122.332100",
+        ] {
+            assert!(text.contains(expected), "{expected} missing from {text}");
+        }
+        // A file with no metadata still lists every key, as null.
+        let bare = dir.join("bare.jpg");
+        std::fs::write(&bare, jpeg_bytes(16, 8, None)).unwrap();
+        let json = run_args(&["info", &bare.to_string_lossy(), "--json"]).unwrap();
+        for key in [
+            "bit_depth",
+            "datetime",
+            "dpi_x",
+            "dpi_y",
+            "gps",
+            "height",
+            "make",
+            "model",
+            "width",
+        ] {
+            assert!(
+                json.contains(&format!("\"{key}\":")),
+                "{key} missing: {json}"
+            );
+        }
+        for key in ["datetime", "dpi_x", "dpi_y", "gps", "make", "model"] {
+            assert!(json.contains(&format!("\"{key}\":null")), "{key}: {json}");
+        }
+        assert!(
+            !run_args(&["info", &bare.to_string_lossy()])
+                .unwrap()
+                .contains("Camera")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn convert_keeps_make_model_and_datetime() {
+        let dir = std::env::temp_dir().join(format!("twctl-convexif-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("cam.jpg");
+        let block = exif::testutil::camera_exif(1, (32, 24));
+        std::fs::write(&src, jpeg_bytes(32, 24, Some(&block))).unwrap();
+        for ext in ["png", "jpg"] {
+            let out = dir.join(format!("out.{ext}"));
+            run_args(&["convert", &src.to_string_lossy(), &out.to_string_lossy()]).unwrap();
+            let meta = exif::summarize_file(&std::fs::read(&out).unwrap());
+            assert_eq!(meta.make.as_deref(), Some("Thumbcam"), "{ext}");
+            assert_eq!(meta.model.as_deref(), Some("TC-100 Mark II"), "{ext}");
+            assert_eq!(
+                meta.datetime.as_deref(),
+                Some("2023:07:04 12:34:56"),
+                "{ext}"
+            );
+        }
+        let json = run_args(&["info", &dir.join("out.png").to_string_lossy(), "--json"]).unwrap();
+        assert!(json.contains("\"make\":\"Thumbcam\""), "{json}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
