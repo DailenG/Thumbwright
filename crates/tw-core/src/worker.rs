@@ -78,7 +78,7 @@ pub fn budget(decoder: Decoder) -> Duration {
         Decoder::Audio => limits::INPROC_DECODE_TIMEOUT,
         Decoder::Video => limits::VIDEO_FRAME_TIMEOUT,
         Decoder::Pdf => limits::PDF_RENDER_TIMEOUT,
-        Decoder::Metafile => limits::METAFILE_RENDER_TIMEOUT,
+        Decoder::Metafile | Decoder::OleMetafile => limits::METAFILE_RENDER_TIMEOUT,
         _ => limits::WORKER_THUMBNAIL_TIMEOUT,
     }
 }
@@ -90,7 +90,7 @@ pub fn budget(decoder: Decoder) -> Duration {
 /// gets the fixed worker limit.
 fn memory_limit(decoder: Decoder, input_len: usize) -> u64 {
     match decoder {
-        Decoder::Audio | Decoder::Pdf => {
+        Decoder::Audio | Decoder::Pdf | Decoder::OleMetafile => {
             limits::WORKER_MEMORY_BYTES.saturating_add(input_len as u64)
         }
         Decoder::Video => limits::WORKER_VIDEO_EXTRA_MEMORY_BYTES.saturating_add(input_len as u64),

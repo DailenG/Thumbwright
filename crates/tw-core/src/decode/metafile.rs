@@ -269,7 +269,7 @@ fn target_size(h: &ENHMETAHEADER, edge: u32) -> Result<(u32, u32)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::decode) mod tests {
     use super::*;
     use std::io::Write;
     use windows::Win32::Foundation::COLORREF;
@@ -278,7 +278,7 @@ mod tests {
     };
 
     /// 2000 x 1000 (0.01 mm) EMF with a red rectangle over the left half, recorded with GDI.
-    fn emf_with_red_left_half() -> Vec<u8> {
+    pub(in crate::decode) fn emf_with_red_left_half() -> Vec<u8> {
         // SAFETY: GDI recording DC and brush created and released here.
         unsafe {
             let frame = RECT {
@@ -318,7 +318,7 @@ mod tests {
     }
 
     /// Placeable WMF, 100x50 units at 100 per inch, with a blue rectangle over the left half.
-    fn placeable_wmf() -> Vec<u8> {
+    pub(in crate::decode) fn placeable_wmf() -> Vec<u8> {
         let mut records = Vec::new();
         record(&mut records, 0x020B, &[0, 0]); // SetWindowOrg(y, x)
         record(&mut records, 0x020C, &[50, 100]); // SetWindowExt(y, x)

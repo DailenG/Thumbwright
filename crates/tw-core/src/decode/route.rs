@@ -42,6 +42,8 @@ pub enum Decoder {
     Bitmap = 30,
     /// Legacy Office / OLE compound files: SummaryInformation thumbnail (DIB, PNG, JPEG).
     Ole = 50,
+    /// Metafile (EMF/WMF) thumbnail of a legacy Office / OLE document, played by GDI.
+    OleMetafile = 52,
     /// DjVu: first page rendered via `djvu-rs`, `TH44` thumbnail fallback.
     Djvu = 51,
     /// Video: representative frame via Media Foundation (OS codecs, C++).
@@ -76,7 +78,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 24] = [
+    pub const ALL: [Decoder; 25] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -92,6 +94,7 @@ impl Decoder {
         Self::Mesh,
         Self::Bitmap,
         Self::Ole,
+        Self::OleMetafile,
         Self::Djvu,
         Self::Video,
         Self::Pdf,
@@ -114,7 +117,8 @@ impl Decoder {
             | Self::Metafile
             | Self::Archive
             | Self::Livp
-            | Self::J2k => Placement::Worker,
+            | Self::J2k
+            | Self::OleMetafile => Placement::Worker,
             _ => Placement::InProc,
         }
     }
@@ -174,8 +178,13 @@ impl Decoder {
             Self::Pdf => super::pdf::render(data, edge),
             #[cfg(windows)]
             Self::Metafile => super::metafile::render(data, edge),
+            #[cfg(windows)]
+            Self::OleMetafile => super::ole::extract_metafile(data)
+                .and_then(|metafile| super::metafile::render(&metafile, edge)),
             #[cfg(not(windows))]
-            Self::Video | Self::Pdf | Self::Metafile => Err(DecodeError::Unsupported),
+            Self::Video | Self::Pdf | Self::Metafile | Self::OleMetafile => {
+                Err(DecodeError::Unsupported)
+            }
         }
     }
 }
@@ -222,7 +231,7 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
         (super::zip_preview::EXTENSIONS, &[Zip]),
         (super::design::EXTENSIONS, &[Design]),
         (super::bitmap::EXTENSIONS, &[Bitmap]),
-        (super::ole::EXTENSIONS, &[Ole]),
+        (super::ole::EXTENSIONS, &[Ole, OleMetafile]),
         (super::djvu::EXTENSIONS, &[Djvu]),
         (VIDEO_EXTENSIONS, &[Video]),
         (PDF_EXTENSIONS, &[Pdf]),
@@ -330,6 +339,7 @@ mod tests {
         assert_eq!(Decoder::Raster.placement(), Placement::InProc);
         assert_eq!(Decoder::Djvu.placement(), Placement::Worker);
         assert_eq!(Decoder::Ole.placement(), Placement::InProc);
+        assert_eq!(Decoder::OleMetafile.placement(), Placement::Worker);
     }
 
     #[test]

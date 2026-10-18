@@ -3,7 +3,7 @@
 Clean-room Windows Explorer thumbnail provider and context-menu toolkit, written in Rust. Pre-1.0: interfaces and on-disk formats may still change.
 
 - `thumbwright_shell.dll`: COM server. Thumbnail provider (`IThumbnailProvider` + `IInitializeWithStream`, hosted by the OS thumbnail surrogate) and classic context menu (`IContextMenu{,2,3}`).
-- `tw-worker.exe`: per-request decoder process (Job Object: 512 MiB, 20 s CPU, kill-on-close) for WIC, SVG and audio tags.
+- `tw-worker.exe`: per-request decoder process (Job Object: 512 MiB, 20 s CPU, kill-on-close) for the decoders that must not run in the surrogate: OS codecs (WIC, Media Foundation video, PDF, GDI metafiles), SVG, audio tags, JPEG 2000, DjVu, 7z/RAR and Live Photo bundles.
 - `twctl.exe`: CLI, per-user registration, and the back end for every menu verb.
 
 Requirements: `FUNCTIONAL_SPEC.md`. Architecture, invariants and review state: `REVIEW_HANDOFF.md`, `REVIEW_FINDINGS.md`. Open work is tracked as GitHub issues.

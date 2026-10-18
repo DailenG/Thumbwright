@@ -6,8 +6,9 @@
 //! chains are cycle-checked, and the directory tree is walked iteratively.
 //!
 //! Office only writes the thumbnail when "Save thumbnail" is enabled, so many real files
-//! carry none (`Unsupported`). A `CF_DIB`, PNG or JPEG payload is decoded; metafile
-//! payloads (`CF_METAFILEPICT`, `CF_ENHMETAFILE`) need GDI and are `Unsupported` here.
+//! carry none (`Unsupported`). A `CF_DIB`, PNG or JPEG payload is decoded in-process
+//! ([`extract`]); metafile payloads (`CF_METAFILEPICT`, `CF_ENHMETAFILE`) are handed out
+//! by [`extract_metafile`] for GDI playback in the worker (`Decoder::OleMetafile`).
 
 use image::{DynamicImage, ImageFormat};
 
@@ -465,10 +466,21 @@ fn dib_to_bmp(dib: &[u8]) -> Result<Vec<u8>> {
     Ok(bmp)
 }
 
+/// Offset of a WMF stream (placeable key or `METAHEADER`) inside a `CF_METAFILEPICT`
+/// payload, which carries a few bytes of `METAFILEPICT` before the bits.
+fn wmf_offset(data: &[u8]) -> Option<usize> {
+    (0..=32).step_by(2).find(|&at| {
+        le_u32(data, at) == Some(0x9AC6_CDD7)
+            || (matches!(le_u16(data, at), Some(1 | 2))
+                && le_u16(data, at + 2) == Some(9)
+                && matches!(le_u16(data, at + 4), Some(0x0100 | 0x0300)))
+    })
+}
+
 fn decode_thumbnail(format: Option<u32>, data: &[u8]) -> Result<DynamicImage> {
     match format {
         Some(CF_DIB) => decode_limited(&dib_to_bmp(data)?, ImageFormat::Bmp).map(|(img, _)| img),
-        // Rendering metafiles needs GDI, which only a worker may use.
+        // Rendering metafiles needs GDI, which only a worker may use: see `extract_metafile`.
         Some(CF_METAFILEPICT | CF_ENHMETAFILE) => Err(DecodeError::Unsupported),
         // Other or unnamed formats: only an embedded PNG or JPEG is accepted.
         _ => match image::guess_format(data) {
@@ -478,7 +490,8 @@ fn decode_thumbnail(format: Option<u32>, data: &[u8]) -> Result<DynamicImage> {
     }
 }
 
-pub fn extract(data: &[u8]) -> Result<DynamicImage> {
+/// The `PIDSI_THUMBNAIL` clipboard format and payload (copied out of the property stream).
+fn thumbnail_property(data: &[u8]) -> Result<(Option<u32>, Vec<u8>)> {
     let cfb = Cfb::open(data)?;
     let entries = cfb.directory()?;
     let Some(summary) = Cfb::root_stream(&entries, SUMMARY_INFORMATION)? else {
@@ -488,7 +501,29 @@ pub fn extract(data: &[u8]) -> Result<DynamicImage> {
     let Some((format, payload)) = thumbnail_clipdata(&props)? else {
         return Err(DecodeError::Unsupported);
     };
-    decode_thumbnail(format, payload)
+    Ok((format, payload.to_vec()))
+}
+
+/// The bitmap thumbnail (`CF_DIB`, PNG or JPEG). A metafile thumbnail is `Unsupported`
+/// here: see [`extract_metafile`].
+pub fn extract(data: &[u8]) -> Result<DynamicImage> {
+    let (format, payload) = thumbnail_property(data)?;
+    decode_thumbnail(format, &payload)
+}
+
+/// The EMF/WMF stream of a metafile thumbnail (`CF_ENHMETAFILE`, `CF_METAFILEPICT`), for
+/// GDI playback in the worker. `Unsupported` when the thumbnail is absent or a bitmap.
+pub fn extract_metafile(data: &[u8]) -> Result<Vec<u8>> {
+    let (format, mut payload) = thumbnail_property(data)?;
+    match format {
+        Some(CF_ENHMETAFILE) => Ok(payload),
+        Some(CF_METAFILEPICT) => {
+            let at = wmf_offset(&payload).ok_or(DecodeError::Unsupported)?;
+            payload.drain(..at);
+            Ok(payload)
+        }
+        _ => Err(DecodeError::Unsupported),
+    }
 }
 
 #[cfg(test)]
@@ -798,6 +833,52 @@ mod tests {
             Err(DecodeError::Unsupported)
         );
         assert_eq!(extract(b""), Err(DecodeError::Unsupported));
+    }
+
+    #[test]
+    fn metafile_thumbnails_are_handed_out_for_gdi_playback() {
+        let emf = [1u8, 0, 0, 0, 0xAA, 0xBB];
+        let doc = build_cfb(&[(
+            "\u{5}SummaryInformation",
+            summary(&clip(CF_ENHMETAFILE, &emf)),
+        )]);
+        assert_eq!(extract_metafile(&doc).unwrap(), emf);
+        // CF_METAFILEPICT: a few METAFILEPICT bytes precede the (placeable) WMF bits.
+        let mut pict = vec![8u8, 0, 0, 0, 0, 0, 0, 0];
+        pict.extend_from_slice(&0x9AC6_CDD7u32.to_le_bytes());
+        pict.extend_from_slice(&[7; 10]);
+        let doc = build_cfb(&[(
+            "\u{5}SummaryInformation",
+            summary(&clip(CF_METAFILEPICT, &pict)),
+        )]);
+        assert_eq!(extract_metafile(&doc).unwrap(), pict[8..]);
+        // No WMF header inside the picture payload, a bitmap thumbnail, or no thumbnail.
+        let junk = build_cfb(&[(
+            "\u{5}SummaryInformation",
+            summary(&clip(CF_METAFILEPICT, &[0; 64])),
+        )]);
+        assert_eq!(extract_metafile(&junk), Err(DecodeError::Unsupported));
+        let dib = build_cfb(&[(
+            "\u{5}SummaryInformation",
+            summary(&clip(CF_DIB, &red_blue_dib(4, 2))),
+        )]);
+        assert_eq!(extract_metafile(&dib), Err(DecodeError::Unsupported));
+        assert_eq!(extract_metafile(b""), Err(DecodeError::Unsupported));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn emf_thumbnail_in_a_compound_file_renders_through_gdi() {
+        use super::super::metafile;
+        let emf = metafile::tests::emf_with_red_left_half();
+        let doc = build_cfb(&[(
+            "\u{5}SummaryInformation",
+            summary(&clip(CF_ENHMETAFILE, &emf)),
+        )]);
+        let payload = extract_metafile(&doc).unwrap();
+        let img = metafile::render(&payload, 64).unwrap().to_rgba8();
+        assert_eq!(img.dimensions(), (64, 32));
+        assert_eq!(img.get_pixel(2, 16).0[..3], [255, 0, 0]);
     }
 
     fn assert_rejected(data: &[u8]) {

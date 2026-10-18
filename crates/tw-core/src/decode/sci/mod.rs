@@ -22,12 +22,13 @@ mod sixel;
 mod utah_rle;
 mod vicar;
 mod viff;
+mod vips;
 mod xcf;
 mod xyze;
 
 pub const EXTENSIONS: &[&str] = &[
     "fits", "fts", "dpx", "cin", "dcm", "dicom", "miff", "rla", "rle", "viff", "xv", "pcd", "ph",
-    "ktx", "six", "sixel", "xyze", "mat", "vicar", "mng", "jng", "xcf",
+    "ktx", "six", "sixel", "xyze", "mat", "vicar", "mng", "jng", "xcf", "vips",
 ];
 
 /// Decodes `data` as the format named by `ext` (lower-case, no dot).
@@ -50,6 +51,7 @@ pub fn decode(data: &[u8], ext: &str) -> Result<DynamicImage> {
         "mng" => mng::decode(data),
         "jng" => jng::decode(data),
         "xcf" => xcf::decode(data),
+        "vips" => vips::decode(data),
         _ => Err(DecodeError::Unsupported),
     }
 }
