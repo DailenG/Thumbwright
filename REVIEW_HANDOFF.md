@@ -50,16 +50,16 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 
 **Key invariants (verify they hold):**
 - **I1** The thumbnail class implements only `IThumbnailProvider` + `IInitializeWithStream` (REQ-COM-1). On failure it returns `E_FAIL`, never a placeholder bitmap (REQ-COM-7).
-- **I2** No C/C++ decoder runs in the surrogate. WIC, Media Foundation (video), Windows.Data.Pdf, GDI metafile playback (OS C++ codecs), SVG (resvg, not cancellable), audio tags (lofty: unbounded recursion and tag inflation), JPEG 2000 and DjVu (pure Rust, but unable to bound allocation or be cancelled), and 7z/RAR/Live Photo bundles (real decompression with attacker-chosen dictionary sizes; Live Photo stills may need WIC) run only in the worker (`decode/route.rs` `Decoder::placement`).
+- **I2** No C/C++ decoder runs in the surrogate. WIC, Media Foundation (video), Windows.Data.Pdf, GDI metafile playback (OS C++ codecs), SVG (resvg, not cancellable), audio tags (lofty: unbounded recursion and tag inflation), JPEG 2000 and DjVu (pure Rust, but unable to bound allocation or be cancelled), and 7z/RAR/Live Photo bundles (real decompression with attacker-chosen dictionary sizes; Live Photo stills may need WIC) run only in the worker (`decode/route.rs` `Decoder::placement`). `twctl` follows the same rule for conversions (`ops::decode_full` sends every worker-placed decoder except SVG through `tw-worker.exe`; a test pins it against `Decoder::placement`), so `twctl` never initialises COM or hosts an OS codec; a damaged PNG there is a decode error, not "CoInitialize has not been called".
 - **I3** Every tier is bounded:
   - in-proc decoders: 15 s;
   - SVG: 13 s;
   - WIC: 120 s;
   - video frame, PDF page and metafile render: 30 s each;
-  - worker Job Object: 512 MiB memory (512 MiB plus the input size for audio, PDF and legacy-Office metafile thumbnails; 1.5 GiB plus the input size for video; 512 MiB plus twice the input size for 7z/RAR), 20 s user CPU, 1 process, kill-on-close; audio wall budget 15 s.
+  - worker Job Object: 512 MiB memory (512 MiB plus the input size for audio, PDF and legacy-Office metafile thumbnails; 1.5 GiB plus the input size for video; 512 MiB plus twice the input size for 7z/RAR), 20 s user CPU, 1 process, kill-on-close; audio wall budget 15 s. The shell may keep up to two pre-spawned workers waiting (30 s TTL, none in `twctl`): a pre-spawned worker is already in its job and has read no input, it serves exactly one request, and when a request takes it the job's memory ceiling is re-applied for that request's decoder (the per-decoder limits above, tested in `worker.rs`).
 
   `Timeout` and `TooLarge` never fall through to the next tier.
-- **I4** No thread of ours outlives the DLL. Finished decode threads are joined; an overrunning thread pins the module (`pipeline::pin_this_module`); the menu preview thread is joined or pins the module.
+- **I4** No thread of ours outlives the DLL. Finished decode threads are joined; an overrunning thread pins the module (`pipeline::pin_this_module`); the menu preview thread is joined or pins the module; `DllCanUnloadNow` kills the idle pre-spawned workers before it can return `S_OK`.
 - **I5** Registration journals every key and value before it writes it (one REG_SZ entry per step under `<product>\Registration`, write-ahead). Unregistration validates the whole journal first, restores replaced values, deletes only created keys that are empty (non-recursive), and keeps failed entries for retry. It never writes an extension's default value (REQ-REG-1/2/4).
 - **I6** The context menu does no decoding in Explorer. Verbs spawn `twctl.exe`; the preview goes through `IShellItemImageFactory`, i.e. the OS cache and surrogate.
 - **I7** Declared dimensions and the decoded byte budget (`limits::DECODE_ALLOC_BYTES`, 512 MiB) are checked before pixel allocation; archive entries are capped per entry and in total, including failed reads (REQ-SEC-1).
@@ -79,6 +79,25 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
   - CR3, CRW, X3F and maker-note parsing in `decode/raw.rs` were checked against about 60 real raw.pixls.us files (CC0); 30 of them are pinned in `scripts/fetch-samples.ps1` and verified by the ignored `real_raw_samples` test (`tests/fixtures/README.md`). CR3 previews come from the `PRVW` box (about 1620x1080), not the full-size JPEG track in `mdat`.
   - The owner-drawn menu preview was never seen in a real Explorer menu.
   - The worker under a Job Object nested inside the surrogate's own job (if any) was only exercised in the live run, not in tests.
+
+## 4b. Current state after integrating the eight work branches
+
+The branches `wip/perf`, `wip/conv-fidelity`, `wip/raw-jxl-verify`, `wip/settings-gui`, `wip/com-classes`, `wip/installer-signing`, `wip/formats` and `wip/menu-verbs` were merged in that order into `integrate`, with cross-slice follow-ups as separate commits.
+
+- **Settings:** one schema in `tw-core/src/config.rs` (loaded from `Thumbwright.ini` or `HKCU\Software\Thumbwright`, saved by `Settings::save`, edited by `thumbwright-settings.exe`). Keys: `ThumbnailsEnabled`, `UseEmbeddedThumbs`, `CloudThumbnails`, `MaxFileMB`, `MaxThumbPx`, `VideoFramePercent`, `JpegQuality`, `PngCompression`, `KeepMetadata`, `PreserveFileDate`, `PdfMargin`, `MenuEnabled`, `MenuAllFileTypes`, `MenuBuildHere`, `MenuPreview`, `MenuOrder`, `DisabledTypes`, `HiddenMenuItems`, `VerboseLog`. The EXIF carry-over switch is `KeepMetadata` (the conversion branch's `KeepExif` was merged into it).
+- **Wired in `twctl`:** `JpegQuality` (default of `--quality` and of any JPEG written without one), `PngCompression`, `KeepMetadata`, `PreserveFileDate` (output gets the source's modification time in `convert`, `convert-to`, `resize`, `rotate`), `VideoFramePercent`, `UseEmbeddedThumbs`. `email` (quality 85), `compress` and the lossy-rotate fallback (quality 95) keep their own fixed qualities. `UseEmbeddedThumbs` only changes camera RAW chains (embedded JPEG first, or the OS RAW codec first); Office, design, archive and PSD previews have no second decoder to prefer.
+- **Menus:** `menu::TREE` is the one tree; `config::MENU_ITEMS` covers every TREE id (tested), the classic menu and the Windows 11 `IExplorerCommand` menu both build from `menu::display_nodes` (saved `MenuOrder`), hide `HiddenMenuItems`, and always show Settings.
+- **Registration:** `twctl register` registers files, `Directory`, `Directory\Background` and the cloud class (journaled); `DllRegisterServer` adds the preview and property handlers and the `Approved` entries (`Layout.approved`). The crash-after-every-journal-entry test runs the full plan with and without `approve`; the machine-scope test covers install, repair, upgrade and uninstall with zero diff.
+- **Packaging:** the MSI includes `thumbwright-settings.exe` (`IncludeSettings` is set automatically; an MSI built from this tree's debug binaries lists the DLL, `tw-worker.exe`, `twctl.exe`, `thumbwright-settings.exe`, `LICENSE` and `THIRD_PARTY_LICENSES.md`). `scripts/release.ps1` now requires and signs the settings exe.
+- **Tests:** 585 test functions in the workspace (584 run by `cargo test --workspace`, plus the ignored `real_raw_samples`, which reads `TW_SAMPLES`). No test from any branch was dropped; one was renamed and widened (`audio_memory_limit_grows_with_input_and_others_stay_fixed` became `whole_file_decoders_get_input_proportional_memory_and_others_stay_fixed`, which still asserts the audio cases). Tests run in parallel and several start workers or write sandbox registry keys; two consecutive full runs passed.
+- **Verified this round (debug build):** `twctl --help`, `twctl formats --json` (363 entries, 315 with `thumbnail: true`), `twctl thumbnail` on PNG, JPEG, SVG, MP4, PDF, JXL and CRW, `twctl rotate` on a JPEG, `twctl convert-to avif` then `twctl info` on the AVIF (decoded through WIC in the worker), `twctl doctor`, `thumbwright-settings.exe --self-test`, and `JpegQuality`/`PngCompression`/`PreserveFileDate` from a portable `Thumbwright.ini` (file sizes and modification time changed as set).
+- **Not verified:**
+  - Everything that needs elevation: the MSI install, upgrade, repair and uninstall (`scripts/test-install.ps1`), `DllRegisterServer` against HKLM, and the signing steps of `scripts/release.ps1`.
+  - The preview handler inside `prevhost.exe`, the property handler in the real property system, the sparse MSIX package and the Windows 11 menu in a real Explorer.
+  - The settings window's Rebuild thumbnail cache, Repair and Turn on actions against a live Explorer, and the owner-drawn menu preview.
+  - Upload to any public host (hosts are from public API knowledge, never contacted).
+  - Most of the 155 formats added by the format-coverage branch were checked only against synthetic fixtures or external tools, not real files from the applications (see the unverified-layout list in section 5 and the branch notes).
+  - Release-profile numbers: `docs/performance.md` is from the perf branch's own runs and was not repeated on the integrated tree.
 
 ## 5. Known gaps (by design for this milestone; don't report as bugs, but do report if they cause harm)
 
@@ -149,9 +168,7 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 - Test quality: remove tests that only check wiring or tautologies; find missing boundary tests.
 - Performance:
   - the whole stream is read into memory (cap 2 GiB);
-  - a worker process is spawned per SVG/WIC request;
-  - `Settings::load` runs on every `GetThumbnail`;
-  - thumbnail resize uses `DynamicImage::thumbnail`.
+  - measured and decided in `docs/performance.md`: worker start-up (pre-spawned single-use workers, shell only), the stream read (straight into the result buffer), `Settings::load` (about 50 microseconds, deliberately not cached) and the resize (`fast_image_resize` Box filter for opaque 8-bit RGB and grey). Open: alpha fringing in the old resize path and whether to use CatmullRom.
 
 ### D. QOL
 - Missing CLI help or `--help` per command.
