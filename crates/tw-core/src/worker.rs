@@ -86,6 +86,10 @@ pub fn budget(decoder: Decoder) -> Duration {
 fn memory_limit(decoder: Decoder, input_len: usize) -> u64 {
     match decoder {
         Decoder::Audio => limits::WORKER_MEMORY_BYTES.saturating_add(input_len as u64),
+        // The worker holds the file, and the RAR reader keeps a copy of it.
+        Decoder::Archive => {
+            limits::WORKER_MEMORY_BYTES.saturating_add((input_len as u64).saturating_mul(2))
+        }
         _ => limits::WORKER_MEMORY_BYTES,
     }
 }
@@ -163,6 +167,11 @@ mod tests {
         assert_eq!(memory_limit(Decoder::Audio, 300 << 20), base + (300 << 20));
         assert_eq!(memory_limit(Decoder::Audio, usize::MAX), u64::MAX);
         assert_eq!(memory_limit(Decoder::Wic, 300 << 20), base);
+        assert_eq!(
+            memory_limit(Decoder::Archive, 100 << 20),
+            base + (200 << 20)
+        );
+        assert_eq!(memory_limit(Decoder::Archive, usize::MAX), u64::MAX);
         assert_eq!(memory_limit(Decoder::Svg, 300 << 20), base);
     }
 }

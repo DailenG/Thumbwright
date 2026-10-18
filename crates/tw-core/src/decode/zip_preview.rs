@@ -14,6 +14,7 @@ use image::{DynamicImage, RgbaImage, imageops};
 use zip::ZipArchive;
 use zip::result::ZipError;
 
+use super::android::{self, Ref};
 use super::{DecodeError, Result, decode_bytes};
 use crate::limits;
 
@@ -71,24 +72,52 @@ pub const EXTENSIONS: &[&str] = &[
     "cbz",
     "phz",
     "fbz",
+    // Android packages.
+    "apk",
+    "apks",
+    "xapk",
+    "apkm",
     // Archives.
     "zip",
 ];
 
 /// Central-directory entries considered per archive.
-const MAX_ENTRIES: usize = 4096;
+pub(super) const MAX_ENTRIES: usize = 4096;
 /// Images tried before giving up on "first decodable image" searches.
-const MAX_DECODE_ATTEMPTS: usize = 16;
+pub(super) const MAX_DECODE_ATTEMPTS: usize = 16;
 /// EPUB spine documents scanned for a first image.
 const MAX_SPINE_DOCS: usize = 8;
 /// Contact sheet: 2x2 cells of this edge (sheet at most 512x512).
-const SHEET_CELL: u32 = 256;
-const SHEET_MAX_TILES: usize = 4;
+pub(super) const SHEET_CELL: u32 = 256;
+pub(super) const SHEET_MAX_TILES: usize = 4;
 
 const OPC_THUMBNAIL_REL: &str = "/metadata/thumbnail";
 
 pub fn extract(data: &[u8], ext: &str) -> Result<DynamicImage> {
     extract_with(data, ext, Budget::default())
+}
+
+/// Still-image extensions of an Apple Live Photo bundle (`.livp`: the still plus a QuickTime
+/// movie).
+const LIVP_STILLS: &[&str] = &["heic", "heif", "jpg", "jpeg", "png"];
+
+/// The still image bytes of a `.livp` bundle (shallowest HEIC/HEIF/JPEG/PNG entry), read
+/// under the entry and total budgets, with its lower-case extension. The caller decodes it.
+pub(super) fn livp_still(data: &[u8]) -> Result<(Vec<u8>, &'static str)> {
+    let mut a = Archive::open(data, Budget::default())?;
+    let pick = (0..a.entries.len())
+        .filter_map(|pos| {
+            let name = &a.entries[pos].name;
+            let lower = name.to_lowercase();
+            if lower.starts_with("__macosx/") || basename(name).starts_with("._") {
+                return None;
+            }
+            let ext = *LIVP_STILLS.iter().find(|e| **e == extension(&lower))?;
+            Some((name.matches('/').count(), pos, ext))
+        })
+        .min();
+    let (_, pos, ext) = pick.ok_or(DecodeError::Unsupported)?;
+    Ok((a.read(pos)?, ext))
 }
 
 /// Decompression budget (REQ-SEC-1); tests shrink it.
@@ -114,6 +143,16 @@ fn extract_with(data: &[u8], ext: &str, budget: Budget) -> Result<DynamicImage> 
     if !EXTENSIONS.contains(&ext.as_str()) {
         return Err(DecodeError::Unsupported);
     }
+    // Application packages routinely hold tens of thousands of files, and the entries that
+    // matter (`resources.arsc`, `res/...`) sit anywhere in the directory.
+    let budget = if matches!(ext.as_str(), "apk" | "apks" | "xapk" | "apkm") {
+        Budget {
+            max_entries: budget.max_entries.max(APK_MAX_ENTRIES),
+            ..budget
+        }
+    } else {
+        budget
+    };
     let mut a = Archive::open(data, budget)?;
     match ext.as_str() {
         "ora" => a.fixed(&["mergedimage.png", "Thumbnails/thumbnail.png"]),
@@ -150,6 +189,8 @@ fn extract_with(data: &[u8], ext: &str, budget: Budget) -> Result<DynamicImage> 
         "epub" => a.epub(),
         "cbz" | "phz" => a.comic(),
         "fbz" => a.fbz(),
+        "apk" => a.apk(),
+        "apks" | "xapk" | "apkm" => a.bundle(),
         _ => a.contact_sheet(),
     }
 }
@@ -300,17 +341,7 @@ impl<'a> Archive<'a> {
 
     /// Image entries (by extension), skipping macOS metadata, in natural order.
     fn images(&self) -> Vec<usize> {
-        let mut v: Vec<usize> = (0..self.entries.len())
-            .filter(|&pos| {
-                let name = &self.entries[pos].name;
-                let lower = name.to_lowercase();
-                !lower.starts_with("__macosx/")
-                    && !basename(name).starts_with("._")
-                    && is_image_name(&lower)
-            })
-            .collect();
-        v.sort_by(|&a, &b| natural_cmp(&self.entries[a].name, &self.entries[b].name));
-        v
+        rank_images(self.entries.iter().map(|e| e.name.as_str()), false)
     }
 
     /// OPC packages (OOXML, 3MF): the package thumbnail relationship, then `fallbacks`.
@@ -424,13 +455,8 @@ impl<'a> Archive<'a> {
     }
 
     fn comic(&mut self) -> Result<DynamicImage> {
-        let images = self.images();
-        let (covers, pages): (Vec<usize>, Vec<usize>) = images.into_iter().partition(|&p| {
-            basename(&self.entries[p].name)
-                .to_lowercase()
-                .contains("cover")
-        });
-        self.first_decodable(covers.into_iter().chain(pages))
+        let order = rank_images(self.entries.iter().map(|e| e.name.as_str()), true);
+        self.first_decodable(order)
     }
 
     fn fbz(&mut self) -> Result<DynamicImage> {
@@ -440,6 +466,264 @@ impl<'a> Archive<'a> {
         let xml = self.read_text(book)?;
         let bytes = fb2_cover(&xml)?;
         decode_bytes(&bytes)
+    }
+
+    // ---- Android packages ----
+
+    /// Launcher icon of an APK: `android:icon` of `<application>` resolved through
+    /// `resources.arsc` (highest-density raster, else an adaptive icon's layers composed),
+    /// else the documented heuristic ([`Archive::apk_heuristic`]).
+    fn apk(&mut self) -> Result<DynamicImage> {
+        let manifest = self.find("AndroidManifest.xml");
+        let table = self.find("resources.arsc");
+        if let Some(m) = manifest {
+            let manifest = self.read(m)?;
+            let table_bytes = match table {
+                Some(t) => self.read(t)?,
+                None => Vec::new(),
+            };
+            let icons = android::manifest_icons(&manifest);
+            if let Some(table) = android::Table::parse(&table_bytes) {
+                let mut ctx = ApkCtx {
+                    table: &table,
+                    steps: APK_MAX_STEPS,
+                };
+                for icon in &icons {
+                    if let Some(img) = self.apk_drawable(&mut ctx, icon, 0)? {
+                        return Ok(img);
+                    }
+                }
+            } else {
+                // No resource table: only a literal path can be followed.
+                for icon in &icons {
+                    if let Ref::Path(p) = icon
+                        && let Some(img) = self.apk_raster(p)?
+                    {
+                        return Ok(img);
+                    }
+                }
+            }
+        }
+        self.apk_heuristic()
+    }
+
+    fn apk_raster(&mut self, path: &str) -> Result<Option<DynamicImage>> {
+        let Some(pos) = self.find(path) else {
+            return Ok(None);
+        };
+        match self.decode(pos) {
+            Ok(img) => Ok(Some(img)),
+            Err(e) if e.falls_through() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The best image for a drawable reference. Each resolution step is counted so that a
+    /// hostile resource table (reference cycles, wide fan-out) ends in `None`.
+    fn apk_drawable(
+        &mut self,
+        ctx: &mut ApkCtx<'_, '_>,
+        r: &Ref,
+        depth: u8,
+    ) -> Result<Option<DynamicImage>> {
+        if depth > APK_MAX_DEPTH || ctx.steps == 0 {
+            return Ok(None);
+        }
+        ctx.steps -= 1;
+        match r {
+            Ref::Color(_) => Ok(None),
+            Ref::Path(p) if p.to_ascii_lowercase().ends_with(".xml") => {
+                self.apk_adaptive(ctx, p, depth)
+            }
+            Ref::Path(p) => self.apk_raster(p),
+            Ref::Res(id) => {
+                let mut values = ctx.table.lookup(*id);
+                values.truncate(APK_MAX_CONFIGS);
+                // nodpi counts as the most detailed, anydpi (vector / adaptive) as the least.
+                values.sort_by_key(|v| {
+                    std::cmp::Reverse(match v.density {
+                        0xFFFE => 0,
+                        0xFFFF => 480,
+                        0 => 160,
+                        d => d,
+                    })
+                });
+                // Plain rasters first (a legacy launcher icon is the finished artwork), then
+                // references, then XML (adaptive icons).
+                for v in &values {
+                    if let android::Value::Path(p) = &v.value
+                        && is_image_name(&p.to_ascii_lowercase())
+                        && let Some(img) = self.apk_raster(p)?
+                    {
+                        return Ok(Some(img));
+                    }
+                }
+                for v in &values {
+                    if let android::Value::Reference(next) = v.value
+                        && let Some(img) = self.apk_drawable(ctx, &Ref::Res(next), depth + 1)?
+                    {
+                        return Ok(Some(img));
+                    }
+                }
+                for v in &values {
+                    if let android::Value::Path(p) = &v.value
+                        && p.to_ascii_lowercase().ends_with(".xml")
+                        && let Some(img) = self.apk_adaptive(ctx, p, depth + 1)?
+                    {
+                        return Ok(Some(img));
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// An `<adaptive-icon>` document: the foreground over the background, cropped to the
+    /// 72dp-of-108dp area a launcher shows. Vector layers cannot be rendered, so an icon
+    /// without a raster foreground yields `None`.
+    fn apk_adaptive(
+        &mut self,
+        ctx: &mut ApkCtx<'_, '_>,
+        path: &str,
+        depth: u8,
+    ) -> Result<Option<DynamicImage>> {
+        let Some(pos) = self.find(path) else {
+            return Ok(None);
+        };
+        let xml = self.read(pos)?;
+        let Some((fg, bg)) = android::adaptive_layers(&xml) else {
+            return Ok(None);
+        };
+        let Some(fg) = fg else { return Ok(None) };
+        let Some(fg) = self.apk_drawable(ctx, &fg, depth + 1)? else {
+            return Ok(None);
+        };
+        let background = match bg {
+            Some(bg) => self.apk_layer(ctx, &bg, depth + 1)?,
+            None => None,
+        };
+        Ok(Some(compose_adaptive(fg, background)))
+    }
+
+    /// A background layer: a colour (inline or resource) or a raster.
+    fn apk_layer(&mut self, ctx: &mut ApkCtx<'_, '_>, r: &Ref, depth: u8) -> Result<Option<Layer>> {
+        match r {
+            Ref::Color(c) => return Ok(Some(Layer::Color(*c))),
+            Ref::Res(id) => {
+                for v in ctx.table.lookup(*id).into_iter().take(APK_MAX_CONFIGS) {
+                    match v.value {
+                        android::Value::Color(c) => return Ok(Some(Layer::Color(c))),
+                        android::Value::Reference(next)
+                            if depth < APK_MAX_DEPTH && ctx.steps > 0 =>
+                        {
+                            ctx.steps -= 1;
+                            if let Some(l) = self.apk_layer(ctx, &Ref::Res(next), depth + 1)? {
+                                return Ok(Some(l));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ref::Path(_) => {}
+        }
+        Ok(self.apk_drawable(ctx, r, depth)?.map(Layer::Image))
+    }
+
+    /// Without a usable manifest/resource table: the best `res/{mipmap,drawable}*/` PNG or
+    /// WebP named `ic_launcher*`, `icon*` or `app_icon*`. Full-colour files beat round and
+    /// foreground-layer variants, higher density (from the directory qualifier) beats lower;
+    /// background and monochrome layers are never used.
+    fn apk_heuristic(&mut self) -> Result<DynamicImage> {
+        let mut found: Vec<(u8, std::cmp::Reverse<u32>, usize)> = Vec::new();
+        for (pos, e) in self.entries.iter().enumerate() {
+            let lower = e.name.to_lowercase();
+            let mut parts = lower.split('/');
+            let (Some("res"), Some(dir), Some(file), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if !(dir.starts_with("mipmap") || dir.starts_with("drawable"))
+                || !matches!(extension(file), "png" | "webp")
+            {
+                continue;
+            }
+            let stem = file.rsplit_once('.').map_or(file, |s| s.0);
+            if !(stem.starts_with("ic_launcher")
+                || stem.starts_with("icon")
+                || stem.starts_with("app_icon"))
+                || stem.contains("background")
+                || stem.contains("monochrome")
+            {
+                continue;
+            }
+            let class = if stem.contains("foreground") {
+                2
+            } else {
+                u8::from(stem.contains("round"))
+            };
+            found.push((class, std::cmp::Reverse(dir_density(dir)), pos));
+        }
+        found.sort();
+        self.first_decodable(found.into_iter().map(|f| f.2))
+    }
+
+    /// `.apks` / `.xapk` / `.apkm` bundles: a root icon (`manifest.json` `icon`, `icon.png`),
+    /// else the launcher icon of the base APK nested inside (one level only; the nested
+    /// archive is read under the same entry cap and what is left of the total budget).
+    fn bundle(&mut self) -> Result<DynamicImage> {
+        let mut candidates = Vec::new();
+        if let Some(m) = self.find("manifest.json") {
+            let text = self.read_text(m)?;
+            if let Some(icon) = json_string(&text, "icon") {
+                candidates.extend(self.find(&resolve("", &icon)));
+            }
+        }
+        candidates.extend(self.find("icon.png"));
+        match self.first_decodable(candidates) {
+            Ok(img) => return Ok(img),
+            Err(e) if e.falls_through() => {}
+            Err(e) => return Err(e),
+        }
+        if self.find("AndroidManifest.xml").is_some() {
+            return self.apk();
+        }
+        let mut nested: Vec<(u8, usize, usize)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.name.to_lowercase().ends_with(".apk"))
+            .map(|(pos, e)| {
+                let lower = e.name.to_lowercase();
+                let rank = if lower.contains("base") || lower.contains("master") {
+                    0
+                } else if lower.contains("standalone") {
+                    1
+                } else {
+                    2
+                };
+                (rank, e.name.matches('/').count(), pos)
+            })
+            .collect();
+        nested.sort();
+        let mut last = DecodeError::Unsupported;
+        for (_, _, pos) in nested.into_iter().take(APK_MAX_NESTED) {
+            let bytes = self.read(pos)?;
+            let budget = Budget {
+                total_max: self.budget.total_max.saturating_sub(self.used),
+                ..self.budget
+            };
+            let mut inner = Archive::open(&bytes, budget)?;
+            let result = inner.apk();
+            self.used = self.used.saturating_add(inner.used);
+            match result {
+                Ok(img) => return Ok(img),
+                Err(e) if e.falls_through() => last = e,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last)
     }
 
     fn contact_sheet(&mut self) -> Result<DynamicImage> {
@@ -455,24 +739,151 @@ impl<'a> Archive<'a> {
                 Err(e) => return Err(e),
             }
         }
-        match tiles.len() {
-            0 => Err(DecodeError::Unsupported),
-            1 => Ok(tiles.remove(0)),
-            n => {
-                let cols = n.min(2) as u32;
-                let rows = n.div_ceil(2) as u32;
-                let mut sheet = RgbaImage::new(cols * SHEET_CELL, rows * SHEET_CELL);
-                for (i, tile) in tiles.into_iter().enumerate() {
-                    let tile = shrink_to(tile, SHEET_CELL).to_rgba8();
-                    let (col, row) = ((i % 2) as u32, (i / 2) as u32);
-                    let x = col * SHEET_CELL + (SHEET_CELL - tile.width()) / 2;
-                    let y = row * SHEET_CELL + (SHEET_CELL - tile.height()) / 2;
-                    imageops::overlay(&mut sheet, &tile, i64::from(x), i64::from(y));
-                }
-                Ok(DynamicImage::ImageRgba8(sheet))
+        compose_sheet(tiles)
+    }
+}
+
+/// Image entries (by extension), skipping macOS metadata, in natural order. With `comic`,
+/// images whose file name contains "cover" come first. Returns indices into `names`.
+pub(super) fn rank_images<'n>(names: impl IntoIterator<Item = &'n str>, comic: bool) -> Vec<usize> {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut v: Vec<usize> = (0..names.len())
+        .filter(|&i| {
+            let lower = names[i].to_lowercase();
+            !lower.starts_with("__macosx/")
+                && !basename(names[i]).starts_with("._")
+                && is_image_name(&lower)
+        })
+        .collect();
+    v.sort_by(|&a, &b| natural_cmp(names[a], names[b]));
+    if comic {
+        let (covers, pages): (Vec<usize>, Vec<usize>) = v
+            .into_iter()
+            .partition(|&i| basename(names[i]).to_lowercase().contains("cover"));
+        return covers.into_iter().chain(pages).collect();
+    }
+    v
+}
+
+/// Lays up to [`SHEET_MAX_TILES`] tiles out on a 2-column grid of [`SHEET_CELL`] cells (a
+/// single tile is returned as is).
+pub(super) fn compose_sheet(mut tiles: Vec<DynamicImage>) -> Result<DynamicImage> {
+    tiles.truncate(SHEET_MAX_TILES);
+    match tiles.len() {
+        0 => Err(DecodeError::Unsupported),
+        1 => Ok(tiles.remove(0)),
+        n => {
+            let cols = n.min(2) as u32;
+            let rows = n.div_ceil(2) as u32;
+            let mut sheet = RgbaImage::new(cols * SHEET_CELL, rows * SHEET_CELL);
+            for (i, tile) in tiles.into_iter().enumerate() {
+                let tile = shrink_to(tile, SHEET_CELL).to_rgba8();
+                let (col, row) = ((i % 2) as u32, (i / 2) as u32);
+                let x = col * SHEET_CELL + (SHEET_CELL - tile.width()) / 2;
+                let y = row * SHEET_CELL + (SHEET_CELL - tile.height()) / 2;
+                imageops::overlay(&mut sheet, &tile, i64::from(x), i64::from(y));
             }
+            Ok(DynamicImage::ImageRgba8(sheet))
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Android packages
+
+/// Reference hops followed while resolving a drawable.
+const APK_MAX_DEPTH: u8 = 4;
+/// Resolution steps (lookups and file reads) per APK.
+const APK_MAX_STEPS: u32 = 64;
+/// Configurations considered per resource.
+const APK_MAX_CONFIGS: usize = 32;
+/// Nested APKs tried inside a bundle.
+const APK_MAX_NESTED: usize = 2;
+/// Central-directory entries considered in an application package.
+const APK_MAX_ENTRIES: usize = 1 << 16;
+/// Longest side of the layers an adaptive icon is composed from.
+const APK_LAYER_EDGE: u32 = 1024;
+
+struct ApkCtx<'t, 'd> {
+    table: &'t android::Table<'d>,
+    steps: u32,
+}
+
+/// One layer of an adaptive icon.
+enum Layer {
+    Color(u32),
+    Image(DynamicImage),
+}
+
+/// Foreground over background (a colour, an image scaled to the foreground, or nothing),
+/// cropped to the central 2/3 (the 72dp visible area of the 108dp canvas).
+fn compose_adaptive(fg: DynamicImage, bg: Option<Layer>) -> DynamicImage {
+    let fg = shrink_to(fg, APK_LAYER_EDGE).to_rgba8();
+    let (w, h) = fg.dimensions();
+    let mut canvas = match bg {
+        Some(Layer::Color(argb)) => {
+            let [a, r, g, b] = argb.to_be_bytes();
+            RgbaImage::from_pixel(w, h, image::Rgba([r, g, b, a]))
+        }
+        Some(Layer::Image(img)) => {
+            let img = shrink_to(img, APK_LAYER_EDGE).to_rgba8();
+            imageops::resize(&img, w, h, imageops::FilterType::Triangle)
+        }
+        None => RgbaImage::new(w, h),
+    };
+    imageops::overlay(&mut canvas, &fg, 0, 0);
+    let (cw, ch) = ((w * 2 / 3).max(1), (h * 2 / 3).max(1));
+    DynamicImage::ImageRgba8(
+        imageops::crop_imm(&canvas, (w - cw) / 2, (h - ch) / 2, cw, ch).to_image(),
+    )
+}
+
+/// Approximate density (dpi) from a resource directory's qualifiers.
+fn dir_density(dir: &str) -> u32 {
+    [
+        ("xxxhdpi", 640),
+        ("xxhdpi", 480),
+        ("xhdpi", 320),
+        ("tvdpi", 213),
+        ("hdpi", 240),
+        ("mdpi", 160),
+        ("ldpi", 120),
+        ("nodpi", 320),
+    ]
+    .iter()
+    .find(|(q, _)| dir.contains(q))
+    .map_or(160, |&(_, d)| d)
+}
+
+/// The string value of the first `"key": "value"` pair in a JSON document (enough for the
+/// flat `manifest.json` of an XAPK).
+fn json_string(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let mut from = 0;
+    while let Some(i) = text.get(from..)?.find(&needle) {
+        let rest = text.get(from + i + needle.len()..)?.trim_start();
+        from += i + needle.len();
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('"') else {
+            continue;
+        };
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => out.push(chars.next()?),
+                c => out.push(c),
+            }
+            if out.len() > 1024 {
+                return None;
+            }
+        }
+        return None;
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------------------
@@ -659,26 +1070,26 @@ fn base64_decode(text: &str) -> Result<Vec<u8>> {
 // ---------------------------------------------------------------------------------------
 // Minimal tolerant XML tag scanner (no DTDs, no entity definitions).
 
-struct Tag<'x> {
+pub(super) struct Tag<'x> {
     /// Qualified name as written.
     name: &'x str,
-    attrs: &'x str,
-    end: bool,
+    pub(super) attrs: &'x str,
+    pub(super) end: bool,
     /// Byte index just after the closing `>`.
-    after: usize,
+    pub(super) after: usize,
 }
 
 impl<'x> Tag<'x> {
-    fn local(&self) -> &'x str {
+    pub(super) fn local(&self) -> &'x str {
         self.name.rsplit(':').next().unwrap_or(self.name)
     }
 
-    fn is(&self, local: &str) -> bool {
+    pub(super) fn is(&self, local: &str) -> bool {
         self.local().eq_ignore_ascii_case(local)
     }
 
     /// Attribute value by local name (prefix ignored, case-insensitive), unescaped.
-    fn attr(&self, key: &str) -> Option<String> {
+    pub(super) fn attr(&self, key: &str) -> Option<String> {
         let s = self.attrs;
         let b = s.as_bytes();
         let mut i = 0;
@@ -727,7 +1138,7 @@ impl<'x> Tag<'x> {
     }
 }
 
-fn tags(xml: &str) -> impl Iterator<Item = Tag<'_>> {
+pub(super) fn tags(xml: &str) -> impl Iterator<Item = Tag<'_>> {
     let mut pos = 0usize;
     std::iter::from_fn(move || {
         loop {
@@ -800,7 +1211,7 @@ fn element_text(xml: &str, local: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn unescape(s: &str) -> String {
+pub(super) fn unescape(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
     }
@@ -870,7 +1281,7 @@ fn bytes_to_text(b: &[u8]) -> String {
     }
 }
 
-fn normalize(name: &str) -> String {
+pub(super) fn normalize(name: &str) -> String {
     let name = name.replace('\\', "/");
     let mut out: Vec<&str> = Vec::new();
     for seg in name.split('/') {
@@ -886,7 +1297,7 @@ fn normalize(name: &str) -> String {
 }
 
 /// Scales down (never up) so both edges fit in `edge`.
-fn shrink_to(img: DynamicImage, edge: u32) -> DynamicImage {
+pub(super) fn shrink_to(img: DynamicImage, edge: u32) -> DynamicImage {
     if img.width() > edge || img.height() > edge {
         img.thumbnail(edge, edge)
     } else {
@@ -894,7 +1305,7 @@ fn shrink_to(img: DynamicImage, edge: u32) -> DynamicImage {
     }
 }
 
-fn basename(path: &str) -> &str {
+pub(super) fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
@@ -943,7 +1354,7 @@ fn extension(lower_name: &str) -> &str {
 }
 
 /// Raster formats decodable from bytes (the same table as standalone files).
-fn is_image_name(lower_name: &str) -> bool {
+pub(super) fn is_image_name(lower_name: &str) -> bool {
     super::raster::format_for_ext(extension(lower_name)).is_some()
 }
 
@@ -955,7 +1366,7 @@ fn is_metafile(path: &str) -> bool {
 }
 
 /// Case-insensitive natural order: digit runs compare by numeric value.
-fn natural_cmp(a: &str, b: &str) -> Ordering {
+pub(super) fn natural_cmp(a: &str, b: &str) -> Ordering {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     let (mut i, mut j) = (0, 0);
     while i < a.len() && j < b.len() {
@@ -1336,5 +1747,309 @@ mod tests {
         assert_eq!(resolve("OEBPS", "/root.png"), "root.png");
         assert_eq!(unescape("a&amp;b&#x41;&#66;&bogus"), "a&bAB&bogus");
         assert_eq!(base64_decode("aGk=\n").unwrap(), b"hi");
+    }
+
+    // ---- Android packages ---------------------------------------------------------------
+
+    use crate::decode::android::tests as fx;
+
+    // Compiled by the Android SDK's `aapt2` from a manifest with
+    // `android:icon="@mipmap/ic_launcher"` and resources: `mipmap/ic_launcher` = mdpi, hdpi
+    // and xxhdpi PNGs plus an anydpi-v26 adaptive icon (`both`), or the adaptive icon alone
+    // (`adaptive`); the adaptive icon is a foreground PNG over a colour (#112233).
+    const MANIFEST_BOTH: &[u8] =
+        include_bytes!("../../tests/fixtures/apk/both/AndroidManifest.xml");
+    const ARSC_BOTH: &[u8] = include_bytes!("../../tests/fixtures/apk/both/resources.arsc");
+    const MANIFEST_ADAPTIVE: &[u8] =
+        include_bytes!("../../tests/fixtures/apk/adaptive/AndroidManifest.xml");
+    const ARSC_ADAPTIVE: &[u8] = include_bytes!("../../tests/fixtures/apk/adaptive/resources.arsc");
+    const ADAPTIVE_XML: &[u8] = include_bytes!("../../tests/fixtures/apk/adaptive_icon.xml");
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
+
+    fn px(img: &DynamicImage, x: u32, y: u32) -> [u8; 4] {
+        image::GenericImageView::get_pixel(img, x, y).0
+    }
+
+    /// An APK (as aapt2 lays it out) with legacy launcher icons in three densities.
+    fn apk_with_legacy_icons() -> Vec<u8> {
+        zip_of(
+            &[
+                ("AndroidManifest.xml", MANIFEST_BOTH),
+                ("res/mipmap-mdpi-v4/ic_launcher.png", &png(48, 48, RED)),
+                ("res/mipmap-hdpi-v4/ic_launcher.png", &png(72, 72, GREEN)),
+                ("res/mipmap-xxhdpi-v4/ic_launcher.png", &png(144, 144, BLUE)),
+                ("res/mipmap-anydpi-v26/ic_launcher.xml", ADAPTIVE_XML),
+                (
+                    "res/mipmap-xxxhdpi-v4/ic_launcher_foreground.png",
+                    &png(432, 432, YELLOW),
+                ),
+                ("resources.arsc", ARSC_BOTH),
+            ],
+            CompressionMethod::Deflated,
+        )
+    }
+
+    /// Foreground: transparent with a yellow square in the middle.
+    fn foreground() -> Vec<u8> {
+        let mut img = RgbaImage::new(432, 432);
+        for y in 166..266 {
+            for x in 166..266 {
+                img.put_pixel(x, y, Rgba(YELLOW));
+            }
+        }
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    fn apk_with_adaptive_icon_only() -> Vec<u8> {
+        zip_of(
+            &[
+                ("AndroidManifest.xml", MANIFEST_ADAPTIVE),
+                ("res/mipmap-anydpi-v26/ic_launcher.xml", ADAPTIVE_XML),
+                (
+                    "res/mipmap-xxxhdpi-v4/ic_launcher_foreground.png",
+                    &foreground(),
+                ),
+                ("resources.arsc", ARSC_ADAPTIVE),
+            ],
+            CompressionMethod::Deflated,
+        )
+    }
+
+    #[test]
+    fn apk_launcher_icon_resolved_through_manifest_and_resource_table() {
+        // Highest-density legacy PNG wins over the adaptive icon and lower densities.
+        let img = extract(&apk_with_legacy_icons(), "apk").unwrap();
+        assert_eq!(dims(&img), (144, 144));
+        assert_eq!(px(&img, 70, 70), BLUE);
+    }
+
+    #[test]
+    fn apk_adaptive_icon_foreground_over_background_colour() {
+        let img = extract(&apk_with_adaptive_icon_only(), "apk").unwrap();
+        // 432 px canvas cropped to the central two thirds.
+        assert_eq!(dims(&img), (288, 288));
+        assert_eq!(px(&img, 144, 144), YELLOW);
+        assert_eq!(px(&img, 2, 2), [0x11, 0x22, 0x33, 255]);
+    }
+
+    #[test]
+    fn apk_without_resolvable_icon_falls_back_to_the_heuristic() {
+        // Unreadable resource table, readable manifest.
+        let z = zip(&[
+            ("AndroidManifest.xml", MANIFEST_BOTH),
+            ("resources.arsc", b"garbage that is not a table"),
+            ("res/mipmap-hdpi/ic_launcher.png", &png(72, 72, GREEN)),
+            ("res/mipmap-xhdpi/ic_launcher.png", &png(96, 96, BLUE)),
+            (
+                "res/mipmap-xxxhdpi/ic_launcher_round.png",
+                &png(192, 192, RED),
+            ),
+            (
+                "res/mipmap-xxxhdpi/ic_launcher_background.png",
+                &png(300, 300, RED),
+            ),
+            ("res/drawable/splash.png", &png(500, 500, RED)),
+        ]);
+        assert_eq!(dims(&extract(&z, "apk").unwrap()), (96, 96));
+        // Only a round icon and a foreground layer: round first.
+        let z = zip(&[
+            (
+                "res/mipmap-xxxhdpi/ic_launcher_foreground.png",
+                &png(200, 200, YELLOW),
+            ),
+            (
+                "res/mipmap-hdpi/ic_launcher_round.webp",
+                &png(100, 100, GREEN),
+            ),
+            (
+                "res/mipmap-xhdpi/ic_launcher_round.png",
+                &png(120, 120, RED),
+            ),
+        ]);
+        assert_eq!(dims(&extract(&z, "apk").unwrap()), (120, 120));
+        // Only a foreground layer.
+        let z = zip(&[(
+            "res/mipmap-xxxhdpi/ic_launcher_foreground.png",
+            &png(200, 200, YELLOW),
+        )]);
+        assert_eq!(dims(&extract(&z, "apk").unwrap()), (200, 200));
+        // Nothing usable.
+        let z = zip(&[
+            ("res/drawable/splash.png", &png(5, 5, RED)),
+            ("classes.dex", b"dex"),
+        ]);
+        assert_eq!(extract(&z, "apk"), Err(DecodeError::Unsupported));
+    }
+
+    #[test]
+    fn apk_resource_reference_cycles_and_fan_out_are_bounded() {
+        // 0x7f020000 -> 0x7f020001 -> 0x7f020000 ...; the manifest points at it.
+        let strings = ["x"];
+        let cyclic = fx::table(
+            &strings,
+            0x7f,
+            &[fx::type_chunk(
+                2,
+                0,
+                &[(0, 0x01, 0x7f02_0001), (1, 0x01, 0x7f02_0000)],
+                false,
+            )],
+        );
+        let manifest = fx::xml(
+            &["icon", "application"],
+            &[],
+            &[fx::element(
+                1,
+                &[fx::attr(0, 0xFFFF_FFFF, 0x01, 0x7f02_0000)],
+            )],
+            false,
+        );
+        let z = zip(&[
+            ("AndroidManifest.xml", &manifest),
+            ("resources.arsc", &cyclic),
+            ("res/mipmap-hdpi/ic_launcher.png", &png(72, 72, GREEN)),
+        ]);
+        // The table yields nothing; the heuristic still finds the icon.
+        assert_eq!(dims(&extract(&z, "apk").unwrap()), (72, 72));
+        // 40 configurations of one entry, each referencing the next entry which again has 40.
+        let wide: Vec<Vec<u8>> = (0..40u16)
+            .map(|d| {
+                fx::type_chunk(
+                    2,
+                    d + 1,
+                    &[(0, 0x01, 0x7f02_0001), (1, 0x01, 0x7f02_0000)],
+                    false,
+                )
+            })
+            .collect();
+        let wide = fx::table(&strings, 0x7f, &wide);
+        let z = zip(&[
+            ("AndroidManifest.xml", &manifest),
+            ("resources.arsc", &wide),
+        ]);
+        assert_eq!(extract(&z, "apk"), Err(DecodeError::Unsupported));
+    }
+
+    #[test]
+    fn xapk_prefers_manifest_icon_then_icon_png_then_nested_base_apk() {
+        let base = apk_with_legacy_icons();
+        let manifest = br#"{"package_name":"x","icon":"images\/app_icon.png","name":"X"}"#;
+        let z = zip(&[
+            ("manifest.json", manifest),
+            ("images/app_icon.png", &png(33, 33, GREEN)),
+            ("icon.png", &png(22, 22, RED)),
+            ("com.example.apk", &base),
+        ]);
+        assert_eq!(dims(&extract(&z, "xapk").unwrap()), (33, 33));
+        let z = zip(&[("icon.png", &png(22, 22, RED)), ("com.example.apk", &base)]);
+        assert_eq!(dims(&extract(&z, "apkm").unwrap()), (22, 22));
+        // No icon file: the base APK inside, whatever its entry method.
+        for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            let z = zip_of(
+                &[
+                    ("toc.pb", b"x"),
+                    ("splits/config.en.apk", &zip(&[("res/x.txt", b"x")])),
+                    ("splits/base-master.apk", &base),
+                ],
+                method,
+            );
+            let img = extract(&z, "apks").unwrap();
+            assert_eq!(dims(&img), (144, 144), "{method:?}");
+            assert_eq!(px(&img, 5, 5), BLUE);
+        }
+        // A bundle that is really an APK at its root.
+        assert_eq!(dims(&extract(&base, "xapk").unwrap()), (144, 144));
+    }
+
+    #[test]
+    fn bundles_follow_one_nested_level_only() {
+        let inner = apk_with_legacy_icons();
+        let middle = zip(&[("base.apk", &inner)]);
+        let outer = zip(&[("base.apk", &middle)]);
+        // outer/base.apk is a plain zip holding another apk: not an APK itself.
+        assert_eq!(extract(&outer, "apks"), Err(DecodeError::Unsupported));
+        assert_eq!(
+            extract(&zip(&[("readme.txt", b"x")]), "apks"),
+            Err(DecodeError::Unsupported)
+        );
+    }
+
+    #[test]
+    fn apk_hostile_archives_fail_cleanly() {
+        let apk = apk_with_legacy_icons();
+        // Truncated at every length.
+        for cut in (0..apk.len()).step_by(7) {
+            let r = extract(&apk[..cut], "apk");
+            assert!(
+                matches!(r, Err(DecodeError::Unsupported | DecodeError::Malformed(_))),
+                "cut {cut}"
+            );
+        }
+        // Lying uncompressed sizes in the central directory.
+        let mut lying = apk.clone();
+        patch_declared_sizes(&mut lying, u32::MAX);
+        assert!(matches!(
+            extract(&lying, "apk"),
+            Err(DecodeError::TooLarge | DecodeError::Malformed(_))
+        ));
+        // A nested APK declared far beyond the entry cap is refused before it is read.
+        let mut bundle = zip(&[("base.apk", &apk)]);
+        patch_declared_sizes(&mut bundle, u32::MAX);
+        assert_eq!(extract(&bundle, "apks"), Err(DecodeError::TooLarge));
+        // Nested archive larger than the budget allows (nested bomb): the budget is shared
+        // with what the nested archive itself reads.
+        let bundle = zip(&[("base.apk", &apk)]);
+        let tight = Budget {
+            entry_max: apk.len() as u64 + 16,
+            total_max: apk.len() as u64 + 500,
+            max_entries: MAX_ENTRIES,
+        };
+        assert_eq!(
+            extract_with(&bundle, "apks", tight),
+            Err(DecodeError::TooLarge)
+        );
+        let tiny_entry = Budget {
+            entry_max: 1000,
+            ..tight
+        };
+        assert_eq!(
+            extract_with(&bundle, "apks", tiny_entry),
+            Err(DecodeError::TooLarge)
+        );
+        // An icon declaring 65535 x 65535 pixels.
+        let z = zip(&[("res/mipmap-hdpi/ic_launcher.png", &{
+            let mut hdr = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+            hdr.extend(65535u32.to_be_bytes());
+            hdr.extend(65535u32.to_be_bytes());
+            hdr.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+            hdr
+        })]);
+        assert!(matches!(
+            extract(&z, "apk"),
+            Err(DecodeError::TooLarge | DecodeError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn livp_still_prefers_the_shallowest_still_and_reads_under_budget() {
+        let z = zip(&[
+            ("IMG_0001.MOV", b"movie"),
+            ("__MACOSX/._IMG_0001.HEIC", b"x"),
+            ("sub/IMG_0002.jpg", &jpeg(4, 4)),
+            ("IMG_0001.HEIC", b"heic bytes"),
+        ]);
+        let (bytes, ext) = livp_still(&z).unwrap();
+        assert_eq!((ext, bytes.as_slice()), ("heic", b"heic bytes".as_slice()));
+        assert_eq!(
+            livp_still(&zip(&[("a.mov", b"m")])),
+            Err(DecodeError::Unsupported)
+        );
+        assert_eq!(livp_still(b"nope"), Err(DecodeError::Unsupported));
     }
 }

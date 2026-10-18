@@ -8,8 +8,12 @@
 //! - return [`DecodeError::Unsupported`] when the input is simply not theirs, so the
 //!   next tier can try.
 
+pub mod android;
+pub mod archive;
 pub mod audio;
+pub mod ebook;
 pub mod jxl;
+pub mod livp;
 pub mod pcx;
 pub mod psd;
 pub mod raster;
