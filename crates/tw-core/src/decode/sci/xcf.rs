@@ -423,7 +423,7 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
     let mut pos = 26;
     if version >= 4 {
         // Image precision: only 8-bit samples are decoded.
-        if !matches!(r.u32(pos)?, 0 | 100 | 150) {
+        if !matches!(r.u32(pos)?, 0 | 100 | 150 | 175) {
             return Err(DecodeError::Unsupported);
         }
         pos += 4;

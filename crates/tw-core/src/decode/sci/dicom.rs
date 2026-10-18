@@ -571,6 +571,9 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
         (Compression::Rle, None) => {
             let (w, h) = dimensions(attrs)?;
             let samples = usize::from(attrs.samples.unwrap_or(1));
+            if !matches!(samples, 1 | 3) {
+                return Err(DecodeError::Unsupported);
+            }
             let bytes_alloc = match attrs.bits_alloc {
                 Some(8) => 1,
                 Some(16) => 2,

@@ -24,6 +24,7 @@ struct Header {
     compression: String,
     colorspace: String,
     float: bool,
+    channels: usize,
 }
 
 /// Offset of the first `:` immediately followed by Ctrl-Z that is outside `{...}` comments.
@@ -93,6 +94,7 @@ fn parse_header(text: &[u8]) -> Header {
             "compression" => h.compression = lower,
             "colorspace" => h.colorspace = lower,
             "quantum-format" => h.float = lower == "floating-point",
+            "number-channels" => h.channels = value.parse().unwrap_or(0).min(64),
             _ => {}
         }
     }
@@ -153,7 +155,8 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
             Layout::Rgb => 3,
             Layout::Cmyk => 4,
         } + alpha;
-        (0, comps * db)
+        // ImageMagick 7 may store extra meta channels after the colour and alpha samples.
+        (0, comps.max(h.channels) * db)
     };
 
     let (w, hh) = (width as usize, height as usize);
@@ -164,7 +167,6 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
         1 + alpha as u64
     };
     check_alloc(u64::from(width) * u64::from(height) * out_channels)?;
-    check_alloc(n as u64 * packet as u64)?;
 
     let to_px = |p: &[u8]| -> [u8; 4] {
         let c = |i: usize| p[i * db];
@@ -209,6 +211,7 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
     match h.compression.as_str() {
         "" | "undefined" | "none" | "zip" | "zlib" => {
             let total = n * packet;
+            check_alloc(total as u64)?;
             let inflated;
             let src = if h.compression == "zip" || h.compression == "zlib" {
                 // Some writers prefix the zlib stream with its 32-bit big-endian length.
