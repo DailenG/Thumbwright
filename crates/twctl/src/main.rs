@@ -276,7 +276,7 @@ fn run(cli: &Cli) -> Result<String> {
                 return Err("output must differ from input".into());
             }
             let quality = parse_quality(cli)?;
-            let (mut img, exif) = ops::decode_full_with_exif(input, max, settings.keep_exif)?;
+            let (mut img, exif) = ops::decode_full_with_exif(input, max, settings.keep_metadata)?;
             if let Some(r) = cli.opt("--resize") {
                 img = ops::apply_resize(&img, ops::parse_resize(r)?);
             }
@@ -298,7 +298,7 @@ fn run(cli: &Cli) -> Result<String> {
             }
             let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
             batch(&files, |f| {
-                let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_exif)?;
+                let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_metadata)?;
                 let bytes = ops::encode_with_exif(&img, &target, quality, exif.as_deref())?;
                 ops::write_new(f, "", &target, &bytes)
             })
@@ -308,7 +308,7 @@ fn run(cli: &Cli) -> Result<String> {
             let spec = ops::parse_resize(cli.require("--to")?)?;
             batch(&cli.files()?, |f| {
                 let ext = writable_ext(f);
-                let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_exif)?;
+                let (img, exif) = ops::decode_full_with_exif(f, max, settings.keep_metadata)?;
                 let img = ops::apply_resize(&img, spec);
                 let bytes = ops::encode_with_exif(&img, &ext, None, exif.as_deref())?;
                 ops::write_new(f, " (resized)", &ext, &bytes)
@@ -320,7 +320,7 @@ fn run(cli: &Cli) -> Result<String> {
             ops::rotate(&image::DynamicImage::new_rgb8(1, 1), &by)?;
             let notes = std::sync::Mutex::new(Vec::<String>::new());
             let result = batch(&cli.files()?, |f| {
-                let r = ops::rotate_file(f, &by, max, settings.keep_exif, &writable_ext(f))?;
+                let r = ops::rotate_file(f, &by, max, settings.keep_metadata, &writable_ext(f))?;
                 if let Some(n) = r.note {
                     notes.lock().unwrap_or_else(|e| e.into_inner()).push(n);
                 }

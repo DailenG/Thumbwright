@@ -1,0 +1,176 @@
+//! Thin helpers over raw Win32 controls: wide strings, messages, text, check state, list
+//! views, message boxes. Every function takes handles of windows this process owns.
+
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::Controls::{
+    LIST_VIEW_ITEM_FLAGS, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_STATE,
+    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE,
+    LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVNI_SELECTED,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    BM_GETCHECK, BM_SETCHECK, GetWindowTextW, IDYES, MB_DEFBUTTON2, MB_ICONERROR,
+    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, MessageBoxW, SendMessageW, SetWindowTextW,
+    WM_SETFONT,
+};
+use windows::core::PCWSTR;
+
+pub fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+pub fn send(h: HWND, msg: u32, w: usize, l: isize) -> isize {
+    // SAFETY: `h` is a window of this process; callers that pass a pointer in `l` keep the
+    // pointee alive and correctly typed for `msg` for the duration of this synchronous call.
+    unsafe { SendMessageW(h, msg, Some(WPARAM(w)), Some(LPARAM(l))).0 }
+}
+
+pub fn set_font(h: HWND, font: isize) {
+    send(h, WM_SETFONT, font as usize, 1);
+}
+
+pub fn set_text(h: HWND, text: &str) {
+    // SAFETY: valid window and NUL-terminated string.
+    let _ = unsafe { SetWindowTextW(h, PCWSTR(wide(text).as_ptr())) };
+}
+
+pub fn get_text(h: HWND) -> String {
+    let mut buf = [0u16; 512];
+    // SAFETY: the buffer is writable for its whole length.
+    let n = unsafe { GetWindowTextW(h, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+pub fn set_checked(h: HWND, on: bool) {
+    send(h, BM_SETCHECK, usize::from(on), 0);
+}
+
+pub fn is_checked(h: HWND) -> bool {
+    send(h, BM_GETCHECK, 0, 0) == 1
+}
+
+/// A custom message box owned by `owner` with the product caption.
+fn message_box(
+    owner: HWND,
+    text: &str,
+    style: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE,
+) -> bool {
+    // SAFETY: valid owner and NUL-terminated strings that outlive the call.
+    unsafe {
+        MessageBoxW(
+            Some(owner),
+            PCWSTR(wide(text).as_ptr()),
+            PCWSTR(wide("Thumbwright Settings").as_ptr()),
+            style,
+        ) == IDYES
+    }
+}
+
+pub fn info(owner: HWND, text: &str) {
+    message_box(owner, text, MB_OK | MB_ICONINFORMATION);
+}
+
+pub fn error(owner: HWND, text: &str) {
+    message_box(owner, text, MB_OK | MB_ICONERROR);
+}
+
+/// Yes/No question; No is the default button.
+pub fn confirm(owner: HWND, text: &str) -> bool {
+    message_box(owner, text, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2)
+}
+
+// ---- list views (report mode, optional check boxes) ----
+
+pub fn lv_set_extended(h: HWND, style: u32) {
+    send(
+        h,
+        LVM_SETEXTENDEDLISTVIEWSTYLE,
+        style as usize,
+        style as isize,
+    );
+}
+
+pub fn lv_add_column(h: HWND, index: i32, title: &str, width: i32) {
+    let mut text = wide(title);
+    let col = LVCOLUMNW {
+        mask: LVCF_TEXT | LVCF_WIDTH,
+        cx: width,
+        pszText: windows::core::PWSTR(text.as_mut_ptr()),
+        iSubItem: index,
+        ..Default::default()
+    };
+    send(
+        h,
+        LVM_INSERTCOLUMNW,
+        index as usize,
+        std::ptr::from_ref(&col) as isize,
+    );
+}
+
+pub fn lv_clear(h: HWND) {
+    send(h, LVM_DELETEALLITEMS, 0, 0);
+}
+
+pub fn lv_count(h: HWND) -> usize {
+    send(h, LVM_GETITEMCOUNT, 0, 0) as usize
+}
+
+/// Appends a row; `cells[0]` is the item text and the rest are sub-item texts.
+pub fn lv_add_row(h: HWND, cells: &[&str]) {
+    let index = lv_count(h);
+    let mut first = wide(cells[0]);
+    let item = LVITEMW {
+        mask: LVIF_TEXT,
+        iItem: index as i32,
+        pszText: windows::core::PWSTR(first.as_mut_ptr()),
+        ..Default::default()
+    };
+    send(h, LVM_INSERTITEMW, 0, std::ptr::from_ref(&item) as isize);
+    for (sub, cell) in cells.iter().enumerate().skip(1) {
+        let mut text = wide(cell);
+        let item = LVITEMW {
+            iItem: index as i32,
+            iSubItem: sub as i32,
+            pszText: windows::core::PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        };
+        // LVM_SETITEMTEXTW
+        send(h, 0x1000 + 116, index, std::ptr::from_ref(&item) as isize);
+    }
+}
+
+/// State image index 1 is "unchecked", 2 is "checked" (list views with check boxes).
+pub fn lv_set_checked(h: HWND, index: usize, on: bool) {
+    let item = LVITEMW {
+        mask: LIST_VIEW_ITEM_FLAGS(LVIF_STATE.0),
+        stateMask: LVIS_STATEIMAGEMASK,
+        state: LIST_VIEW_ITEM_STATE_FLAGS(((if on { 2 } else { 1 }) as u32) << 12),
+        ..Default::default()
+    };
+    send(
+        h,
+        LVM_SETITEMSTATE,
+        index,
+        std::ptr::from_ref(&item) as isize,
+    );
+}
+
+pub fn lv_selected(h: HWND) -> Option<usize> {
+    let i = send(h, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
+    usize::try_from(i).ok()
+}
+
+pub fn lv_select(h: HWND, index: usize) {
+    let item = LVITEMW {
+        stateMask: LIST_VIEW_ITEM_STATE_FLAGS(0x3), // LVIS_FOCUSED | LVIS_SELECTED
+        state: LIST_VIEW_ITEM_STATE_FLAGS(0x3),
+        ..Default::default()
+    };
+    send(
+        h,
+        LVM_SETITEMSTATE,
+        index,
+        std::ptr::from_ref(&item) as isize,
+    );
+    send(h, LVM_ENSUREVISIBLE, index, 0);
+}

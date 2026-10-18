@@ -137,7 +137,7 @@ fn settings(iters: usize) {
         }
     }
     let reg = stats(time_each(iters, || {
-        black_box(Settings::from_registry(black_box(&sub)));
+        black_box(Settings::load_registry(black_box(&sub)));
     }));
     row_us("HKCU (installed, 9 values)", &reg);
     let (open_query, cached_query) = registry_stamp_cost(&sub, iters);
