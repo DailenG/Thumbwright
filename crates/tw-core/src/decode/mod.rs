@@ -10,13 +10,21 @@
 
 pub mod audio;
 pub mod jxl;
+#[cfg(windows)]
+pub mod memstream;
+#[cfg(windows)]
+pub mod metafile;
 pub mod pcx;
+#[cfg(windows)]
+pub mod pdf;
 pub mod psd;
 pub mod raster;
 pub mod raw;
 pub mod route;
 pub mod sgi;
 pub mod svg;
+#[cfg(windows)]
+pub mod video;
 #[cfg(windows)]
 pub mod wic;
 pub mod zip_preview;

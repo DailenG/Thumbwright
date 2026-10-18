@@ -1064,12 +1064,14 @@ dependencies = [
 name = "tw-core"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "image",
  "jxl-oxide",
  "lofty",
  "psd",
  "resvg",
  "windows",
+ "windows-core",
  "windows-registry",
  "zip",
 ]

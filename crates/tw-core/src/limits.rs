@@ -33,3 +33,15 @@ pub const DEFAULT_MAX_THUMB_EDGE: u32 = 1024;
 /// Per-entry and total decompressed-size caps for archive/container parsers (REQ-SEC-1).
 pub const ARCHIVE_ENTRY_MAX_BYTES: u64 = 256 * MIB;
 pub const ARCHIVE_TOTAL_MAX_BYTES: u64 = 1024 * MIB;
+/// Worker wall-clock budget for a video frame extraction (Media Foundation).
+pub const VIDEO_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+/// Worker wall-clock budget for rendering the first page of a PDF.
+pub const PDF_RENDER_TIMEOUT: Duration = Duration::from_secs(30);
+/// Worker wall-clock budget for playing back a Windows metafile.
+pub const METAFILE_RENDER_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default video frame offset (percent of the duration).
+pub const DEFAULT_VIDEO_PERCENT: u8 = 30;
+/// Extra committed memory a video worker may use on top of the input: 4K H.264/HEVC decoding
+/// measured about 0.9 GiB beyond the file (decoder surfaces plus RGB32 conversion buffers),
+/// which the fixed 512 MiB worker ceiling cannot hold.
+pub const WORKER_VIDEO_EXTRA_MEMORY_BYTES: u64 = 1536 * MIB;

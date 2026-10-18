@@ -10,12 +10,15 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# gzip for .emz/.wmz (pure-Rust backend, already in the dependency tree via zip).
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
 # No `rayon`: a global thread pool would keep running this DLL's code after COM unloads it.
 jxl-oxide = { version = "0.12.6", default-features = false }
 lofty = "0.25.4"
 psd = "0.3.5"
 resvg = "0.48.1"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Imaging", "Win32_UI_Shell", "Win32_System_Registry"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Imaging", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Media_MediaFoundation", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_DataExchange", "Win32_Graphics_Gdi", "Data_Pdf", "Storage_Streams", "Foundation", "UI"] }
+windows-core = "0.62"
 windows-registry = "0.6"
 zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
