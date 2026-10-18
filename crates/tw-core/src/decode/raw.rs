@@ -15,6 +15,7 @@
 //!
 //! The raw sensor data itself is never decoded.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -87,9 +88,31 @@ pub fn extract(data: &[u8]) -> Result<DynamicImage> {
     found.best(data)
 }
 
+/// A JPEG preview located in the file.
+struct Candidate {
+    range: Range<usize>,
+    /// The first byte is not `0xFF` in the file (Minolta maker-note previews) and is
+    /// restored before decoding.
+    patch_first_byte: bool,
+}
+
+impl Candidate {
+    /// The preview bytes, borrowed unless the first byte needs restoring.
+    fn bytes<'a>(&self, data: &'a [u8]) -> Cow<'a, [u8]> {
+        let bytes = &data[self.range.clone()];
+        if self.patch_first_byte {
+            let mut owned = bytes.to_vec();
+            owned[0] = 0xFF;
+            Cow::Owned(owned)
+        } else {
+            Cow::Borrowed(bytes)
+        }
+    }
+}
+
 #[derive(Default)]
 struct Found {
-    candidates: Vec<Range<usize>>,
+    candidates: Vec<Candidate>,
     orientation: Option<u16>,
 }
 
@@ -97,12 +120,31 @@ impl Found {
     /// Records `len` bytes at absolute `start`, clamped to the file; out-of-file starts
     /// are dropped.
     fn add(&mut self, data: &[u8], start: usize, len: usize) {
+        self.push(data, start, len, false);
+    }
+
+    /// Like [`add`](Self::add) for maker-note previews, accepting Minolta's blobs whose
+    /// leading `0xFF` is stored as another byte.
+    fn add_lenient(&mut self, data: &[u8], start: usize, len: usize) {
+        self.push(data, start, len, true);
+    }
+
+    fn push(&mut self, data: &[u8], start: usize, len: usize, lenient: bool) {
         if len == 0 || start >= data.len() || self.candidates.len() >= MAX_CANDIDATES {
             return;
         }
         let end = start.saturating_add(len).min(data.len());
-        if data[start..end].starts_with(&[0xFF, 0xD8]) {
-            self.candidates.push(start..end);
+        let blob = &data[start..end];
+        if blob.starts_with(&[0xFF, 0xD8]) {
+            self.candidates.push(Candidate {
+                range: start..end,
+                patch_first_byte: false,
+            });
+        } else if lenient && blob.get(1..3) == Some(&[0xD8, 0xFF]) {
+            self.candidates.push(Candidate {
+                range: start..end,
+                patch_first_byte: true,
+            });
         }
     }
 
@@ -119,20 +161,20 @@ impl Found {
 
     /// Largest declared preview first; the first that decodes wins.
     fn best(mut self, data: &[u8]) -> Result<DynamicImage> {
-        self.candidates.sort_by_key(|r| r.start);
-        self.candidates.dedup_by_key(|r| r.start);
-        let mut sized: Vec<(u64, Range<usize>)> = self
+        self.candidates.sort_by_key(|c| c.range.start);
+        self.candidates.dedup_by_key(|c| c.range.start);
+        let mut sized: Vec<(u64, Candidate)> = self
             .candidates
             .into_iter()
-            .filter_map(|r| {
-                let (w, h) = jpeg_dimensions(&data[r.clone()])?;
-                Some((u64::from(w) * u64::from(h), r))
+            .filter_map(|c| {
+                let (w, h) = jpeg_dimensions(&c.bytes(data))?;
+                Some((u64::from(w) * u64::from(h), c))
             })
             .collect();
         sized.sort_by_key(|s| std::cmp::Reverse(s.0));
         let mut last = DecodeError::Unsupported;
-        for (_, r) in sized {
-            match decode_jpeg(&data[r], self.orientation) {
+        for (_, c) in sized {
+            match decode_jpeg(&c.bytes(data), self.orientation) {
                 Ok(img) => return Ok(img),
                 Err(e) if e.falls_through() => last = e,
                 Err(e) => return Err(e),
@@ -372,7 +414,7 @@ impl<'a, 'f> Walker<'a, 'f> {
                     TAG_MAKER_NOTE if !makernote => pending_makernotes.push(t.blob(&e)),
                     tag if makernote && MAKERNOTE_BLOBS.contains(&tag) => {
                         let (start, len) = t.blob(&e);
-                        self.found.add(data, start, len);
+                        self.found.add_lenient(data, start, len);
                     }
                     tag if makernote && MAKERNOTE_SUBIFDS.contains(&tag) => {
                         // Either an IFD pointer or an UNDEFINED blob holding the IFD.
@@ -405,8 +447,12 @@ impl<'a, 'f> Walker<'a, 'f> {
             for &(start_tag, len_tag) in pairs {
                 let get = |tag| jpeg_pairs.iter().find(|p| p.0 == tag).map(|p| p.1);
                 if let (Some(start), Some(len)) = (get(start_tag), get(len_tag)) {
-                    self.found
-                        .add(data, t.origin.saturating_add(start as usize), len as usize);
+                    let start = t.origin.saturating_add(start as usize);
+                    if makernote {
+                        self.found.add_lenient(data, start, len as usize);
+                    } else {
+                        self.found.add(data, start, len as usize);
+                    }
                 }
             }
             // JPEG-compressed strips stored as one contiguous run.
@@ -620,6 +666,9 @@ fn crw(data: &[u8], found: &mut Found) {
 }
 
 const CIFF_JPG_FROM_RAW: u16 = 0x2007;
+/// ImageInfo record: width, height, pixel aspect, then the clockwise rotation in degrees.
+const CIFF_IMAGE_INFO: u16 = 0x1810;
+const CIFF_ROTATION_AT: usize = 12;
 
 fn crw_heap(
     data: &[u8],
@@ -666,6 +715,20 @@ fn crw_heap(
             }
             _ if tag & 0x3FFF == CIFF_JPG_FROM_RAW => {
                 found.add(data, rec_start, rec_end.saturating_sub(rec_start));
+            }
+            _ if tag & 0x3FFF == CIFF_IMAGE_INFO
+                && rec_end.saturating_sub(rec_start) >= CIFF_ROTATION_AT + 4 =>
+            {
+                // CIFF carries no EXIF; rotation in degrees maps onto EXIF orientations.
+                found.orientation =
+                    found
+                        .orientation
+                        .or(match u32_at(rec_start + CIFF_ROTATION_AT) {
+                            Some(90) => Some(6),
+                            Some(180) => Some(3),
+                            Some(270) => Some(8),
+                            _ => None,
+                        });
             }
             _ => {}
         }
@@ -934,9 +997,8 @@ mod tests {
         assert_eq!((img.width(), img.height()), (20, 40));
     }
 
-    #[test]
-    fn mrw_ttw_block() {
-        let j = jpeg(12, 8, [50, 60, 70]);
+    /// MRW with a plain-IFD Minolta maker note whose 0x0088/0x0089 pair points at `j`.
+    fn mrw_with_preview(j: &[u8]) -> Vec<u8> {
         let mut tiff = Lt::new(b"MM\0*", 64);
         // Big-endian TIFF: rewrite header and IFD by hand.
         tiff.0[..8].copy_from_slice(b"MM\0*\0\0\0\x08");
@@ -970,7 +1032,7 @@ mod tests {
         tiff.0.truncate(8);
         tiff.0.extend_from_slice(&ifd);
         tiff.0.resize(80, 0);
-        tiff.0.extend_from_slice(&j);
+        tiff.0.extend_from_slice(j);
 
         let mut ttw = b"\0TTW".to_vec();
         ttw.extend_from_slice(&(tiff.0.len() as u32).to_be_bytes());
@@ -982,8 +1044,24 @@ mod tests {
         let mut f = b"\0MRM".to_vec();
         f.extend_from_slice(&(blocks.len() as u32).to_be_bytes());
         f.extend_from_slice(&blocks);
-        let img = extract(&f).unwrap();
+        f
+    }
+
+    #[test]
+    fn mrw_ttw_block() {
+        let img = extract(&mrw_with_preview(&jpeg(12, 8, [50, 60, 70]))).unwrap();
         assert_eq!((img.width(), img.height()), (12, 8));
+    }
+
+    #[test]
+    fn minolta_preview_with_wrong_first_byte() {
+        // Real Minolta maker-note previews store a stray byte where the JPEG's 0xFF
+        // belongs; the blob is otherwise a complete JPEG.
+        let mut j = jpeg(12, 8, [50, 60, 70]);
+        j[0] = 0x02;
+        let img = extract(&mrw_with_preview(&j)).unwrap();
+        assert_eq!((img.width(), img.height()), (12, 8));
+        assert!(close(img.to_rgb8().get_pixel(5, 3).0, [50, 60, 70]));
     }
 
     #[test]
@@ -1003,6 +1081,32 @@ mod tests {
         f.extend_from_slice(&table_rel.to_le_bytes());
         let img = extract(&f).unwrap();
         assert_eq!((img.width(), img.height()), (14, 7));
+    }
+
+    #[test]
+    fn crw_image_info_rotation_orients_preview() {
+        let j = jpeg(14, 7, [90, 0, 90]);
+        let mut info = vec![0u8; 28];
+        info[12..16].copy_from_slice(&270u32.to_le_bytes());
+        let mut f = b"II".to_vec();
+        f.extend_from_slice(&26u32.to_le_bytes());
+        f.extend_from_slice(b"HEAPCCDR");
+        f.resize(26, 0);
+        f.extend_from_slice(&j);
+        f.extend_from_slice(&info);
+        let table_rel = (j.len() + info.len()) as u32;
+        f.extend_from_slice(&2u16.to_le_bytes());
+        for (tag, len, at) in [
+            (CIFF_JPG_FROM_RAW, j.len(), 0),
+            (CIFF_IMAGE_INFO, info.len(), j.len()),
+        ] {
+            f.extend_from_slice(&tag.to_le_bytes());
+            f.extend_from_slice(&(len as u32).to_le_bytes());
+            f.extend_from_slice(&(at as u32).to_le_bytes());
+        }
+        f.extend_from_slice(&table_rel.to_le_bytes());
+        let img = extract(&f).unwrap();
+        assert_eq!((img.width(), img.height()), (7, 14));
     }
 
     #[test]

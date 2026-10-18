@@ -73,8 +73,8 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
   - After `register --off`, an export of `HKCU\Software\Classes` matched the pre-registration export except for six OS timestamp values; zero product keys remained.
 - **Not verified:**
   - `DllRegisterServer`/`DllUnregisterServer` against HKLM was never run.
-  - JPEG XL pixel output: no encoder exists, so only rejection paths are tested.
-  - CR3, CRW and X3F preview parsers and the maker-note parsing in `decode/raw.rs` were written from recalled format layouts. They have never been checked against real files.
+  - JPEG XL: pixel output is checked against the libjxl conformance references (`tw-core/tests/samples.rs`, fixtures in `tests/fixtures/jxl`). Known gaps: CMYK is approximated without a CMS, ICC-profile images that cannot be reduced to an enumerated encoding are rendered in their own colour space, and the `blendmodes` conformance case differs from its reference in semi-transparent regions (jxl-oxide 0.12.6).
+  - CR3, CRW, X3F and maker-note parsing in `decode/raw.rs` were checked against about 60 real raw.pixls.us files (CC0); 30 of them are pinned in `scripts/fetch-samples.ps1` and verified by the ignored `real_raw_samples` test (`tests/fixtures/README.md`). CR3 previews come from the `PRVW` box (about 1620x1080), not the full-size JPEG track in `mdat`.
   - The owner-drawn menu preview was never seen in a real Explorer menu.
   - The worker under a Job Object nested inside the surrogate's own job (if any) was only exercised in the live run, not in tests.
 
