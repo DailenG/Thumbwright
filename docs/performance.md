@@ -204,14 +204,25 @@ Alpha (RGBA8 with transparent regions, 6000x4000):
   native code, no `*-sys`), without `rayon`; `cargo xtask licenses --check` passes. Its
   SIMD kernels are `unsafe` internally; they run on buffers we allocate, bounded by the
   decoded-size budget, and a resizer error falls back to the previous path.
-- Alpha, 16-bit and float images: **unchanged** (`DynamicImage::thumbnail`). 16-bit and
-  float are kept so an HDR image is still averaged before it is clamped to 8 bits. For
-  alpha, every candidate that is better is also slower (`fast_image_resize` Box
-  and CatmullRom 2 to 3x), so by the rule they are not switched. See "Not acted on".
+- Alpha (8-bit RGBA8/LumaA8): **now premultiplied before the Box shrink** (issue #17,
+  user decision: fix the fringing and keep Box). Averaging straight (non-premultiplied)
+  colour lets the colour hidden under transparent pixels bleed into edges (19.35 dB against
+  a reference; 30.7 to 34 dB premultiplied). Cost: one full-size premultiplied BGRA copy
+  plus the same Box shrink, measured 44 -> 161 ms at 24 MP RGBA (5 runs, min). 16-bit and
+  float images keep `DynamicImage::thumbnail`, so large HDR files do not pay that copy.
+- Float images are resized after conversion to 8-bit, because `DynamicImage::thumbnail`
+  itself is wrong on them (probe, image 0.25.10): averaging f32 pixels of [1, 0, 0, 1] red
+  produces 1.5 in every channel, clamped to grey [128, 128, 128] instead of red. Observed
+  with a synthetic probe; real HDR files are rare, small and not representative.
+- 16-bit images: **unchanged** (`DynamicImage::thumbnail`). Converting them to 8-bit first
+  costs several times the resize itself (measured 61 -> 231 ms at 24 MP RGB16 in the
+  alpha-path bench), and 16-bit files are photo sources where the old path is correct.
 - CatmullRom would be the next step up and is still faster than the old code on opaque
   images (22.5 vs 32.7 ms), with +5 dB on photos and +11.7 dB on the aliasing probe. It
   was not taken because it changes how thumbnails look (sharper, with overshoot at hard
-  edges), which is a product decision rather than a performance one.
+  edges), which is a product decision rather than a performance one (user decision, #17:
+  keep Box).
+- CatmullRom was not taken (user decision, #17: keep Box).
 
 ## 5. Whole stream in memory
 
