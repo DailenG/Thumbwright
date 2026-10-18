@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sparse package for the Windows 11 modern context menu (FUNCTIONAL_SPEC.md 4.2, REQ-REG-9).
+
+  A sparse package carries no payload: it gives the installed binaries an identity, and
+  through that identity the right to declare a File Explorer context-menu verb. The binaries
+  stay in the install directory, which is passed as the external location when the package
+  is registered:
+
+      Add-AppxPackage -Path Thumbwright.msix -ExternalLocation "<install dir>"
+
+  Names between at-signs below are tokens that build.ps1 fills; do not edit them by hand:
+    @PACKAGE_NAME@            fresh package identity name (build.ps1 -PackageName)
+    @PUBLISHER@               the signing certificate subject, e.g. "CN=..." (release input)
+    @PUBLISHER_DISPLAY_NAME@  shown in Settings
+    @VERSION@                 four-part version, from the workspace version
+    @EXPLORER_COMMAND_CLSID@  CLSID_EXPLORER_COMMAND, read from crates/tw-core/src/ids.rs
+    @SHELL_DLL@               thumbwright_shell.dll
+    @CTL_EXE@                 twctl.exe
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap10 desktop4 desktop5 com rescap">
+
+  <Identity
+    Name="@PACKAGE_NAME@"
+    Publisher="@PUBLISHER@"
+    Version="@VERSION@"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Thumbwright shell extension</DisplayName>
+    <PublisherDisplayName>@PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+  <Applications>
+    <Application
+      Id="Thumbwright"
+      Executable="@CTL_EXE@"
+      uap10:TrustLevel="mediumIL"
+      uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="Thumbwright"
+        Description="Thumbwright image tools in the File Explorer context menu"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <!-- The verb. GetState decides per selection whether it shows (supported types,
+             settings), so it is declared for every file type. -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="Thumbwright" Clsid="@EXPLORER_COMMAND_CLSID@" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+        <!-- The COM class behind the verb, loaded from the external location. -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="Thumbwright modern context menu">
+              <com:Class Id="@EXPLORER_COMMAND_CLSID@" Path="@SHELL_DLL@" ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>
