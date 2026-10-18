@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Thumbwright per-machine installer (REQ-REG-8, FUNCTIONAL_SPEC.md 4.2). WiX v7, schema v4.
+
+  Build (normally via scripts/release.ps1 or packaging/wix/build-msi.ps1):
+    wix build -arch x64 -d Version=0.1.0 -d SourceDir=dist [-d IncludeSettings=1] Package.wxs -o out.msi
+
+  Defines:
+    Version          MSI ProductVersion, major.minor.build (Windows Installer ignores a 4th field).
+    SourceDir        Directory holding the signed payload (dist\).
+    IncludeSettings  Optional. Set to 1 to also ship thumbwright-settings.exe from SourceDir.
+
+  Registration design: see packaging/wix/README.md. In short, the shell registry state is NOT
+  authored as MSI Registry rows. It is written and journaled by the DLL's own engine
+  (DllRegisterServer, Scope::Machine) through regsvr32 in a deferred, elevated custom action
+  that runs after InstallFiles; the matching unregister runs before RemoveFiles. The MSI
+  therefore owns files only, and the engine owns every HKLM key it creates, including
+  HKLM\Software\Thumbwright\Registration.
+
+  The package deliberately has no Thumbwright.ini: its presence next to the binaries is the
+  portable-mode marker (REQ-REG-6) and would make an installed copy behave as portable.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Thumbwright"
+      Manufacturer="Dailen Gunter"
+      Version="$(Version)"
+      UpgradeCode="663DEBDD-CC00-4187-B64E-4664E7DA132A"
+      Scope="perMachine"
+      Language="1033">
+
+    <SummaryInformation Description="Thumbwright thumbnail provider and context menu toolkit" />
+
+    <!-- Same-or-older versions are refused. A newer one removes the old product first
+         (running its UnregisterShell), then installs and registers the new files. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Thumbwright is already installed." />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/DailenG/Thumbwright" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Thumbwright" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Thumbwright" AllowAbsent="no">
+      <ComponentGroupRef Id="ProductFiles" />
+    </Feature>
+
+    <ComponentGroup Id="ProductFiles" Directory="INSTALLFOLDER">
+      <Component Id="ShellDll">
+        <File Id="ShellDllFile" Name="thumbwright_shell.dll" Source="$(SourceDir)\thumbwright_shell.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="WorkerExe">
+        <File Id="WorkerExeFile" Name="tw-worker.exe" Source="$(SourceDir)\tw-worker.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="TwctlExe">
+        <File Id="TwctlExeFile" Name="twctl.exe" Source="$(SourceDir)\twctl.exe" KeyPath="yes" />
+      </Component>
+<?ifdef IncludeSettings?>
+      <Component Id="SettingsExe">
+        <File Id="SettingsExeFile" Name="thumbwright-settings.exe" Source="$(SourceDir)\thumbwright-settings.exe" KeyPath="yes" />
+      </Component>
+<?endif?>
+      <Component Id="LicenseFile">
+        <File Id="LicenseFileFile" Name="LICENSE" Source="$(SourceDir)\LICENSE" KeyPath="yes" />
+      </Component>
+      <Component Id="ThirdPartyLicensesFile">
+        <File Id="ThirdPartyLicensesFileFile" Name="THIRD_PARTY_LICENSES.md" Source="$(SourceDir)\THIRD_PARTY_LICENSES.md" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Deferred actions run in the elevated installer service (LocalSystem), so they cannot
+         read session properties at run time. For an EXE-type action, Windows Installer
+         formats ExeCommand when it writes the script, so [INSTALLFOLDER] below is the
+         resolved install path.
+
+         regsvr32 comes from System64Folder (the 64-bit regsvr32): the DLL is x64 and its
+         HKLM writes must land in the 64-bit registry view. Exit code 0 is DllRegisterServer
+         returning S_OK. -->
+    <CustomAction Id="RegisterShell" Directory="INSTALLFOLDER"
+        Execute="deferred" Impersonate="no" Return="check"
+        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s &quot;[INSTALLFOLDER]thumbwright_shell.dll&quot;" />
+
+    <!-- Rollback of a failed install/repair/upgrade: undo the registration while the files are
+         still present. Rollback scripts run in reverse order, so this runs before InstallFiles
+         is rolled back. Best effort: a failure here cannot be recovered from. -->
+    <CustomAction Id="RegisterShellRollback" Directory="INSTALLFOLDER"
+        Execute="rollback" Impersonate="no" Return="ignore"
+        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[INSTALLFOLDER]thumbwright_shell.dll&quot;" />
+
+    <!-- Uninstall, and the removal half of a major upgrade. Return="ignore": a failing
+         unregistration (for example a corrupt journal) must not make the product
+         impossible to uninstall; regsvr32's exit code is in the verbose MSI log, and
+         scripts/test-install.ps1 fails on any residue. -->
+    <CustomAction Id="UnregisterShell" Directory="INSTALLFOLDER"
+        Execute="deferred" Impersonate="no" Return="ignore"
+        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[INSTALLFOLDER]thumbwright_shell.dll&quot;" />
+
+    <InstallExecuteSequence>
+      <!-- Unregister while the DLL is still on disk (regsvr32 /u loads it). -->
+      <Custom Action="UnregisterShell" Before="RemoveFiles" Condition='REMOVE="ALL"' />
+      <!-- Install, repair (/fa) and modify register again; DllRegisterServer first undoes
+           any previous registration of its own, so repeats never stack. -->
+      <Custom Action="RegisterShellRollback" Before="RegisterShell" Condition='NOT (REMOVE="ALL")' />
+      <Custom Action="RegisterShell" After="InstallFiles" Condition='NOT (REMOVE="ALL")' />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

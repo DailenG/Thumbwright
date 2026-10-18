@@ -148,6 +148,7 @@ mod tests {
                 approve: false,
                 preview_handlers: format!("{base}\\PreviewHandlers"),
                 property_handlers: format!("{base}\\PropertyHandlers"),
+                approved: format!("{base}\\Approved"),
                 notify: false,
             };
             Self { base, dir, layout }

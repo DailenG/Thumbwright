@@ -40,6 +40,30 @@ Windows ignores HKCU COM registrations for elevated processes, so test Explorer 
 
 The settings window (`thumbwright-settings.exe`) edits the same settings. With a registration present, Apply adds or removes exactly the handler keys of the file types you toggled and broadcasts `SHCNE_ASSOCCHANGED`. Maintenance has Repair (re-register, then clear the thumbnail cache), Rebuild thumbnail cache, Turn on/off thumbnails and Open log. Windows has no API to purge the thumbnail cache, so Rebuild ends this user's `explorer.exe`, deletes `%LOCALAPPDATA%\Microsoft\Windows\Explorer\thumbcache_*.db`, and makes sure the shell is running again; the window asks for confirmation first.
 
+## Install (per-machine MSI)
+
+`Thumbwright-<version>-x64.msi` installs to `Program Files\Thumbwright` for all users and needs elevation (REQ-REG-8). It ships `thumbwright_shell.dll`, `tw-worker.exe`, `twctl.exe`, `LICENSE` and `THIRD_PARTY_LICENSES.md` (and `thumbwright-settings.exe` when the build produced it), and never a `Thumbwright.ini`, so an installed copy is not in portable mode.
+
+```
+msiexec /i Thumbwright-0.1.0-x64.msi /qn      # silent install
+msiexec /fa Thumbwright-0.1.0-x64.msi /qn     # repair (re-registers)
+msiexec /x  Thumbwright-0.1.0-x64.msi /qn     # uninstall
+```
+
+Registration is done by the DLL, not by the MSI's registry tables: a deferred custom action runs `regsvr32 /s thumbwright_shell.dll` (`DllRegisterServer`, `Scope::Machine`: HKLM class and handler keys plus `Shell Extensions\Approved`, journaled under `HKLM\Software\Thumbwright\Registration`); uninstall runs `regsvr32 /u` before the files are removed, and upgrade and repair re-register cleanly. Details and the reasoning: `packaging/wix/README.md`. Per-user (`twctl register`) is for portable copies only and refuses to run from an installed copy.
+
+`scripts/test-install.ps1` (elevated, on a test machine) installs, upgrades, repairs and uninstalls the MSI and fails on any registry difference (HKLM and HKCU) between the state before install and after uninstall. `scripts/test-install.ps1 -DryRun` needs no elevation and inspects the package tables instead.
+
+## Release build and signing
+
+```
+scripts\release.ps1 -SkipSign                     # unsigned dev build -> dist\Thumbwright-<version>-x64.msi
+scripts\release.ps1                               # sign with Azure Trusted Signing (sign-helper.ps1)
+scripts\release.ps1 -CertThumbprint <sha1>        # or signtool with a certificate in the store
+```
+
+The script runs the dependency audit, `cargo build --release --workspace --locked`, collects the binaries into `dist\`, Authenticode-signs `thumbwright_shell.dll`, `tw-worker.exe` and `twctl.exe` (REQ-SEC-4), builds the MSI from the signed files, signs the MSI, and then runs `signtool verify /pa /v` on every file, failing on any that is unsigned or not RFC 3161 timestamped. It needs the Windows SDK's `signtool.exe` and WiX v7 (`dotnet tool install --global wix --version 7.0.0`); WiX v7 requires accepting its Open Source Maintenance Fee EULA once (`wix eula accept wix7`; free below US$10,000/year of revenue, see `packaging/wix/README.md`). Azure Trusted Signing needs `AzureTrustedSignTool` on PATH and `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TRUSTED_SIGNING_ACCOUNT` and `AZURE_TRUSTED_SIGNING_PROFILE` in the environment. `dist\` is gitignored.
+
 ## Clean-room rules
 
 This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, official Microsoft documentation and permissively licensed crate sources. Do not consult the reference product's binaries or source. See `REVIEW_HANDOFF.md` section 1.
