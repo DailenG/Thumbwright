@@ -10,6 +10,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Pure Rust (SIMD via std::arch, no build-time native code). No `rayon`, for the reason below.
+fast_image_resize = "6.1.0"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
 # No `rayon`: a global thread pool would keep running this DLL's code after COM unloads it.
 jxl-oxide = { version = "0.12.6", default-features = false }
@@ -19,3 +21,7 @@ resvg = "0.48.1"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Imaging", "Win32_UI_Shell", "Win32_System_Registry"] }
 windows-registry = "0.6"
 zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+# Measurement harness only (examples/perf.rs): peak working set.
+windows = { version = "0.62", features = ["Win32_System_ProcessStatus"] }

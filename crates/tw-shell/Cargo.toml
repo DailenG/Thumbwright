@@ -28,3 +28,5 @@ windows-core = "0.62"
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+# Process enumeration for the pre-spawn lifecycle test (tests/prespawn_dll.rs).
+windows = { version = "0.62.2", features = ["Win32_System_Diagnostics_ToolHelp"] }

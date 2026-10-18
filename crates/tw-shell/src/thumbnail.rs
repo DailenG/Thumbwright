@@ -25,7 +25,7 @@ use windows::core::{Ref, Result, implement};
 use tw_core::config::Settings;
 use tw_core::decode::{DecodeError, Thumbnail};
 use tw_core::pipeline::Engine;
-use tw_core::{ids, limits, log};
+use tw_core::{ids, limits, log, worker};
 
 use crate::ModuleRef;
 
@@ -60,6 +60,8 @@ pub(crate) struct ThumbnailProvider {
 impl ThumbnailProvider {
     pub(crate) fn new() -> Self {
         log::init("dll");
+        // Worker start-up dominates small SVG/audio/WIC requests; see docs/performance.md.
+        worker::set_prespawn(true);
         Self {
             stream: RefCell::new(None),
             _module: ModuleRef::new(),
@@ -159,20 +161,29 @@ fn stat(stream: &IStream) -> Result<StreamInfo> {
     }
 }
 
-/// Reads the whole stream; `size` comes from Stat and bounds the allocation. A stream
-/// that yields more than it declared is rejected.
+/// Reads the whole stream straight into the result; `size` comes from Stat and bounds the
+/// allocation. A stream that yields more than it declared is rejected. (A 1 MiB bounce
+/// buffer cost 0.4-0.7 ms per call, ten times the read itself on small files:
+/// docs/performance.md.)
 fn read_all(stream: &IStream, size: u64) -> Result<Vec<u8>> {
     // SAFETY: seeking a stream we hold a reference to.
     unsafe { stream.Seek(0, STREAM_SEEK_SET, None)? };
-    let mut buf = Vec::with_capacity(size as usize);
-    let mut chunk = vec![0u8; 1 << 20];
+    // One byte beyond the declared size, so a stream that yields more is noticed.
+    let cap = usize::try_from(size)
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .ok_or(E_FAIL)?;
+    let mut buf: Vec<u8> = Vec::with_capacity(cap);
     loop {
+        // `buf.len() <= size` here, so there is always room for at least one byte.
+        let want = (cap - buf.len()).min(1 << 20) as u32;
         let mut read = 0u32;
-        // SAFETY: `chunk` is writable for `chunk.len()` bytes.
+        // SAFETY: the stream writes at most `want` bytes into the vector's spare capacity,
+        // which holds `cap - buf.len() >= want` bytes.
         let hr = unsafe {
             stream.Read(
-                chunk.as_mut_ptr().cast(),
-                chunk.len() as u32,
+                buf.as_mut_ptr().add(buf.len()).cast(),
+                want,
                 Some(&mut read),
             )
         };
@@ -180,7 +191,11 @@ fn read_all(stream: &IStream, size: u64) -> Result<Vec<u8>> {
         if read == 0 {
             break;
         }
-        buf.extend_from_slice(&chunk[..read as usize]);
+        if read > want {
+            return Err(E_FAIL.into());
+        }
+        // SAFETY: the stream initialised the first `read <= want` spare bytes.
+        unsafe { buf.set_len(buf.len() + read as usize) };
         if buf.len() as u64 > size {
             return Err(E_FAIL.into());
         }
@@ -247,5 +262,44 @@ mod tests {
         assert!(!still_failed(t, now + TIMEOUT_CACHE_TTL));
         let m = failure_expiry(&DecodeError::TooLarge, now);
         assert!(still_failed(m, now + Duration::from_secs(86_400)));
+    }
+
+    fn mem_stream(data: &[u8]) -> IStream {
+        // SAFETY: the slice is valid for the call; the stream copies it.
+        unsafe { windows::Win32::UI::Shell::SHCreateMemStream(Some(data)) }.unwrap()
+    }
+
+    fn pattern(n: usize) -> Vec<u8> {
+        (0..n).map(|i| (i * 7 + i / 251) as u8).collect()
+    }
+
+    #[test]
+    fn read_all_returns_every_byte_across_read_chunk_boundaries() {
+        const MIB: usize = 1 << 20;
+        for n in [0, 1, MIB - 1, MIB, MIB + 1, 2 * MIB + 5] {
+            let data = pattern(n);
+            let got = read_all(&mem_stream(&data), n as u64).unwrap();
+            assert!(got == data, "{n} bytes differ");
+        }
+    }
+
+    #[test]
+    fn read_all_rejects_a_stream_longer_than_it_declared() {
+        let data = pattern(3000);
+        assert!(read_all(&mem_stream(&data), 2999).is_err());
+        // Exactly one byte over the declared size, at a chunk boundary.
+        let data = pattern(1 << 20);
+        assert!(read_all(&mem_stream(&data), (1 << 20) - 1).is_err());
+        // A stream shorter than declared is read to its end.
+        let data = pattern(100);
+        assert!(read_all(&mem_stream(&data), 5000).unwrap() == data);
+    }
+
+    #[test]
+    fn read_all_restarts_from_the_beginning() {
+        let data = pattern(500);
+        let s = mem_stream(&data);
+        assert!(read_all(&s, 500).unwrap() == data);
+        assert!(read_all(&s, 500).unwrap() == data);
     }
 }
