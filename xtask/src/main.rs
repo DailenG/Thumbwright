@@ -17,6 +17,13 @@ const TARGET: &str = "x86_64-pc-windows-msvc";
 /// Crates whose presence means C/C++ gets compiled at build time.
 const NATIVE_BUILD_CRATES: &[&str] = &["cc", "cmake", "bindgen", "pkg-config", "vcpkg", "nasm-rs"];
 
+/// Pure-Rust crates that carry a `links` key only as a "one copy in the graph" marker; their
+/// build scripts compile and link nothing (checked against the published sources):
+/// `rayon-core` (`build.rs` just prints `rerun-if-changed`) and `wasm-bindgen-shared`
+/// (hashes its own sources; reached only through rav1e's wasm-only feature, so it is not
+/// built for Windows).
+const LINKS_MARKER_ONLY: &[&str] = &["rayon-core", "wasm-bindgen-shared"];
+
 /// Permissive licenses accepted in shipped or build-time dependencies.
 const ALLOWED: &[&str] = &[
     "MIT",
@@ -158,6 +165,9 @@ fn native_code(p: &Value) -> Option<String> {
     let name = p["name"].as_str().unwrap_or("");
     if NATIVE_BUILD_CRATES.contains(&name) {
         return Some("compiles native code at build time".into());
+    }
+    if LINKS_MARKER_ONLY.contains(&name) {
+        return None;
     }
     p["links"]
         .as_str()
@@ -302,6 +312,9 @@ mod tests {
         assert!(native_code(&json!({"name": "cc", "links": null})).is_some());
         assert!(native_code(&json!({"name": "libz-sys", "links": "z"})).is_some());
         assert!(native_code(&json!({"name": "image", "links": null})).is_none());
+        // A uniqueness-marker `links` is not a native library, but an unknown one still is.
+        assert!(native_code(&json!({"name": "rayon-core", "links": "rayon-core"})).is_none());
+        assert!(native_code(&json!({"name": "rayon-core-sys", "links": "rayon-core"})).is_some());
     }
 
     #[test]

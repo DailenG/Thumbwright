@@ -414,11 +414,15 @@ pub fn register(layout: &Layout, plan: &Plan) -> Result<Report> {
     }
     if plan.context_menu {
         register_class(&mut rec, layout, ids::CLSID_CONTEXT_MENU, &dll)?;
-        let path = layout.classes_path(&format!(
-            "*\\shellex\\ContextMenuHandlers\\{}",
-            ids::PRODUCT_NAME
-        ));
-        rec.set_string(&path, "", &ids::CLSID_CONTEXT_MENU.braced())?;
+        // `*` covers files; `Directory` covers selected folders and `Directory\Background`
+        // the folder's own background (the "Build thumbnails here" entry).
+        for base in ["*", "Directory", "Directory\\Background"] {
+            let path = layout.classes_path(&format!(
+                "{base}\\shellex\\ContextMenuHandlers\\{}",
+                ids::PRODUCT_NAME
+            ));
+            rec.set_string(&path, "", &ids::CLSID_CONTEXT_MENU.braced())?;
+        }
     }
     if plan.cloud {
         register_cloud(&mut rec, layout, &dll)?;
@@ -1059,6 +1063,16 @@ mod tests {
             )),
             Some(ids::CLSID_CONTEXT_MENU.braced())
         );
+        for base in ["Directory", "Directory\\Background"] {
+            assert_eq!(
+                sb.get(&format!(
+                    "{base}\\shellex\\ContextMenuHandlers\\{}",
+                    ids::PRODUCT_NAME
+                )),
+                Some(ids::CLSID_CONTEXT_MENU.braced()),
+                "folder menu handler at {base}"
+            );
+        }
         let st = status(&sb.layout).unwrap();
         assert_eq!(st.thumbnail_extensions, 2);
         assert!(st.context_menu);

@@ -64,6 +64,20 @@ scripts\release.ps1 -CertThumbprint <sha1>        # or signtool with a certifica
 
 The script runs the dependency audit, `cargo build --release --workspace --locked`, collects the binaries into `dist\`, Authenticode-signs `thumbwright_shell.dll`, `tw-worker.exe` and `twctl.exe` (REQ-SEC-4), builds the MSI from the signed files, signs the MSI, and then runs `signtool verify /pa /v` on every file, failing on any that is unsigned or not RFC 3161 timestamped. It needs the Windows SDK's `signtool.exe` and WiX v7 (`dotnet tool install --global wix --version 7.0.0`); WiX v7 requires accepting its Open Source Maintenance Fee EULA once (`wix eula accept wix7`; free below US$10,000/year of revenue, see `packaging/wix/README.md`). Azure Trusted Signing needs `AzureTrustedSignTool` on PATH and `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TRUSTED_SIGNING_ACCOUNT` and `AZURE_TRUSTED_SIGNING_PROFILE` in the environment. `dist\` is gitignored.
 
+## twctl
+
+`twctl --help` lists every command; `twctl <command> --help` shows one. Besides the image verbs (convert, resize, rotate, compress, strip, clip, wallpaper, ...):
+
+- `doctor [file] [--bundle out.zip]`: sectioned self-check (spec 7.1) with FIX hints; foreign ProgID-level thumbnail handlers are reported.
+- `batch <thumbnail|convert|info> <in|dir...> [--json]` and `batch --retry-from report.json`: multi-file jobs on all cores; the JSON report lists each file's outcome and the retry reruns only the failures.
+- `prebuild <dir|file...> [--size N,N] [--rebuild-all]`: warms Explorer's thumbnail cache (also the "Build thumbnails here" folder-menu entry).
+- `pdf` / `cbz <out> <in...> [--strict] [--json]`: combine images; `pdf --searchable` adds an invisible OCR text layer. The JSON result is `{combined, omitted[{input,cause,detail}], output, requested, status}`.
+- `ocr <in>`: Windows' built-in OCR engine (runs in `twctl`, never in the shell DLL).
+- `rename`, `sort`, `folder-icon`, `lock-screen`, `pick-color`, `settings`.
+- `convert-to avif|jxl`: pure-Rust encoders (AVIF through `ravif`/`rav1e` without assembly; JPEG XL is lossless only).
+- `upload <file...> [--copy] [--confirm]`, `upload-hosts [--open]`, `upload-history`: HTTPS POST to the hosts in `upload-hosts.conf` (spec 10.3) through WinHTTP. Nothing is sent without an explicit upload command; the menu verb asks first with Cancel as the default button.
+- `--mcp`: MCP server over stdio exposing the CLI's operations plus `view`.
+
 ## Clean-room rules
 
 This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, official Microsoft documentation and permissively licensed crate sources. Do not consult the reference product's binaries or source. See `REVIEW_HANDOFF.md` section 1.

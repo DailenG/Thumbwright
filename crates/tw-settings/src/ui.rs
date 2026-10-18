@@ -73,6 +73,7 @@ const ID_JPEG: i32 = 203;
 const ID_PNG: i32 = 204;
 const ID_KEEP_META: i32 = 205;
 const ID_KEEP_DATE: i32 = 206;
+const ID_PDF_MARGIN: i32 = 207;
 const ID_FILTER: i32 = 300;
 const ID_TYPES: i32 = 301;
 const ID_TYPES_COUNT: i32 = 302;
@@ -147,6 +148,7 @@ struct Controls {
     png: HWND,
     keep_meta: HWND,
     keep_date: HWND,
+    pdf_margin: HWND,
     filter: HWND,
     types: HWND,
     types_count: HWND,
@@ -366,7 +368,7 @@ impl App {
             "Conversion defaults",
             BS_GROUPBOX,
             0,
-            (X0, 124, CONTENT_W, 148),
+            (X0, 124, CONTENT_W, 174),
             0,
         );
         self.label(p, "JPEG quality (1-100):", (X0 + 14, 150, 190, 18), 0);
@@ -389,6 +391,12 @@ impl App {
             "Keep the original date on saved files",
             (X0 + 14, 234, 480, 20),
             ID_KEEP_DATE,
+        );
+        self.c.pdf_margin = self.check(
+            p,
+            "Add a margin around pages when combining images into a PDF",
+            (X0 + 14, 260, 480, 20),
+            ID_PDF_MARGIN,
         );
     }
 
@@ -621,6 +629,7 @@ impl App {
         set_text(self.c.png, &s.png_compression.to_string());
         set_checked(self.c.keep_meta, s.keep_metadata);
         set_checked(self.c.keep_date, s.preserve_file_date);
+        set_checked(self.c.pdf_margin, s.pdf_margin);
         set_checked(self.c.menu_on, s.menu_enabled);
         set_checked(self.c.menu_all, s.menu_all_file_types);
         set_checked(self.c.menu_here, s.menu_build_here);
@@ -726,6 +735,7 @@ impl App {
         s.png_compression = number(self.c.png, PAGE_GENERAL, "PNG compression level", 0, 9)? as u8;
         s.keep_metadata = is_checked(self.c.keep_meta);
         s.preserve_file_date = is_checked(self.c.keep_date);
+        s.pdf_margin = is_checked(self.c.pdf_margin);
         s.menu_enabled = is_checked(self.c.menu_on);
         s.menu_all_file_types = is_checked(self.c.menu_all);
         s.menu_build_here = is_checked(self.c.menu_here);
@@ -1248,6 +1258,7 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         png_compression: 4,
         keep_metadata: false,
         preserve_file_date: true,
+        pdf_margin: true,
         menu_enabled: false,
         menu_all_file_types: true,
         menu_build_here: false,

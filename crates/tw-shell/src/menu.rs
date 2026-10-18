@@ -31,10 +31,10 @@ use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DragQueryFileW, GCS_HELPTEXTA,
-    GCS_HELPTEXTW, GCS_VALIDATEA, GCS_VALIDATEW, GCS_VERBA, GCS_VERBW, HDROP, IContextMenu,
-    IContextMenu_Impl, IContextMenu2, IContextMenu2_Impl, IContextMenu3, IContextMenu3_Impl,
-    IShellExtInit, IShellExtInit_Impl, IShellItemImageFactory, SHCreateItemFromParsingName,
-    SIIGBF_BIGGERSIZEOK, SIIGBF_THUMBNAILONLY,
+    GCS_HELPTEXTW, GCS_VALIDATEA, GCS_VALIDATEW, GCS_VERBA, GCS_VERBW, GPFIDL_DEFAULT, HDROP,
+    IContextMenu, IContextMenu_Impl, IContextMenu2, IContextMenu2_Impl, IContextMenu3,
+    IContextMenu3_Impl, IShellExtInit, IShellExtInit_Impl, IShellItemImageFactory,
+    SHCreateItemFromParsingName, SHGetPathFromIDListEx, SIIGBF_BIGGERSIZEOK, SIIGBF_THUMBNAILONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, HMENU, InsertMenuItemW, MENUITEMINFOW, MFS_DISABLED, MFT_OWNERDRAW,
@@ -98,6 +98,12 @@ pub(crate) const TREE: &[Node] = &[
                 "tw.convert.webp",
                 "WebP (lossless)",
                 &["convert-to", "webp"],
+            ),
+            v("tw.convert.avif", "AVIF", &["convert-to", "avif"]),
+            v(
+                "tw.convert.jxl",
+                "JPEG XL (lossless)",
+                &["convert-to", "jxl"],
             ),
             v("tw.convert.bmp", "BMP", &["convert-to", "bmp"]),
             v("tw.convert.gif", "GIF", &["convert-to", "gif"]),
@@ -210,21 +216,112 @@ pub(crate) const TREE: &[Node] = &[
         verb: v("tw.clip", "Copy to clipboard", &["clip"]),
     },
     Node::Leaf {
+        id: "copy_text",
+        single: true,
+        verb: v("tw.ocr", "Copy text (OCR)", &["ocr", "--copy", "--window"]),
+    },
+    Node::Leaf {
         id: "copy_data_uri",
         single: true,
         verb: v("tw.datauri", "Copy as data URI", &["data-uri"]),
     },
+    // Network verb: twctl asks for confirmation (Cancel is the default button, REQ-SEC-3)
+    // before anything leaves the machine; the DLL itself never touches the network.
+    Node::Leaf {
+        id: "upload",
+        single: false,
+        verb: v(
+            "tw.upload",
+            "Upload (copy link)",
+            &["upload", "--copy", "--confirm"],
+        ),
+    },
     Node::Separator,
+    Node::Leaf {
+        id: "combine_pdf",
+        single: false,
+        verb: v("tw.pdf", "Combine into PDF", &["pdf", "--auto"]),
+    },
+    Node::Leaf {
+        id: "combine_pdf_searchable",
+        single: false,
+        verb: v(
+            "tw.pdf.ocr",
+            "Combine into searchable PDF (OCR)",
+            &["pdf", "--auto", "--searchable"],
+        ),
+    },
+    Node::Leaf {
+        id: "combine_cbz",
+        single: false,
+        verb: v("tw.cbz", "Combine into CBZ (comic)", &["cbz", "--auto"]),
+    },
+    Node::Separator,
+    Node::Sub {
+        id: "rename",
+        label: "Rename",
+        single: false,
+        items: &[
+            v(
+                "tw.rename.date",
+                "By date taken",
+                &["rename", "--by", "date"],
+            ),
+            v(
+                "tw.rename.camera",
+                "By camera + date",
+                &["rename", "--by", "camera-date"],
+            ),
+            v(
+                "tw.rename.artist",
+                "By artist - title (audio)",
+                &["rename", "--by", "artist-title"],
+            ),
+            v(
+                "tw.rename.track",
+                "By track - title (audio)",
+                &["rename", "--by", "track-title"],
+            ),
+            v(
+                "tw.rename.pattern",
+                "Rename with pattern\u{2026}",
+                &["rename", "--by", "pattern", "--ask"],
+            ),
+        ],
+    },
     Node::Leaf {
         id: "files_to_folder",
         single: false,
         verb: v("tw.tofolder", "Files to folder", &["to-folder"]),
+    },
+    Node::Sub {
+        id: "sort",
+        label: "Sort into folders",
+        single: false,
+        items: &[
+            v("tw.sort.size", "By image size", &["sort", "--by", "size"]),
+            v("tw.sort.date", "By date taken", &["sort", "--by", "date"]),
+            v(
+                "tw.sort.tag",
+                "By audio tag\u{2026}",
+                &["sort", "--by", "tag", "--ask"],
+            ),
+        ],
     },
     Node::Separator,
     Node::Leaf {
         id: "image_info",
         single: true,
         verb: v("tw.info", "Image info", &["info", "--gui"]),
+    },
+    Node::Leaf {
+        id: "pick_color",
+        single: true,
+        verb: v(
+            "tw.pickcolor",
+            "Pick color (eyedropper)\u{2026}",
+            &["pick-color"],
+        ),
     },
     Node::Separator,
     Node::Sub {
@@ -247,6 +344,23 @@ pub(crate) const TREE: &[Node] = &[
             v("tw.wall.fit", "Fitted", &["wallpaper", "--style", "fit"]),
             v("tw.wall.span", "Spanned", &["wallpaper", "--style", "span"]),
         ],
+    },
+    Node::Leaf {
+        id: "lock_screen",
+        single: true,
+        verb: v("tw.lockscreen", "Set as lock screen", &["lock-screen"]),
+    },
+    Node::Leaf {
+        id: "folder_icon",
+        single: true,
+        verb: v("tw.foldericon", "Set as folder icon", &["folder-icon"]),
+    },
+    Node::Separator,
+    // Always present (spec 6.3): `build` never hides it.
+    Node::Leaf {
+        id: SETTINGS_ID,
+        single: false,
+        verb: v("tw.settings", "Settings", &["settings"]),
     },
 ];
 
@@ -292,13 +406,21 @@ fn display_nodes(order: &[String]) -> Vec<&'static Node> {
     out
 }
 
+/// The folder-menu entry: prebuilds the Explorer thumbnail cache for the folder.
+const FOLDER_VERB: Verb = v("tw.prebuild", "Build thumbnails here", &["prebuild"]);
+
+/// Item id that is always shown regardless of the hidden-items setting.
+const SETTINGS_ID: &str = "settings";
+
 /// Every verb in the tree, in a stable order (for string-verb lookup and tests).
 fn all_verbs() -> impl Iterator<Item = Verb> {
-    TREE.iter().flat_map(|n| match n {
-        Node::Separator => Vec::new(),
-        Node::Leaf { verb, .. } => vec![*verb],
-        Node::Sub { items, .. } => items.to_vec(),
-    })
+    TREE.iter()
+        .flat_map(|n| match n {
+            Node::Separator => Vec::new(),
+            Node::Leaf { verb, .. } => vec![*verb],
+            Node::Sub { items, .. } => items.to_vec(),
+        })
+        .chain(std::iter::once(FOLDER_VERB))
 }
 
 /// Hand-off between the preview fetch thread and the menu object. Both sides touch it
@@ -445,6 +567,19 @@ fn dropped_files(data: &IDataObject) -> Result<Vec<PathBuf>> {
     }
 }
 
+/// File-system path of a folder item-id list (long paths included).
+fn folder_path(pidl: *const ITEMIDLIST) -> Result<PathBuf> {
+    let mut buf = vec![0u16; 32_768];
+    // SAFETY: `pidl` is the shell's folder PIDL (non-null, checked by the caller) and `buf`
+    // holds the character count passed.
+    let ok = unsafe { SHGetPathFromIDListEx(pidl, &mut buf, GPFIDL_DEFAULT) };
+    if !ok.as_bool() {
+        return Err(E_FAIL.into());
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(OsString::from_wide(&buf[..n])))
+}
+
 fn ext_of(p: &Path) -> String {
     p.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -461,6 +596,12 @@ pub(crate) fn menu_applies(files: &[PathBuf], settings: &Settings) -> bool {
             let e = ext_of(f);
             !tw_core::decode::route::chain_for_ext(&e).is_empty() && settings.type_enabled(&e)
         })
+}
+
+/// A selection made only of folders (the `Directory` handler), or the folder background
+/// (the shell passes the folder itself): the menu then offers only "Build thumbnails here".
+fn folder_selection(files: &[PathBuf]) -> bool {
+    !files.is_empty() && files.iter().all(|f| f.is_dir())
 }
 
 fn make_hresult_success(code: u32) -> HRESULT {
@@ -536,6 +677,9 @@ impl ContextMenu_Impl {
     fn build(&self, hmenu: HMENU, index: u32, id_first: u32, id_last: u32) -> Result<u32> {
         let files = self.files.borrow();
         let settings = Settings::load(&crate::install_dir());
+        if folder_selection(&files) {
+            return self.build_folder(hmenu, index, id_first, id_last, &settings, &files);
+        }
         if !menu_applies(&files, &settings) {
             return Ok(0);
         }
@@ -547,7 +691,8 @@ impl ContextMenu_Impl {
             commands: &mut commands,
         };
         let single = files.len() == 1;
-        let hidden = |id: &str| settings.hidden_menu_items.iter().any(|h| h == id);
+        let hidden =
+            |id: &str| id != SETTINGS_ID && settings.hidden_menu_items.iter().any(|h| h == id);
         let want_preview = single && settings.menu_preview != MenuPreview::Off;
 
         // SAFETY: menu handles created here are owned by the parent menu once inserted.
@@ -621,6 +766,34 @@ impl ContextMenu_Impl {
             };
             add_string(hmenu, top_pos, ids::PRODUCT_NAME, root_id, Some(sub))?;
         }
+        Ok(commands.len() as u32)
+    }
+
+    /// The folder menu: one entry that prebuilds the Explorer thumbnail cache.
+    fn build_folder(
+        &self,
+        hmenu: HMENU,
+        index: u32,
+        id_first: u32,
+        id_last: u32,
+        settings: &Settings,
+        _folders: &[PathBuf],
+    ) -> Result<u32> {
+        if !settings.menu_enabled || !settings.menu_build_here {
+            return Ok(0);
+        }
+        let mut commands = self.commands.borrow_mut();
+        commands.clear();
+        let mut b = Builder {
+            id_first,
+            id_last,
+            commands: &mut commands,
+        };
+        let Some(id) = b.next_id(Some(FOLDER_VERB)) else {
+            return Ok(0);
+        };
+        // SAFETY: `hmenu` is the shell's menu; the label is copied by the menu.
+        unsafe { add_string(hmenu, index, FOLDER_VERB.label, id, None)? };
         Ok(commands.len() as u32)
     }
 
@@ -764,12 +937,16 @@ unsafe fn draw_preview(di: &DRAWITEMSTRUCT, bitmap: Option<HBITMAP>) {
 impl IShellExtInit_Impl for ContextMenu_Impl {
     fn Initialize(
         &self,
-        _folder: *const ITEMIDLIST,
+        folder: *const ITEMIDLIST,
         data: Ref<IDataObject>,
         _progid: HKEY,
     ) -> Result<()> {
-        let data = data.ok()?;
-        *self.files.borrow_mut() = dropped_files(data)?;
+        *self.files.borrow_mut() = match data.ok() {
+            Ok(data) => dropped_files(data)?,
+            // The folder background passes no data object, only the folder itself.
+            Err(_) if !folder.is_null() => vec![folder_path(folder)?],
+            Err(e) => return Err(e),
+        };
         Ok(())
     }
 }
@@ -920,6 +1097,34 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
+    }
+
+    #[test]
+    fn folder_selection_needs_only_existing_directories() {
+        let dir = std::env::temp_dir();
+        assert!(folder_selection(std::slice::from_ref(&dir)));
+        assert!(!folder_selection(&[]));
+        assert!(!folder_selection(&[
+            dir,
+            PathBuf::from(r"C:\no\such\file.png")
+        ]));
+    }
+
+    #[test]
+    fn settings_is_last_and_present_exactly_once() {
+        let ids: Vec<&str> = TREE
+            .iter()
+            .filter_map(|n| match n {
+                Node::Leaf { id, .. } | Node::Sub { id, .. } => Some(*id),
+                Node::Separator => None,
+            })
+            .collect();
+        assert_eq!(ids.last(), Some(&SETTINGS_ID));
+        assert_eq!(ids.iter().filter(|i| **i == SETTINGS_ID).count(), 1);
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "item ids are unique");
     }
 
     #[test]

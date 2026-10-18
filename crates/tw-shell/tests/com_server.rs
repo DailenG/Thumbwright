@@ -438,24 +438,39 @@ fn context_menu_tree_for_single_png() {
             .map(|i| label(sub, i))
             .collect();
         assert_eq!(labels[0], "", "owner-drawn preview first (spec 6.2)");
-        for expected in [
-            "Convert into",
-            "Resize",
-            "Rotate / flip",
-            "Shrink for email",
-            "Compress to size",
-            "Strip metadata (EXIF/GPS)",
-            "Copy to clipboard",
-            "Copy as data URI",
-            "Files to folder",
-            "Image info",
-            "Set as wallpaper",
-        ] {
-            assert!(
-                labels.iter().any(|l| l == expected),
-                "missing {expected}: {labels:?}"
-            );
-        }
+        // Spec 6.2 order (separators and the preview are the empty labels).
+        let named: Vec<&str> = labels
+            .iter()
+            .map(String::as_str)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            named,
+            [
+                "Convert into",
+                "Resize",
+                "Rotate / flip",
+                "Shrink for email",
+                "Compress to size",
+                "Strip metadata (EXIF/GPS)",
+                "Copy to clipboard",
+                "Copy text (OCR)",
+                "Copy as data URI",
+                "Upload (copy link)",
+                "Combine into PDF",
+                "Combine into searchable PDF (OCR)",
+                "Combine into CBZ (comic)",
+                "Rename",
+                "Files to folder",
+                "Sort into folders",
+                "Image info",
+                "Pick color (eyedropper)\u{2026}",
+                "Set as wallpaper",
+                "Set as lock screen",
+                "Set as folder icon",
+                "Settings",
+            ]
+        );
         let conv = GetSubMenu(
             sub,
             labels.iter().position(|l| l == "Convert into").unwrap() as i32,
@@ -514,6 +529,54 @@ fn undrawn_menu_previews_do_not_leak_gdi_bitmaps() {
     // Each round used to leak up to two bitmaps (40 total); allow slack for
     // concurrently running tests' short-lived bitmaps.
     assert!(after <= before + 10, "GDI objects grew {before} -> {after}");
+}
+
+#[test]
+fn folder_menu_offers_only_build_thumbnails_here() {
+    let s = Scratch::new("menu-folder");
+    let (menu, hmenu, count) = menu_for(&s.0);
+    // SAFETY: inspecting a menu we own.
+    unsafe {
+        assert_eq!(count, 1);
+        assert_eq!(GetMenuItemCount(Some(hmenu)), 1);
+        assert_eq!(label(hmenu, 0), "Build thumbnails here");
+        let mut buf = [0u16; 64];
+        menu.GetCommandString(
+            0,
+            GCS_VERBW,
+            None,
+            PSTR(buf.as_mut_ptr().cast()),
+            buf.len() as u32,
+        )
+        .unwrap();
+        let verb = String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap()]);
+        assert_eq!(verb, "tw.prebuild");
+        let _ = DestroyMenu(hmenu);
+    }
+}
+
+#[test]
+fn folder_background_menu_is_built_from_the_folder_pidl() {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::SHParseDisplayName;
+    let s = Scratch::new("menu-bg");
+    // SAFETY: the background handler gets the folder's PIDL and no data object; the PIDL is
+    // freed after Initialize, and the menu is one we own.
+    unsafe {
+        let menu: IContextMenu = factory(&CLSID_MENU).unwrap().CreateInstance(None).unwrap();
+        let mut pidl = std::ptr::null_mut();
+        SHParseDisplayName(&HSTRING::from(s.0.as_os_str()), None, &mut pidl, 0, None).unwrap();
+        menu.cast::<IShellExtInit>()
+            .unwrap()
+            .Initialize(Some(pidl), None::<&IDataObject>, None)
+            .unwrap();
+        CoTaskMemFree(Some(pidl.cast()));
+        let hmenu = CreatePopupMenu().unwrap();
+        let hr = menu.QueryContextMenu(hmenu, 0, 1, 0x7FFF, CMF_NORMAL);
+        assert_eq!(hr.0 & 0xFFFF, 1);
+        assert_eq!(label(hmenu, 0), "Build thumbnails here");
+        let _ = DestroyMenu(hmenu);
+    }
 }
 
 #[test]

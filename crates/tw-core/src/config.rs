@@ -125,6 +125,8 @@ pub struct Settings {
     pub disabled_types: Vec<String>,
     /// Menu verb ids the user hid.
     pub hidden_menu_items: Vec<String>,
+    /// Add a margin around pages of combined PDFs.
+    pub pdf_margin: bool,
     pub verbose_log: bool,
     /// Video thumbnail frame offset in percent of the duration (0-100).
     pub video_frame_percent: u8,
@@ -149,6 +151,7 @@ impl Default for Settings {
             menu_order: Vec::new(),
             disabled_types: Vec::new(),
             hidden_menu_items: Vec::new(),
+            pdf_margin: false,
             verbose_log: false,
             video_frame_percent: limits::DEFAULT_VIDEO_PERCENT,
         }
@@ -253,6 +256,7 @@ impl Settings {
                     .filter(|id| MENU_ITEMS.iter().all(|i| i.id != id || i.hideable))
                     .collect();
             }
+            "PdfMargin" => self.pdf_margin = parse_bool(v).unwrap_or(false),
             "VerboseLog" => self.verbose_log = parse_bool(v).unwrap_or(false),
             "VideoFramePercent" => {
                 if let Ok(n) = v.parse::<u64>() {
@@ -288,6 +292,7 @@ impl Settings {
             ("MenuEnabled", Stored::flag(self.menu_enabled)),
             ("MenuAllFileTypes", Stored::flag(self.menu_all_file_types)),
             ("MenuBuildHere", Stored::flag(self.menu_build_here)),
+            ("PdfMargin", Stored::flag(self.pdf_margin)),
             ("MenuPreview", Stored::Number(self.menu_preview.code())),
             ("MenuOrder", Stored::list(&self.menu_order)),
             ("DisabledTypes", Stored::list(&self.disabled_types)),
@@ -508,6 +513,7 @@ mod tests {
             menu_enabled: false,
             menu_all_file_types: true,
             menu_build_here: false,
+            pdf_margin: true,
             menu_preview: MenuPreview::InContextMenu,
             menu_order: vec!["wallpaper".into(), "resize".into()],
             disabled_types: vec!["png".into(), "svg".into()],
