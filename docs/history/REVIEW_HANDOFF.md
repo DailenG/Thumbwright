@@ -1,7 +1,9 @@
 # Review Handoff: Thumbwright (clean-room Explorer thumbnail + context-menu extension)
 
-Workspace: `C:\CleanRoom\02_Build_Room` (not a git repository; there is no history to diff).
-Size: ~10.1k lines of Rust across 4 crates, 133 tests.
+> Historical document: the brief given to the independent reviewer in the build room, plus the integration notes added afterwards (section 4b). Review results: `REVIEW_FINDINGS.md` next to this file. Paths and toolchain notes describe the original build room.
+
+Workspace at the time: `C:\CleanRoom\02_Build_Room` (not a git repository; there is no history to diff).
+Size at the time: ~10.1k lines of Rust across 4 crates, 133 tests.
 
 ## 1. Clean-room rules (binding on the reviewer)
 

@@ -8,13 +8,13 @@ Clean-room Windows Explorer thumbnail provider and context-menu toolkit, written
 - `thumbwright-settings.exe`: settings window (General, File types, Menu, Limits, Preview, Maintenance). Saves to `Thumbwright.ini` (portable) or `HKCU\Software\Thumbwright` (installed); toggling a file type updates the per-user registration through the journaled engine. `--self-test` creates, drives and destroys the window without showing it.
 - `packaging/msix/`: sparse MSIX package that declares the Windows 11 menu verb. `build.ps1 -Publisher "CN=<signing certificate subject>"` builds it unsigned with `makeappx`; signing and registration (`Add-AppxPackage -ExternalLocation <install dir>`) are release steps.
 
-Formats: 315 of the 363 formats in the spec matrix have a thumbnail route (`twctl formats --json`, entries with `thumbnail: true`; the 48 others are listed with the reason in `REVIEW_HANDOFF.md`). They cover camera RAW, JPEG XL, JPEG 2000, HEIC/AVIF (OS codecs), video frames (Media Foundation, offset set by `VideoFramePercent`), PDF, legacy Office and OLE previews, ebooks, archives, Android packages, design and CAD previews, meshes, and the scientific and legacy bitmap long tail. Types without a route are never registered, so Windows' own handlers stay in charge. Measurements of the thumbnail path and the decisions behind pre-spawned workers: `docs/performance.md`.
+Formats: 315 of the 363 formats in the spec matrix have a thumbnail route (`twctl formats --json`, entries with `thumbnail: true`; the 48 others are listed with the reason in `docs/history/REVIEW_HANDOFF.md` section 5). They cover camera RAW, JPEG XL, JPEG 2000, HEIC/AVIF (OS codecs), video frames (Media Foundation, offset set by `VideoFramePercent`), PDF, legacy Office and OLE previews, ebooks, archives, Android packages, design and CAD previews, meshes, and the scientific and legacy bitmap long tail. Types without a route are never registered, so Windows' own handlers stay in charge. Measurements of the thumbnail path and the decisions behind pre-spawned workers: `docs/performance.md`.
 
-Requirements: `FUNCTIONAL_SPEC.md`. Architecture, invariants and review state: `REVIEW_HANDOFF.md`, `REVIEW_FINDINGS.md`. Open work is tracked as GitHub issues.
+Requirements: `FUNCTIONAL_SPEC.md`. Architecture, invariants I1-I8, verification state and known gaps: `docs/history/REVIEW_HANDOFF.md` (sections 3-5); security review and its fixes: `docs/history/REVIEW_FINDINGS.md`. Open work is tracked as GitHub issues.
 
 ## Build
 
-Requires Windows x64 and the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it). Linking needs the MSVC CRT/SDK libraries: either Visual Studio Build Tools ("Desktop development with C++"), or the original build room's self-contained setup (rust-lld + xwin under a gitignored `.toolchain/`, wired up by `scripts/devenv.ps1`). No crate may compile C/C++ (no C compiler is assumed).
+Requires Windows x64 and the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it). Linking needs the MSVC CRT/SDK libraries: either Visual Studio Build Tools ("Desktop development with C++"), or the original build room's self-contained setup (rust-lld + xwin under a gitignored `.toolchain/`, wired up by `scripts/devenv.ps1`). The CRT is linked statically (`.cargo/config.toml`), so the binaries need no VC++ redistributable. No crate may compile C/C++ (no C compiler is assumed).
 
 ```
 cargo test --workspace
@@ -44,7 +44,7 @@ The settings window (`thumbwright-settings.exe`) edits the same settings. The co
 
 ## Install (per-machine MSI)
 
-`Thumbwright-<version>-x64.msi` installs to `Program Files\Thumbwright` for all users and needs elevation (REQ-REG-8). It ships `thumbwright_shell.dll`, `tw-worker.exe`, `twctl.exe`, `LICENSE` and `THIRD_PARTY_LICENSES.md` (and `thumbwright-settings.exe` when the build produced it), and never a `Thumbwright.ini`, so an installed copy is not in portable mode.
+`Thumbwright-<version>-x64.msi` installs to `Program Files\Thumbwright` for all users and needs elevation (REQ-REG-8). It ships `thumbwright_shell.dll`, `tw-worker.exe`, `twctl.exe`, `thumbwright-settings.exe`, `LICENSE` and `THIRD_PARTY_LICENSES.md`, and never a `Thumbwright.ini`, so an installed copy is not in portable mode.
 
 ```
 msiexec /i Thumbwright-0.1.0-x64.msi /qn      # silent install
@@ -82,7 +82,7 @@ The script runs the dependency audit, `cargo build --release --workspace --locke
 
 ## Clean-room rules
 
-This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, official Microsoft documentation and permissively licensed crate sources. Do not consult the reference product's binaries or source. See `REVIEW_HANDOFF.md` section 1.
+This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, official Microsoft documentation and permissively licensed crate sources. Do not consult the reference product's binaries or source. The reference product is deliberately not named in this repository. See `docs/history/REVIEW_HANDOFF.md` section 1.
 
 ## License
 
