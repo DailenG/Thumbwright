@@ -9,12 +9,14 @@
 //!   next tier can try.
 
 pub mod audio;
+pub mod j2k;
 pub mod jxl;
 pub mod pcx;
 pub mod psd;
 pub mod raster;
 pub mod raw;
 pub mod route;
+pub mod sci;
 pub mod sgi;
 pub mod svg;
 #[cfg(windows)]

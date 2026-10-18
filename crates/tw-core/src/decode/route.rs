@@ -30,6 +30,10 @@ pub enum Decoder {
     Svg = 9,
     /// Windows Imaging Component (OS codecs, C++): HEIF, JPEG XR, AVIF, RAW extension.
     Wic = 10,
+    /// Scientific, medical, film, texture and network formats (FITS, DPX, DICOM, XCF, ...).
+    Sci = 40,
+    /// JPEG 2000 via `hayro-jpeg2000` (pure Rust, not cancellable: runs in the worker).
+    J2k = 41,
 }
 
 /// Where a decoder may run (REQ-ISO-2 / REQ-ISO-3).
@@ -45,7 +49,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 10] = [
+    pub const ALL: [Decoder; 12] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -56,11 +60,13 @@ impl Decoder {
         Self::Zip,
         Self::Svg,
         Self::Wic,
+        Self::Sci,
+        Self::J2k,
     ];
 
     pub fn placement(self) -> Placement {
         match self {
-            Self::Svg | Self::Wic | Self::Audio => Placement::Worker,
+            Self::Svg | Self::Wic | Self::Audio | Self::J2k => Placement::Worker,
             _ => Placement::InProc,
         }
     }
@@ -85,6 +91,8 @@ impl Decoder {
             Self::Raw => super::raw::extract(data),
             Self::Audio => super::audio::extract(data, ext),
             Self::Zip => super::zip_preview::extract(data, ext),
+            Self::Sci => super::sci::decode(data, ext),
+            Self::J2k => super::j2k::decode(data, edge),
             Self::Svg => super::svg::render(data, edge),
             #[cfg(windows)]
             Self::Wic => super::wic::decode(data, edge),
@@ -117,6 +125,8 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
         (super::raw::EXTENSIONS, &[Raw, Wic]),
         (super::audio::EXTENSIONS, &[Audio]),
         (super::zip_preview::EXTENSIONS, &[Zip]),
+        (super::sci::EXTENSIONS, &[Sci]),
+        (super::j2k::EXTENSIONS, &[J2k]),
     ];
     single
         .iter()
@@ -184,6 +194,8 @@ mod tests {
             .chain(super::super::raw::EXTENSIONS)
             .chain(super::super::audio::EXTENSIONS)
             .chain(super::super::zip_preview::EXTENSIONS)
+            .chain(super::super::sci::EXTENSIONS)
+            .chain(super::super::j2k::EXTENSIONS)
         {
             assert!(formats::lookup(ext).is_some(), "{ext} not in matrix");
         }
@@ -194,6 +206,7 @@ mod tests {
         assert_eq!(Decoder::Wic.placement(), Placement::Worker);
         assert_eq!(Decoder::Svg.placement(), Placement::Worker);
         assert_eq!(Decoder::Audio.placement(), Placement::Worker);
+        assert_eq!(Decoder::J2k.placement(), Placement::Worker);
         assert_eq!(Decoder::Raster.placement(), Placement::InProc);
     }
 
