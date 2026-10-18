@@ -467,9 +467,15 @@ function Get-RegistryValue {
 # Subtrees owned and rewritten by Windows itself while anything runs: the shell's resource-string
 # cache, Explorer's per-folder view state (Bags/BagMRU), and the Host Activity Manager's last-use
 # timestamps of other packaged apps (AppModel\SystemAppData\<package>\HAM). They are not product
-# state and change between any two exports, so they are left out. Everything else, including the
-# rest of AppModel and PackagedCom, is still compared.
-$script:OsVolatileKeys = '(?i)^\[HKEY_CURRENT_USER\\Software\\Classes\\Local Settings\\(MuiCache|Software\\Microsoft\\Windows\\Shell\\(Bags|BagMRU)|Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\SystemAppData\\[^\\\]]+\\HAM)(\\|\])'
+# state and change between any two exports, so they are left out.
+#
+# Also left out: the AppX deployment engine's own state (AppModel, AppContainer, PackagedCom). The
+# MSI never writes it; Windows writes it when the sparse package is registered for a user (which
+# this script does on purpose, as a sign-in would) and clears it on its own schedule after the
+# package is removed, so it can outlive an uninstall by minutes. Package state is checked through
+# the AppX APIs instead: provisioned after install, provisioned for nobody and registered for no
+# user after uninstall. Everything else in the exported keys is still compared.
+$script:OsVolatileKeys = '(?i)^\[HKEY_(CURRENT_USER\\Software|LOCAL_MACHINE\\SOFTWARE)\\Classes\\(Local Settings\\(MuiCache|Software\\Microsoft\\Windows\\Shell\\(Bags|BagMRU)|Software\\Microsoft\\Windows\\CurrentVersion\\(AppModel|AppContainer))|PackagedCom)(\\|\])'
 
 # A .reg export is UTF-16. Flatten to "key header" and "key header<TAB>value line" entries so that a
 # value line is compared together with the key it belongs to (a bare '@="x"' line is meaningless alone).
