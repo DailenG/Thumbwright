@@ -63,7 +63,8 @@ pub fn read_input(p: &Path, max_bytes: u64) -> Result<Vec<u8>> {
 
 /// Full-resolution decode through the format router. Memory-safe tiers run in this
 /// process; audio tags go through the worker, because a hostile tag can overflow the
-/// stack, which would end `twctl` without the `--notify` message box.
+/// stack, which would end `twctl` without the `--notify` message box, and video, PDF and
+/// metafile decoding (OS codecs) go through the worker for the same reason.
 pub fn decode_full(p: &Path, max_bytes: u64) -> Result<DynamicImage> {
     let data = read_input(p, max_bytes)?;
     let ext = ext_of(p);
@@ -71,14 +72,27 @@ pub fn decode_full(p: &Path, max_bytes: u64) -> Result<DynamicImage> {
     if chain.is_empty() {
         return Err(format!("{}: unsupported file type", p.display()));
     }
-    if chain.contains(&Decoder::Audio) {
+    // OS-codec and tag-parsing decoders never run in this process: they go through the
+    // Job-Object-confined worker, like in the shell.
+    let isolated = chain.iter().copied().find(|d| {
+        matches!(
+            d,
+            Decoder::Audio | Decoder::Video | Decoder::Pdf | Decoder::Metafile
+        )
+    });
+    if let Some(decoder) = isolated {
+        let edge = match decoder {
+            Decoder::Pdf | Decoder::Metafile => VECTOR_EDGE,
+            _ => COVER_ART_EDGE,
+        };
         let t = worker::run(
             &exe_dir().join(ids::WORKER_EXE_NAME),
-            Decoder::Audio,
+            decoder,
             &ext,
             Arc::new(data),
-            COVER_ART_EDGE,
-            worker::budget(Decoder::Audio),
+            edge,
+            tw_core::limits::DEFAULT_VIDEO_PERCENT,
+            worker::budget(decoder),
         )
         .map_err(|e| format!("{}: {e}", p.display()))?;
         return Ok(thumbnail_to_image(&t).into());

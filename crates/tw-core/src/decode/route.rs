@@ -5,6 +5,7 @@
 use image::DynamicImage;
 
 use super::{DecodeError, Result};
+use crate::limits;
 
 /// One decoder stage. The discriminant is the worker wire code (see `protocol`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -43,6 +44,12 @@ pub enum Decoder {
     Ole = 50,
     /// DjVu: first page rendered via `djvu-rs`, `TH44` thumbnail fallback.
     Djvu = 51,
+    /// Video: representative frame via Media Foundation (OS codecs, C++).
+    Video = 20,
+    /// PDF / Illustrator: first page via `Windows.Data.Pdf` (OS renderer, C++).
+    Pdf = 21,
+    /// Windows metafiles (EMF/WMF and gzip-compressed forms): GDI playback.
+    Metafile = 22,
 }
 
 /// Where a decoder may run (REQ-ISO-2 / REQ-ISO-3).
@@ -58,7 +65,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 16] = [
+    pub const ALL: [Decoder; 19] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -75,11 +82,20 @@ impl Decoder {
         Self::Bitmap,
         Self::Ole,
         Self::Djvu,
+        Self::Video,
+        Self::Pdf,
+        Self::Metafile,
     ];
 
     pub fn placement(self) -> Placement {
         match self {
-            Self::Svg | Self::Wic | Self::Audio | Self::Djvu => Placement::Worker,
+            Self::Svg
+            | Self::Wic
+            | Self::Audio
+            | Self::Djvu
+            | Self::Video
+            | Self::Pdf
+            | Self::Metafile => Placement::Worker,
             _ => Placement::InProc,
         }
     }
@@ -93,8 +109,21 @@ impl Decoder {
     }
 
     /// Runs this decoder. `edge` is the requested thumbnail edge; vector decoders
-    /// rasterise directly at that size, raster decoders ignore it.
+    /// rasterise directly at that size, raster decoders ignore it. Video frames are taken at
+    /// the default offset; see [`Decoder::run_with`].
     pub fn run(self, data: &[u8], ext: &str, edge: u32) -> Result<DynamicImage> {
+        self.run_with(data, ext, edge, limits::DEFAULT_VIDEO_PERCENT)
+    }
+
+    /// Like [`Decoder::run`], with the generic decoder parameter: the video frame offset in
+    /// percent of the duration (0-100, larger values are clamped).
+    pub fn run_with(
+        self,
+        data: &[u8],
+        ext: &str,
+        edge: u32,
+        video_percent: u8,
+    ) -> Result<DynamicImage> {
         match self {
             Self::Raster => super::raster::decode(data, Some(ext)),
             Self::Jxl => super::jxl::decode(data),
@@ -115,9 +144,32 @@ impl Decoder {
             Self::Wic => super::wic::decode(data, edge),
             #[cfg(not(windows))]
             Self::Wic => Err(DecodeError::Unsupported),
+            #[cfg(windows)]
+            Self::Video => super::video::extract(data, ext, video_percent.min(100)),
+            #[cfg(windows)]
+            Self::Pdf => super::pdf::render(data, edge),
+            #[cfg(windows)]
+            Self::Metafile => super::metafile::render(data, edge),
+            #[cfg(not(windows))]
+            Self::Video | Self::Pdf | Self::Metafile => Err(DecodeError::Unsupported),
         }
     }
 }
+
+/// Video containers decoded through Media Foundation (spec 5.6). Only containers whose
+/// Media Foundation source opened real files on the reference OS (Windows 11 26340) are
+/// routed. Not routed, because the OS cannot open them there (no source, or the MPEG-1/2
+/// source fails with 0xC00D36E5 "operation on the current offset is not permitted",
+/// even for file URLs, without the optional MPEG-2 video extension):
+/// flv, mpg, mpeg, m1v, m2v, mpv, mp2v, m2p, vob.
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mov", "qt", "mkv", "webm", "avi", "wmv", "asf", "f4v", "3gp", "3g2", "ts",
+    "m2ts", "mts", "ogv", "divx",
+];
+/// PDF and PDF-compatible Illustrator files.
+pub const PDF_EXTENSIONS: &[&str] = &["pdf", "ai"];
+/// Windows metafiles, plain and gzip-compressed.
+pub const METAFILE_EXTENSIONS: &[&str] = &["emf", "emz", "wmf", "wmz", "emg"];
 
 const WIC_ONLY: &[&str] = &[
     "heic", "heif", "hif", "heics", "heifs", "avci", "avif", "avifs", "jxr", "wdp", "hdp", "wmp",
@@ -148,6 +200,9 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
         (super::bitmap::EXTENSIONS, &[Bitmap]),
         (super::ole::EXTENSIONS, &[Ole]),
         (super::djvu::EXTENSIONS, &[Djvu]),
+        (VIDEO_EXTENSIONS, &[Video]),
+        (PDF_EXTENSIONS, &[Pdf]),
+        (METAFILE_EXTENSIONS, &[Metafile]),
     ];
     single
         .iter()
@@ -221,6 +276,9 @@ mod tests {
             .chain(super::super::bitmap::EXTENSIONS)
             .chain(super::super::ole::EXTENSIONS)
             .chain(super::super::djvu::EXTENSIONS)
+            .chain(VIDEO_EXTENSIONS)
+            .chain(PDF_EXTENSIONS)
+            .chain(METAFILE_EXTENSIONS)
         {
             assert!(formats::lookup(ext).is_some(), "{ext} not in matrix");
         }
@@ -231,9 +289,31 @@ mod tests {
         assert_eq!(Decoder::Wic.placement(), Placement::Worker);
         assert_eq!(Decoder::Svg.placement(), Placement::Worker);
         assert_eq!(Decoder::Audio.placement(), Placement::Worker);
+        assert_eq!(Decoder::Video.placement(), Placement::Worker);
+        assert_eq!(Decoder::Pdf.placement(), Placement::Worker);
+        assert_eq!(Decoder::Metafile.placement(), Placement::Worker);
         assert_eq!(Decoder::Raster.placement(), Placement::InProc);
         assert_eq!(Decoder::Djvu.placement(), Placement::Worker);
         assert_eq!(Decoder::Ole.placement(), Placement::InProc);
+    }
+
+    #[test]
+    fn video_pdf_and_metafile_extensions_route_to_their_workers() {
+        for ext in VIDEO_EXTENSIONS {
+            assert_eq!(chain_for_ext(ext), &[Decoder::Video], "{ext}");
+        }
+        assert_eq!(plan(Some("mp4"), b"\0\0\0\x18ftypmp42"), &[Decoder::Video]);
+        assert_eq!(chain_for_ext("pdf"), &[Decoder::Pdf]);
+        assert_eq!(chain_for_ext("ai"), &[Decoder::Pdf]);
+        for ext in ["emf", "emz", "wmf", "wmz"] {
+            assert_eq!(chain_for_ext(ext), &[Decoder::Metafile], "{ext}");
+        }
+        // Containers Media Foundation cannot open on the reference OS stay unrouted.
+        for ext in [
+            "flv", "mpg", "mpeg", "m1v", "m2v", "mpv", "mp2v", "m2p", "vob",
+        ] {
+            assert!(chain_for_ext(ext).is_empty(), "{ext}");
+        }
     }
 
     #[test]

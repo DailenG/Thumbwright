@@ -1211,6 +1211,7 @@ dependencies = [
  "resvg",
  "ruzstd",
  "windows",
+ "windows-core",
  "windows-registry",
  "zip",
 ]

@@ -30,6 +30,8 @@ pub struct Settings {
     /// Menu verb ids the user hid.
     pub hidden_menu_items: Vec<String>,
     pub verbose_log: bool,
+    /// Video thumbnail frame offset in percent of the duration (0-100).
+    pub video_frame_percent: u8,
 }
 
 impl Default for Settings {
@@ -44,6 +46,7 @@ impl Default for Settings {
             disabled_types: Vec::new(),
             hidden_menu_items: Vec::new(),
             verbose_log: false,
+            video_frame_percent: limits::DEFAULT_VIDEO_PERCENT,
         }
     }
 }
@@ -99,6 +102,11 @@ impl Settings {
             "DisabledTypes" => self.disabled_types = parse_list(v),
             "HiddenMenuItems" => self.hidden_menu_items = parse_list(v),
             "VerboseLog" => self.verbose_log = parse_bool(v).unwrap_or(false),
+            "VideoFramePercent" => {
+                if let Ok(n) = v.parse::<u64>() {
+                    self.video_frame_percent = n.min(100) as u8;
+                }
+            }
             _ => {}
         }
     }
@@ -168,6 +176,7 @@ mod tests {
         assert_eq!(s.max_thumb_px, 1024);
         assert!(s.menu_enabled && !s.menu_all_file_types && s.thumbnails_enabled);
         assert_eq!(s.menu_preview, MenuPreview::InSubmenu);
+        assert_eq!(s.video_frame_percent, 30);
     }
 
     #[test]
@@ -189,5 +198,17 @@ mod tests {
         let s = Settings::from_ini("[Settings]\nMaxThumbPx=99999\nMaxFileMB=0\n");
         assert_eq!(s.max_thumb_px, 1024);
         assert_eq!(s.max_file_mb, 1);
+    }
+
+    #[test]
+    fn video_frame_percent_is_clamped_and_junk_is_ignored() {
+        let f = |v: &str| Settings::from_ini(&format!("[Settings]\nVideoFramePercent={v}\n"));
+        assert_eq!(f("0").video_frame_percent, 0);
+        assert_eq!(f("75").video_frame_percent, 75);
+        assert_eq!(f("100").video_frame_percent, 100);
+        assert_eq!(f("101").video_frame_percent, 100);
+        assert_eq!(f("99999999999").video_frame_percent, 100);
+        assert_eq!(f("-5").video_frame_percent, 30);
+        assert_eq!(f("abc").video_frame_percent, 30);
     }
 }

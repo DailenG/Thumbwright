@@ -23,9 +23,17 @@ pub mod raw;
 pub mod route;
 pub mod sgi;
 pub mod svg;
+pub mod zip_preview;
+#[cfg(windows)]
+pub mod memstream;
+#[cfg(windows)]
+pub mod metafile;
+#[cfg(windows)]
+pub mod pdf;
+#[cfg(windows)]
+pub mod video;
 #[cfg(windows)]
 pub mod wic;
-pub mod zip_preview;
 
 use image::DynamicImage;
 
