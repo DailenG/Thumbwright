@@ -131,6 +131,7 @@ fn a_prespawned_worker_still_hits_the_wall_clock_budget() {
     let engine = Engine {
         worker_exe: worker_exe(),
         max_tier_time: Duration::from_millis(300),
+        video_percent: tw_core::limits::DEFAULT_VIDEO_PERCENT,
     };
     let start = Instant::now();
     let r = engine.thumbnail(Arc::new(slow.into_bytes()), Some("svg"), 1024);

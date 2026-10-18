@@ -92,6 +92,8 @@ const ID_MAX_THUMB: i32 = 501;
 const ID_PREVIEW_OFF: i32 = 600;
 const ID_PREVIEW_SUB: i32 = 601;
 const ID_PREVIEW_MENU: i32 = 602;
+const ID_CLOUD: i32 = 603;
+const ID_VIDEO_PCT: i32 = 604;
 const ID_MODE: i32 = 700;
 const ID_REPAIR: i32 = 701;
 const ID_REBUILD: i32 = 702;
@@ -155,6 +157,8 @@ struct Controls {
     max_file: HWND,
     max_thumb: HWND,
     preview: [HWND; 3],
+    cloud: HWND,
+    video_pct: HWND,
     mode: HWND,
 }
 
@@ -518,6 +522,29 @@ impl App {
             (X0 + 14, 82, 480, 20),
             ID_PREVIEW_MENU,
         );
+        self.add(
+            p,
+            w!("BUTTON"),
+            "Thumbnail content",
+            BS_GROUPBOX,
+            0,
+            (X0, 138, CONTENT_W, 90),
+            0,
+        );
+        self.c.cloud = self.check(
+            p,
+            "Thumbnails in cloud folders (never downloads online-only files)",
+            (X0 + 14, 160, 490, 20),
+            ID_CLOUD,
+        );
+        self.label(
+            p,
+            "Video thumbnail frame (% into the video):",
+            (X0 + 14, 194, 270, 18),
+            0,
+        );
+        self.c.video_pct = self.number_edit(p, (X0 + 290, 190, 60, 22), ID_VIDEO_PCT);
+        self.label(p, "0 - 100", (X0 + 360, 194, 100, 18), 0);
     }
 
     fn build_maintenance(&mut self) {
@@ -587,6 +614,8 @@ impl App {
         self.base = s.clone();
         set_checked(self.c.thumbs, s.thumbnails_enabled);
         set_checked(self.c.embedded, s.use_embedded_thumbs);
+        set_checked(self.c.cloud, s.cloud_thumbnails);
+        set_text(self.c.video_pct, &s.video_frame_percent.to_string());
         set_checked(self.c.verbose, s.verbose_log);
         set_text(self.c.jpeg, &s.jpeg_quality.to_string());
         set_text(self.c.png, &s.png_compression.to_string());
@@ -689,6 +718,9 @@ impl App {
         let mut s = self.base.clone();
         s.thumbnails_enabled = is_checked(self.c.thumbs);
         s.use_embedded_thumbs = is_checked(self.c.embedded);
+        s.cloud_thumbnails = is_checked(self.c.cloud);
+        s.video_frame_percent =
+            number(self.c.video_pct, PAGE_PREVIEW, "Video thumbnail frame", 0, 100)? as u8;
         s.verbose_log = is_checked(self.c.verbose);
         s.jpeg_quality = number(self.c.jpeg, PAGE_GENERAL, "JPEG quality", 1, 100)? as u8;
         s.png_compression = number(self.c.png, PAGE_GENERAL, "PNG compression level", 0, 9)? as u8;
@@ -1228,6 +1260,7 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         disabled_types: vec!["png".into(), "svg".into(), "not-listed".into()],
         hidden_menu_items: vec!["email".into(), "future_item".into()],
         verbose_log: true,
+        video_frame_percent: 60,
     };
     let hwnd = create(dir, settings.clone(), false, false)?;
     let check = |ok: bool, what: &str| if ok { Ok(()) } else { Err(what.to_string()) };
@@ -1309,6 +1342,13 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
     check(
         matches!(bad, Err((PAGE_GENERAL, _))),
         "JPEG quality 0 must be rejected",
+    )?;
+
+    with_app(|a| set_text(a.c.video_pct, "101"));
+    let bad = with_app(|a| a.collect()).ok_or("window state busy")?;
+    check(
+        matches!(bad, Err((PAGE_PREVIEW, _))),
+        "video frame 101% must be rejected",
     )?;
 
     // SAFETY: destroys the window created above, on its own thread.

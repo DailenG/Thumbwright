@@ -50,12 +50,13 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 
 **Key invariants (verify they hold):**
 - **I1** The thumbnail class implements only `IThumbnailProvider` + `IInitializeWithStream` (REQ-COM-1). On failure it returns `E_FAIL`, never a placeholder bitmap (REQ-COM-7).
-- **I2** No C/C++ decoder runs in the surrogate. WIC (OS C++ codecs), SVG (resvg, not cancellable) and audio tags (lofty: unbounded recursion and tag inflation) run only in the worker (`decode/route.rs` `Decoder::placement`).
+- **I2** No C/C++ decoder runs in the surrogate. WIC, Media Foundation (video), Windows.Data.Pdf, GDI metafile playback (OS C++ codecs), SVG (resvg, not cancellable), audio tags (lofty: unbounded recursion and tag inflation), JPEG 2000 and DjVu (pure Rust, but unable to bound allocation or be cancelled), and 7z/RAR/Live Photo bundles (real decompression with attacker-chosen dictionary sizes; Live Photo stills may need WIC) run only in the worker (`decode/route.rs` `Decoder::placement`).
 - **I3** Every tier is bounded:
   - in-proc decoders: 15 s;
   - SVG: 13 s;
   - WIC: 120 s;
-  - worker Job Object: 512 MiB memory (512 MiB plus the input size for audio), 20 s user CPU, 1 process, kill-on-close; audio wall budget 15 s.
+  - video frame, PDF page and metafile render: 30 s each;
+  - worker Job Object: 512 MiB memory (512 MiB plus the input size for audio, PDF and legacy-Office metafile thumbnails; 1.5 GiB plus the input size for video; 512 MiB plus twice the input size for 7z/RAR), 20 s user CPU, 1 process, kill-on-close; audio wall budget 15 s.
 
   `Timeout` and `TooLarge` never fall through to the next tier.
 - **I4** No thread of ours outlives the DLL. Finished decode threads are joined; an overrunning thread pins the module (`pipeline::pin_this_module`); the menu preview thread is joined or pins the module.
@@ -81,7 +82,10 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 
 ## 5. Known gaps (by design for this milestone; don't report as bugs, but do report if they cause harm)
 
-- **Coverage:** 160 of 363 spec formats are routed. Unrouted types are never registered, so Windows' own handlers stay in charge. Not handled: video, PDF/DjVu, legacy binary Office, WMA/DSF, APK, most of the legacy raster long tail.
+- **Coverage:** 315 of 363 spec formats are routed (`twctl formats --json`, `thumbnail: true`). Unrouted types are never registered, so Windows' own handlers stay in charge. Not routed (48), with reason:
+  - MPEG-1/2 and Flash video (`flv mpg mpeg m1v m2v mpv mp2v m2p vob`): Media Foundation cannot open them on the reference OS (no FLV source; the MPEG program-stream source fails without the optional MPEG-2 video extension).
+  - Layout not known with confidence and no real files to verify against: `fl32 jnx pdb pwp rmf sct sf3 sfw sti tm2 wpg`, SketchUp (`skp skb`), Rhino `3dm`, 3ds Max `max`, Cinema 4D `c4d`, SolidWorks (`sldprt sldasm slddrw`), `spla`, `cmx`, Paint Shop Pro (`psp pspimage pspbrush pspframe psptube pspshape pspselection pspmask tub`), Affinity (`af afphoto afdesign afpub aftemplate`), and the RAW variants `mdc bay cap pxn`.
+  - Metafile thumbnails inside legacy Office files are rendered (`Decoder::OleMetafile`); metafile previews inside DOS EPS and DWG files are not decoded.
 - **Missing COM classes:** none. The cloud-folder class (off by default; refuses online-only files, REQ-ISO-5), preview handler and property handler (installer-only: `DllRegisterServer` under HKLM) and the `IExplorerCommand` modern menu exist. Not done: linking the cloud class to a specific sync root, and registering the sparse package (`packaging/msix/build.ps1` only builds it, unsigned; signing and `Add-AppxPackage -ExternalLocation` belong to the release/installer step).
 - **Missing menu verbs:** OCR, upload, combine PDF/CBZ, rename, sort, pick color, lock screen, folder icon, settings, AVIF/JXL output. `doctor`, `batch` and `--mcp` CLI commands are also missing.
 - **Conversion fidelity limits (issue #11):**

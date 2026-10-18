@@ -44,7 +44,7 @@ fn main() -> ExitCode {
     let result = catch_unwind(AssertUnwindSafe(|| {
         request
             .decoder
-            .run(&request.data, &request.ext, edge)
+            .run_with(&request.data, &request.ext, edge, request.param)
             .map(|img| to_thumbnail(&img, edge))
     }))
     .unwrap_or_else(|_| Err(DecodeError::malformed("decoder panicked")));

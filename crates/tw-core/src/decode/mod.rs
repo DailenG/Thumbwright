@@ -8,17 +8,37 @@
 //! - return [`DecodeError::Unsupported`] when the input is simply not theirs, so the
 //!   next tier can try.
 
+pub mod android;
+pub mod archive;
 pub mod audio;
+pub mod bitmap;
+pub mod cad;
+pub mod design;
+pub mod djvu;
+pub mod ebook;
 pub mod exif;
+pub mod j2k;
 pub mod jxl;
+pub mod livp;
+#[cfg(windows)]
+pub mod memstream;
+pub mod mesh;
+#[cfg(windows)]
+pub mod metafile;
+pub mod ole;
 pub mod pcx;
+#[cfg(windows)]
+pub mod pdf;
 pub mod probe;
 pub mod psd;
 pub mod raster;
 pub mod raw;
 pub mod route;
+pub mod sci;
 pub mod sgi;
 pub mod svg;
+#[cfg(windows)]
+pub mod video;
 #[cfg(windows)]
 pub mod wic;
 pub mod zip_preview;

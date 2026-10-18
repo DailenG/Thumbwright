@@ -36,6 +36,8 @@ pub struct Engine {
     pub worker_exe: PathBuf,
     /// Upper bound applied on top of each tier's own budget.
     pub max_tier_time: Duration,
+    /// Video frame offset in percent of the duration (0-100).
+    pub video_percent: u8,
 }
 
 impl Engine {
@@ -43,7 +45,14 @@ impl Engine {
         Self {
             worker_exe,
             max_tier_time: limits::WORKER_THUMBNAIL_TIMEOUT,
+            video_percent: limits::DEFAULT_VIDEO_PERCENT,
         }
+    }
+
+    /// Sets the video frame offset in percent of the duration (clamped to 100).
+    pub fn with_video_percent(mut self, percent: u8) -> Self {
+        self.video_percent = percent.min(100);
+        self
     }
 
     /// Produces a thumbnail whose longer edge is at most `edge`.
@@ -67,6 +76,7 @@ impl Engine {
                     &ext,
                     data.clone(),
                     edge,
+                    self.video_percent,
                     crate::worker::budget(decoder).min(self.max_tier_time),
                 ),
             };

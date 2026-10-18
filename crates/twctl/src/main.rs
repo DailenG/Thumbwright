@@ -257,7 +257,8 @@ fn run(cli: &Cli) -> Result<String> {
             }
             .min(settings.max_thumb_px);
             let data = ops::read_input(input, max)?;
-            let engine = tw_core::pipeline::Engine::new(dir.join(ids::WORKER_EXE_NAME));
+            let engine = tw_core::pipeline::Engine::new(dir.join(ids::WORKER_EXE_NAME))
+                .with_video_percent(settings.video_frame_percent);
             let ext = ops::ext_of(input);
             let t = engine
                 .thumbnail(Arc::new(data), Some(&ext), size)

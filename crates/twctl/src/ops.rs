@@ -14,8 +14,8 @@ use image::{
     DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, RgbaImage, imageops::FilterType,
 };
 
-use tw_core::decode::Thumbnail;
 use tw_core::decode::route::{self, Decoder};
+use tw_core::decode::{DecodeError, Thumbnail};
 use tw_core::{ids, worker};
 
 use crate::exif;
@@ -28,6 +28,8 @@ pub type Result<T, E = String> = std::result::Result<T, E>;
 const VECTOR_EDGE: u32 = 2048;
 /// Longest edge of audio cover art decoded for conversion (larger art is shrunk).
 const COVER_ART_EDGE: u32 = 4096;
+/// Longest edge decoded for conversion from worker-isolated raster formats (JPEG 2000).
+const RASTER_EDGE: u32 = 16384;
 
 /// Directory holding `twctl.exe`, `tw-worker.exe` and the portable INI.
 pub fn exe_dir() -> PathBuf {
@@ -70,8 +72,10 @@ pub fn read_input(p: &Path, max_bytes: u64) -> Result<Vec<u8>> {
 }
 
 /// Full-resolution decode through the format router. Memory-safe tiers run in this
-/// process; audio tags go through the worker, because a hostile tag can overflow the
-/// stack, which would end `twctl` without the `--notify` message box.
+/// process; decoders that parse hostile tags or call OS codecs or fixed-function libraries
+/// (audio tags can overflow the stack, which would end `twctl` without the `--notify` message
+/// box; video, PDF and metafiles use OS codecs; DjVu and JPEG 2000 cannot bound their
+/// allocation) go through the Job-Object-confined worker, like in the shell.
 pub fn decode_full(p: &Path, max_bytes: u64) -> Result<DynamicImage> {
     decode_bytes(p, read_input(p, max_bytes)?)
 }
@@ -93,29 +97,52 @@ pub fn decode_full_with_exif(
 
 /// [`decode_full`] for bytes already read from `p`.
 pub fn decode_bytes(p: &Path, data: Vec<u8>) -> Result<DynamicImage> {
+    let data = Arc::new(data);
     let ext = ext_of(p);
     let chain = route::plan(Some(&ext), &data[..data.len().min(4096)]);
     if chain.is_empty() {
         return Err(format!("{}: unsupported file type", p.display()));
     }
-    if chain.contains(&Decoder::Audio) {
-        let t = worker::run(
-            &exe_dir().join(ids::WORKER_EXE_NAME),
-            Decoder::Audio,
-            &ext,
-            Arc::new(data),
-            COVER_ART_EDGE,
-            worker::budget(Decoder::Audio),
-        )
-        .map_err(|e| format!("{}: {e}", p.display()))?;
-        return Ok(thumbnail_to_image(&t).into());
-    }
-    let edge = if chain.contains(&Decoder::Svg) {
+    let inproc_edge = if chain.contains(&Decoder::Svg) {
         VECTOR_EDGE
     } else {
         u32::MAX
     };
-    route::run_chain(chain, &data, &ext, edge).map_err(|e| format!("{}: {e}", p.display()))
+    let mut last = DecodeError::Unsupported;
+    for &decoder in chain {
+        let result = match isolated_edge(decoder) {
+            Some(edge) => worker::run(
+                &exe_dir().join(ids::WORKER_EXE_NAME),
+                decoder,
+                &ext,
+                data.clone(),
+                edge,
+                tw_core::limits::DEFAULT_VIDEO_PERCENT,
+                worker::budget(decoder),
+            )
+            .map(|t| DynamicImage::from(thumbnail_to_image(&t))),
+            None => decoder.run(&data, &ext, inproc_edge),
+        };
+        match result {
+            Ok(img) => return Ok(img),
+            Err(e) if e.falls_through() => last = e,
+            Err(e) => return Err(format!("{}: {e}", p.display())),
+        }
+    }
+    Err(format!("{}: {last}", p.display()))
+}
+
+/// Longest edge requested from a decoder that must run in the worker, or `None` for
+/// decoders that run in this process.
+fn isolated_edge(decoder: Decoder) -> Option<u32> {
+    match decoder {
+        Decoder::Pdf | Decoder::Metafile | Decoder::OleMetafile | Decoder::Djvu => {
+            Some(VECTOR_EDGE)
+        }
+        Decoder::J2k => Some(RASTER_EDGE),
+        Decoder::Audio | Decoder::Video => Some(COVER_ART_EDGE),
+        _ => None,
+    }
 }
 
 /// Writable target formats (native pure-Rust encoders).

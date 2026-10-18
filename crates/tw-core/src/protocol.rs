@@ -1,6 +1,6 @@
 //! Shell DLL <-> worker wire protocol over anonymous pipes (stdin/stdout), REQ-DEC-1.
 //!
-//! Request:  `TWQ1` | decoder u8 | edge u32 | ext_len u8 | ext | data_len u64 | data
+//! Request:  `TWQ2` | decoder u8 | edge u32 | param u8 | ext_len u8 | ext | data_len u64 | data
 //! Response: `TWR1` | status u8 | (status 0) width u32 | height u32 | BGRA bytes
 //!                               | (status != 0) msg_len u16 | msg
 //! All integers little-endian. Pixels are premultiplied BGRA, top-down.
@@ -13,13 +13,15 @@ use std::io::{self, Read, Write};
 use crate::decode::route::Decoder;
 use crate::decode::{DecodeError, Thumbnail};
 
-const REQ_MAGIC: &[u8; 4] = b"TWQ1";
+const REQ_MAGIC: &[u8; 4] = b"TWQ2";
 const RESP_MAGIC: &[u8; 4] = b"TWR1";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request {
     pub decoder: Decoder,
     pub edge: u32,
+    /// Generic one-byte decoder parameter (video: frame offset in percent).
+    pub param: u8,
     pub ext: String,
     pub data: Vec<u8>,
 }
@@ -28,6 +30,7 @@ pub fn write_request(
     w: &mut impl Write,
     decoder: Decoder,
     edge: u32,
+    param: u8,
     ext: &str,
     data: &[u8],
 ) -> io::Result<()> {
@@ -36,6 +39,7 @@ pub fn write_request(
     w.write_all(REQ_MAGIC)?;
     w.write_all(&[decoder.code()])?;
     w.write_all(&edge.to_le_bytes())?;
+    w.write_all(&[param])?;
     w.write_all(&[ext.len() as u8])?;
     w.write_all(ext)?;
     w.write_all(&(data.len() as u64).to_le_bytes())?;
@@ -61,6 +65,7 @@ pub fn read_request(r: &mut impl Read, max_data: u64) -> io::Result<Request> {
     let [code] = read_array::<1>(r)?;
     let decoder = Decoder::from_code(code).ok_or_else(|| invalid("unknown decoder"))?;
     let edge = u32::from_le_bytes(read_array(r)?);
+    let [param] = read_array::<1>(r)?;
     let [ext_len] = read_array::<1>(r)?;
     let mut ext = vec![0u8; ext_len as usize];
     r.read_exact(&mut ext)?;
@@ -77,6 +82,7 @@ pub fn read_request(r: &mut impl Read, max_data: u64) -> io::Result<Request> {
     Ok(Request {
         decoder,
         edge,
+        param,
         ext,
         data,
     })
@@ -160,18 +166,37 @@ mod tests {
     #[test]
     fn request_round_trip_and_payload_cap() {
         let mut buf = Vec::new();
-        write_request(&mut buf, Decoder::Svg, 256, "svg", b"<svg/>").unwrap();
+        write_request(&mut buf, Decoder::Svg, 256, 30, "svg", b"<svg/>").unwrap();
         let req = read_request(&mut buf.as_slice(), 1024).unwrap();
         assert_eq!(
             req,
             Request {
                 decoder: Decoder::Svg,
                 edge: 256,
+                param: 30,
                 ext: "svg".into(),
                 data: b"<svg/>".to_vec()
             }
         );
         assert!(read_request(&mut buf.as_slice(), 3).is_err());
+    }
+
+    #[test]
+    fn request_param_survives_every_value_and_old_magic_is_rejected() {
+        for param in [0u8, 1, 30, 100, 255] {
+            let mut buf = Vec::new();
+            write_request(&mut buf, Decoder::Video, 128, param, "mp4", b"x").unwrap();
+            assert_eq!(read_request(&mut buf.as_slice(), 16).unwrap().param, param);
+        }
+        // A request from a pre-`param` build (TWQ1) must not be parsed with shifted fields.
+        let mut old = Vec::new();
+        write_request(&mut old, Decoder::Svg, 64, 0, "svg", b"<svg/>").unwrap();
+        old[3] = b'1';
+        assert!(read_request(&mut old.as_slice(), 16).is_err());
+        // Truncated right after the param byte.
+        let mut buf = Vec::new();
+        write_request(&mut buf, Decoder::Video, 128, 30, "mp4", b"x").unwrap();
+        assert!(read_request(&mut &buf[..10], 16).is_err());
     }
 
     #[test]

@@ -254,16 +254,28 @@ pub fn budget(decoder: Decoder) -> Duration {
     match decoder {
         Decoder::Svg => limits::VECTOR_RENDER_TIMEOUT + limits::VECTOR_PARSE_TIMEOUT,
         Decoder::Audio => limits::INPROC_DECODE_TIMEOUT,
+        Decoder::Video => limits::VIDEO_FRAME_TIMEOUT,
+        Decoder::Pdf => limits::PDF_RENDER_TIMEOUT,
+        Decoder::Metafile | Decoder::OleMetafile => limits::METAFILE_RENDER_TIMEOUT,
         _ => limits::WORKER_THUMBNAIL_TIMEOUT,
     }
 }
 
 /// Job memory limit for a worker running `decoder` on `input_len` bytes. The audio decoder
-/// holds the whole file in memory before parsing tags, so its allowance grows with the input;
-/// every other decoder gets the fixed worker limit.
+/// holds the whole file in memory before parsing tags, and the video and PDF decoders keep it
+/// next to the OS decoder's own buffers, so their allowance grows with the input (video also
+/// gets a larger base, see `limits::WORKER_VIDEO_EXTRA_MEMORY_BYTES`); every other decoder
+/// gets the fixed worker limit.
 fn memory_limit(decoder: Decoder, input_len: usize) -> u64 {
     match decoder {
-        Decoder::Audio => limits::WORKER_MEMORY_BYTES.saturating_add(input_len as u64),
+        Decoder::Audio | Decoder::Pdf | Decoder::OleMetafile => {
+            limits::WORKER_MEMORY_BYTES.saturating_add(input_len as u64)
+        }
+        Decoder::Video => limits::WORKER_VIDEO_EXTRA_MEMORY_BYTES.saturating_add(input_len as u64),
+        // The worker holds the file, and the RAR reader keeps a copy of it.
+        Decoder::Archive => {
+            limits::WORKER_MEMORY_BYTES.saturating_add((input_len as u64).saturating_mul(2))
+        }
         _ => limits::WORKER_MEMORY_BYTES,
     }
 }
@@ -271,13 +283,15 @@ fn memory_limit(decoder: Decoder, input_len: usize) -> u64 {
 /// Runs `decoder` in a worker process used for this request only. Never blocks longer than
 /// `timeout` (plus process teardown); a worker that crashes, exceeds a job limit or sends an
 /// invalid response yields `Malformed`; a timeout yields `Timeout`. The budget starts once
-/// the worker is confined and holds the request, so process start-up is not charged to it.
+/// the worker is confined and holds the request, so process start-up is not charged to it. `param` is the generic
+/// decoder parameter (video: frame offset in percent).
 pub fn run(
     exe: &Path,
     decoder: Decoder,
     ext: &str,
     data: Arc<Vec<u8>>,
     edge: u32,
+    param: u8,
     timeout: Duration,
 ) -> Result<Thumbnail> {
     let prespawn = PRESPAWN.load(Ordering::Relaxed);
@@ -304,7 +318,7 @@ pub fn run(
     let writer = std::thread::spawn(move || {
         let mut w = BufWriter::new(&mut stdin);
         // A worker that dies mid-request breaks the pipe; the reader reports it.
-        let _ = protocol::write_request(&mut w, decoder, edge, &ext_owned, &data);
+        let _ = protocol::write_request(&mut w, decoder, edge, param, &ext_owned, &data);
     });
     let (tx, rx) = mpsc::channel();
     let reader = std::thread::spawn(move || {
@@ -338,12 +352,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audio_memory_limit_grows_with_input_and_others_stay_fixed() {
+    fn whole_file_decoders_get_input_proportional_memory_and_others_stay_fixed() {
         let base = limits::WORKER_MEMORY_BYTES;
-        assert_eq!(memory_limit(Decoder::Audio, 0), base);
-        assert_eq!(memory_limit(Decoder::Audio, 300 << 20), base + (300 << 20));
-        assert_eq!(memory_limit(Decoder::Audio, usize::MAX), u64::MAX);
+        for d in [Decoder::Audio, Decoder::Pdf] {
+            assert_eq!(memory_limit(d, 0), base);
+            assert_eq!(memory_limit(d, 300 << 20), base + (300 << 20));
+            assert_eq!(memory_limit(d, usize::MAX), u64::MAX);
+        }
+        assert_eq!(memory_limit(Decoder::Metafile, 300 << 20), base);
+        // Video decoding needs its own, larger allowance (4K frames and decoder surfaces).
+        let video = limits::WORKER_VIDEO_EXTRA_MEMORY_BYTES;
+        assert!(video > base);
+        assert_eq!(memory_limit(Decoder::Video, 0), video);
+        assert_eq!(memory_limit(Decoder::Video, 300 << 20), video + (300 << 20));
+        assert_eq!(memory_limit(Decoder::Video, usize::MAX), u64::MAX);
         assert_eq!(memory_limit(Decoder::Wic, 300 << 20), base);
+        assert_eq!(
+            memory_limit(Decoder::Archive, 100 << 20),
+            base + (200 << 20)
+        );
+        assert_eq!(memory_limit(Decoder::Archive, usize::MAX), u64::MAX);
         assert_eq!(memory_limit(Decoder::Svg, 300 << 20), base);
     }
 

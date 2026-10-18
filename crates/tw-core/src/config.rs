@@ -126,6 +126,8 @@ pub struct Settings {
     /// Menu verb ids the user hid.
     pub hidden_menu_items: Vec<String>,
     pub verbose_log: bool,
+    /// Video thumbnail frame offset in percent of the duration (0-100).
+    pub video_frame_percent: u8,
 }
 
 impl Default for Settings {
@@ -148,6 +150,7 @@ impl Default for Settings {
             disabled_types: Vec::new(),
             hidden_menu_items: Vec::new(),
             verbose_log: false,
+            video_frame_percent: limits::DEFAULT_VIDEO_PERCENT,
         }
     }
 }
@@ -251,6 +254,11 @@ impl Settings {
                     .collect();
             }
             "VerboseLog" => self.verbose_log = parse_bool(v).unwrap_or(false),
+            "VideoFramePercent" => {
+                if let Ok(n) = v.parse::<u64>() {
+                    self.video_frame_percent = n.min(100) as u8;
+                }
+            }
             _ => {}
         }
     }
@@ -265,6 +273,10 @@ impl Settings {
                 Stored::Number(self.max_file_mb.min(u64::from(u32::MAX)) as u32),
             ),
             ("MaxThumbPx", Stored::Number(self.max_thumb_px)),
+            (
+                "VideoFramePercent",
+                Stored::Number(u32::from(self.video_frame_percent)),
+            ),
             ("CloudThumbnails", Stored::flag(self.cloud_thumbnails)),
             ("JpegQuality", Stored::Number(u32::from(self.jpeg_quality))),
             (
@@ -443,6 +455,7 @@ mod tests {
         assert!(s.keep_metadata, "Keep metadata defaults on");
         assert!(!Settings::from_ini("[Settings]\nKeepMetadata=0\n").keep_metadata);
         assert!(Settings::from_ini("[Settings]\nKeepMetadata=junk\n").keep_metadata);
+        assert_eq!(s.video_frame_percent, 30);
     }
 
     #[test]
@@ -500,6 +513,7 @@ mod tests {
             disabled_types: vec!["png".into(), "svg".into()],
             hidden_menu_items: vec!["email".into()],
             verbose_log: true,
+            video_frame_percent: 75,
         }
     }
 
@@ -625,5 +639,17 @@ mod tests {
         }
         let s = Settings::from_ini("[Settings]\nHiddenMenuItems=settings,email,future_item\n");
         assert_eq!(s.hidden_menu_items, ["email", "future_item"]);
+    }
+
+    #[test]
+    fn video_frame_percent_is_clamped_and_junk_is_ignored() {
+        let f = |v: &str| Settings::from_ini(&format!("[Settings]\nVideoFramePercent={v}\n"));
+        assert_eq!(f("0").video_frame_percent, 0);
+        assert_eq!(f("75").video_frame_percent, 75);
+        assert_eq!(f("100").video_frame_percent, 100);
+        assert_eq!(f("101").video_frame_percent, 100);
+        assert_eq!(f("99999999999").video_frame_percent, 100);
+        assert_eq!(f("-5").video_frame_percent, 30);
+        assert_eq!(f("abc").video_frame_percent, 30);
     }
 }

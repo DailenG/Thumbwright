@@ -408,6 +408,7 @@ fn worker_bench(exe: &Path, iters: usize) {
             ext,
             data.clone(),
             edge,
+            tw_core::limits::DEFAULT_VIDEO_PERCENT,
             Duration::from_secs(60),
         );
         let cold = t.elapsed();
@@ -423,6 +424,7 @@ fn worker_bench(exe: &Path, iters: usize) {
                 ext,
                 data.clone(),
                 edge,
+                tw_core::limits::DEFAULT_VIDEO_PERCENT,
                 Duration::from_secs(60),
             ));
         }));
@@ -434,6 +436,7 @@ fn worker_bench(exe: &Path, iters: usize) {
             ext,
             data.clone(),
             edge,
+            tw_core::limits::DEFAULT_VIDEO_PERCENT,
             Duration::from_secs(60),
         );
         let back_to_back = stats(time_each(iters, || {
@@ -443,6 +446,7 @@ fn worker_bench(exe: &Path, iters: usize) {
                 ext,
                 data.clone(),
                 edge,
+                tw_core::limits::DEFAULT_VIDEO_PERCENT,
                 Duration::from_secs(60),
             ));
         }));
@@ -458,6 +462,7 @@ fn worker_bench(exe: &Path, iters: usize) {
                         ext,
                         data.clone(),
                         edge,
+                        tw_core::limits::DEFAULT_VIDEO_PERCENT,
                         Duration::from_secs(60),
                     ));
                     t.elapsed()
@@ -515,7 +520,14 @@ fn anatomy(exe: &Path, iters: usize) {
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let writer = std::thread::scope(|s| {
-            s.spawn(|| protocol::write_request(&mut stdin, d, edge, ext, data));
+            s.spawn(|| protocol::write_request(
+                    &mut stdin,
+                    d,
+                    edge,
+                    tw_core::limits::DEFAULT_VIDEO_PERCENT,
+                    ext,
+                    data,
+                ));
             protocol::read_response(&mut stdout, edge)
         });
         writer.unwrap().unwrap();
