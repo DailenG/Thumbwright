@@ -26,3 +26,10 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", 
 windows-core = "0.62"
 windows-registry = "0.6"
 zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
+rars = { version = "0.11", default-features = false }
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["deflate", "ppmd"] }
+
+[dev-dependencies]
+# Test fixtures only: in-memory 7z / RAR writers.
+rars = { version = "0.11", default-features = false, features = ["write", "encryption"] }
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress", "deflate", "ppmd"] }

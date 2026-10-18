@@ -50,6 +50,13 @@ pub enum Decoder {
     Pdf = 21,
     /// Windows metafiles (EMF/WMF and gzip-compressed forms): GDI playback.
     Metafile = 22,
+    /// Mobipocket/Kindle (Palm database), FictionBook 2 and TAR comics: cover image.
+    Ebook = 60,
+    /// 7-Zip and RAR (incl. comic variants): contact sheet or first image. Worker: real
+    /// decompression with attacker-chosen dictionary sizes.
+    Archive = 61,
+    /// Apple Live Photo bundle: ZIP holding a HEIC/JPEG still (HEIC needs WIC, so worker).
+    Livp = 62,
 }
 
 /// Where a decoder may run (REQ-ISO-2 / REQ-ISO-3).
@@ -65,7 +72,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 19] = [
+    pub const ALL: [Decoder; 22] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -85,6 +92,9 @@ impl Decoder {
         Self::Video,
         Self::Pdf,
         Self::Metafile,
+        Self::Ebook,
+        Self::Archive,
+        Self::Livp,
     ];
 
     pub fn placement(self) -> Placement {
@@ -95,7 +105,9 @@ impl Decoder {
             | Self::Djvu
             | Self::Video
             | Self::Pdf
-            | Self::Metafile => Placement::Worker,
+            | Self::Metafile
+            | Self::Archive
+            | Self::Livp => Placement::Worker,
             _ => Placement::InProc,
         }
     }
@@ -140,6 +152,9 @@ impl Decoder {
             Self::Bitmap => super::bitmap::decode(data, ext),
             Self::Ole => super::ole::extract(data),
             Self::Djvu => super::djvu::render(data, edge),
+            Self::Ebook => super::ebook::extract(data, ext),
+            Self::Archive => super::archive::extract(data, ext),
+            Self::Livp => super::livp::extract(data, edge),
             #[cfg(windows)]
             Self::Wic => super::wic::decode(data, edge),
             #[cfg(not(windows))]
@@ -203,6 +218,9 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
         (VIDEO_EXTENSIONS, &[Video]),
         (PDF_EXTENSIONS, &[Pdf]),
         (METAFILE_EXTENSIONS, &[Metafile]),
+        (super::ebook::EXTENSIONS, &[Ebook]),
+        (super::archive::EXTENSIONS, &[Archive]),
+        (super::livp::EXTENSIONS, &[Livp]),
     ];
     single
         .iter()
@@ -279,6 +297,9 @@ mod tests {
             .chain(VIDEO_EXTENSIONS)
             .chain(PDF_EXTENSIONS)
             .chain(METAFILE_EXTENSIONS)
+            .chain(super::super::ebook::EXTENSIONS)
+            .chain(super::super::archive::EXTENSIONS)
+            .chain(super::super::livp::EXTENSIONS)
         {
             assert!(formats::lookup(ext).is_some(), "{ext} not in matrix");
         }
@@ -314,6 +335,11 @@ mod tests {
         ] {
             assert!(chain_for_ext(ext).is_empty(), "{ext}");
         }
+        // Archives decompress with attacker-chosen dictionary sizes; Live Photo stills may
+        // need WIC. Ebook containers are walked with bounds-checked Rust only.
+        assert_eq!(Decoder::Archive.placement(), Placement::Worker);
+        assert_eq!(Decoder::Livp.placement(), Placement::Worker);
+        assert_eq!(Decoder::Ebook.placement(), Placement::InProc);
     }
 
     #[test]
