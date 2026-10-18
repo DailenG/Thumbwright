@@ -29,9 +29,11 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 | shipped | https://github.com/srijs/rust-crc32fast |
 | data-encoding | 2.11.1 | MIT | shipped | https://github.com/ia0/data-encoding |
 | data-url | 0.3.2 | MIT OR Apache-2.0 | shipped | https://github.com/servo/rust-url |
+| document-features | 0.2.12 | MIT OR Apache-2.0 | shipped | https://github.com/slint-ui/document-features |
 | equivalent | 1.0.3 | Apache-2.0 OR MIT | shipped | https://github.com/indexmap-rs/equivalent |
 | euclid | 0.22.14 | MIT OR Apache-2.0 | shipped | https://github.com/servo/euclid |
 | exr | 1.74.2 | BSD-3-Clause | shipped | https://github.com/johannesvollmer/exrs |
+| fast_image_resize | 6.1.0 | MIT OR Apache-2.0 | shipped | https://github.com/cykooz/fast_image_resize |
 | fax | 0.2.7 | MIT | shipped | https://github.com/pdf-rs/fax |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | shipped | https://github.com/image-rs/fdeflate |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 | shipped | https://github.com/rust-lang/flate2-rs |
@@ -63,6 +65,7 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | kurbo | 0.13.1 | Apache-2.0 OR MIT | shipped | https://github.com/linebender/kurbo |
 | lebe | 0.5.3 | BSD-3-Clause | shipped | https://github.com/johannesvollmer/lebe |
 | libm | 0.2.16 | MIT | shipped | https://github.com/rust-lang/compiler-builtins |
+| litrs | 1.0.1 | MIT OR Apache-2.0 | shipped | https://github.com/LukasKalbertodt/litrs |
 | lofty | 0.25.4 | MIT OR Apache-2.0 | shipped | https://github.com/Serial-ATA/lofty-rs |
 | lofty_attr | 0.13.0 | MIT OR Apache-2.0 | shipped | https://github.com/Serial-ATA/lofty-rs |
 | log | 0.4.34 | MIT OR Apache-2.0 | shipped | https://github.com/rust-lang/log |
@@ -107,7 +110,9 @@ Policy: every crate must satisfy its SPDX expression using only permissive licen
 | syn | 2.0.119 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/syn |
 | syn | 3.0.9 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/syn |
 | thiserror | 1.0.69 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/thiserror |
+| thiserror | 2.0.21 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/thiserror |
 | thiserror-impl | 1.0.69 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/thiserror |
+| thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | shipped | https://github.com/dtolnay/thiserror |
 | tiff | 0.11.3 | MIT | shipped | https://github.com/image-rs/image-tiff |
 | tiny-skia | 0.12.0 | BSD-3-Clause | shipped | https://github.com/linebender/tiny-skia |
 | tiny-skia-path | 0.12.0 | BSD-3-Clause | shipped | https://github.com/linebender/tiny-skia/tree/master/path |
