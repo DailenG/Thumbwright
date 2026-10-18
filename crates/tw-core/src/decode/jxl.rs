@@ -2,9 +2,12 @@
 //! checked before any frame is decoded; the first keyframe is rendered to 8-bit samples.
 
 use image::{DynamicImage, GrayAlphaImage, GrayImage, RgbImage, RgbaImage};
-use jxl_oxide::{AllocTracker, InitializeResult, JxlImage, JxlThreadPool, PixelFormat};
+use jxl_oxide::{
+    AllocTracker, EnumColourEncoding, InitializeResult, JxlImage, JxlThreadPool, PixelFormat,
+    RenderingIntent,
+};
 
-use super::{DecodeError, Result, check_dimensions};
+use super::{DecodeError, Result, check_alloc, check_dimensions};
 use crate::limits;
 
 const CODESTREAM_SIGNATURE: &[u8] = &[0xFF, 0x0A];
@@ -19,6 +22,10 @@ fn malformed(e: impl std::fmt::Display) -> DecodeError {
 }
 
 pub fn decode(data: &[u8]) -> Result<DynamicImage> {
+    decode_with(data, true)
+}
+
+fn decode_with(data: &[u8], to_srgb: bool) -> Result<DynamicImage> {
     if !data.starts_with(CODESTREAM_SIGNATURE) && !data.starts_with(CONTAINER_SIGNATURE) {
         return Err(DecodeError::Unsupported);
     }
@@ -44,6 +51,15 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
             }
         }
     };
+    // Wide-gamut and ICC-described images are converted to sRGB (what Explorer assumes);
+    // HDR transfer curves are left alone since clipping them to SDR would blow out.
+    let to_srgb = to_srgb
+        && matches!(image.pixel_format(), PixelFormat::Rgb | PixelFormat::Rgba)
+        && !image.image_header().metadata.colour_encoding.is_srgb()
+        && image.hdr_type().is_none();
+    if to_srgb {
+        image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
+    }
     check_dimensions(image.width(), image.height())?;
 
     while pos < data.len() {
@@ -59,7 +75,13 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
     }
 
     let format = image.pixel_format();
-    let render = image.render_frame(0).map_err(malformed)?;
+    let render = match image.render_frame(0) {
+        Ok(render) => render,
+        // ICC profiles that cannot be reduced to an enumerated encoding need a CMS, which
+        // this build does not have: render in the image's own colour space instead.
+        Err(_) if to_srgb => return decode_with(data, false),
+        Err(e) => return Err(malformed(e)),
+    };
     let mut stream = render.stream();
     let (w, h) = (stream.width(), stream.height());
     check_dimensions(w, h)?;
@@ -67,11 +89,52 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
     if channels != format.channels() {
         return Err(DecodeError::malformed("JPEG XL channel layout mismatch"));
     }
-    let mut buf = vec![0u8; w as usize * h as usize * channels];
-    if stream.write_to_buffer(&mut buf) != buf.len() {
-        return Err(DecodeError::malformed("JPEG XL render incomplete"));
-    }
+    let samples = w as usize * h as usize * channels;
+    // jxl-oxide leaves associated (premultiplied) alpha premultiplied; `image` expects
+    // straight alpha. Render at 16 bits so dividing the alpha back out keeps precision.
+    let premultiplied = matches!(
+        format,
+        PixelFormat::Graya | PixelFormat::Rgba | PixelFormat::Cmyka
+    ) && image
+        .image_header()
+        .metadata
+        .ec_info
+        .iter()
+        .find_map(|ec| ec.alpha_associated())
+        == Some(true);
+    let buf = if premultiplied {
+        check_alloc(samples as u64 * 2)?;
+        let mut wide = vec![0u16; samples];
+        if stream.write_to_buffer(&mut wide) != samples {
+            return Err(DecodeError::malformed("JPEG XL render incomplete"));
+        }
+        unpremultiply(&wide, channels)
+    } else {
+        let mut buf = vec![0u8; samples];
+        if stream.write_to_buffer(&mut buf) != samples {
+            return Err(DecodeError::malformed("JPEG XL render incomplete"));
+        }
+        buf
+    };
     to_dynamic(format, w, h, buf)
+}
+
+/// 16-bit premultiplied samples (alpha last) to 8-bit straight alpha.
+fn unpremultiply(wide: &[u16], channels: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(wide.len());
+    for px in wide.chunks_exact(channels) {
+        let (colour, alpha) = px.split_at(channels - 1);
+        let a = u32::from(alpha[0]);
+        for &c in colour {
+            out.push(
+                (u32::from(c) * 255 + a / 2)
+                    .checked_div(a)
+                    .map_or(0, |v| v.min(255) as u8),
+            );
+        }
+        out.push(((a * 255 + 32767) / 65535) as u8);
+    }
+    out
 }
 
 fn to_dynamic(format: PixelFormat, w: u32, h: u32, buf: Vec<u8>) -> Result<DynamicImage> {
@@ -175,5 +238,18 @@ mod tests {
     fn cmyk_conversion_uses_inverted_ink() {
         let img = to_dynamic(PixelFormat::Cmyk, 1, 1, vec![255, 0, 255, 128]).unwrap();
         assert_eq!(img.to_rgba8().get_pixel(0, 0).0, [128, 0, 128, 255]);
+    }
+
+    #[test]
+    fn unpremultiply_divides_alpha_out_without_overflow() {
+        // Half-covered full red, fully transparent (colour dropped), opaque, and a
+        // rounding-error pixel whose colour slightly exceeds its alpha.
+        let wide = [
+            32768, 0, 0, 32768, 9, 9, 9, 0, 0, 65535, 0, 65535, 70, 0, 0, 65,
+        ];
+        assert_eq!(
+            unpremultiply(&wide, 4),
+            [255, 0, 0, 128, 0, 0, 0, 0, 0, 255, 0, 255, 255, 0, 0, 0]
+        );
     }
 }
