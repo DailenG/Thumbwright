@@ -1075,6 +1075,7 @@ dependencies = [
  "jxl-oxide",
  "lofty",
  "memchr",
+ "miniz_oxide 0.9.1",
  "psd",
  "resvg",
  "ruzstd",

@@ -10,7 +10,9 @@
 
 pub mod audio;
 pub mod design;
+pub mod cad;
 pub mod jxl;
+pub mod mesh;
 pub mod pcx;
 pub mod psd;
 pub mod raster;

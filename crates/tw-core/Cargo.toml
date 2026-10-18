@@ -16,6 +16,7 @@ image = { version = "0.25.10", default-features = false, features = ["bmp", "dds
 jxl-oxide = { version = "0.12.6", default-features = false }
 lofty = "0.25.4"
 memchr = { version = "2", default-features = false }
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 psd = "0.3.5"
 resvg = "0.48.1"
 ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }

@@ -31,6 +31,9 @@ pub const EXTENSIONS: &[&str] = &[
     "mcaddon",
     "sketch",
     "procreate",
+    "xd",
+    "pxo",
+    "f3d",
     "nupkg",
     "vsix",
     // Documents.
@@ -151,6 +154,9 @@ fn extract_with(data: &[u8], ext: &str, budget: Budget) -> Result<DynamicImage> 
         "mcpack" | "mcaddon" => a.by_basename(&["pack_icon.png"]),
         "sketch" => a.fixed(&["previews/preview.png"]),
         "procreate" => a.fixed(&["QuickLook/Thumbnail.png"]),
+        "xd" => a.fixed(&["preview.png", "thumbnail.png"]),
+        "pxo" => a.fixed(&["preview.png"]),
+        "f3d" => a.by_name_containing(&["thumbnail", "preview"]),
         "nupkg" => a.nupkg(),
         "vsix" => a.vsix(),
         "epub" => a.epub(),
@@ -302,6 +308,27 @@ impl<'a> Archive<'a> {
             .collect();
         found.sort();
         self.first_decodable(found.into_iter().map(|f| f.2))
+    }
+
+    /// Image entries whose file name contains one of `needles` (lower-case), shallowest
+    /// first.
+    fn by_name_containing(&mut self, needles: &[&str]) -> Result<DynamicImage> {
+        let mut found: Vec<(usize, usize)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, e)| {
+                let lower = e.name.to_lowercase();
+                let base = basename(&lower);
+                let wanted = is_image_name(&lower)
+                    && !lower.starts_with("__macosx/")
+                    && !base.starts_with("._")
+                    && needles.iter().any(|n| base.contains(n));
+                wanted.then(|| (e.name.matches('/').count(), pos))
+            })
+            .collect();
+        found.sort();
+        self.first_decodable(found.into_iter().map(|f| f.1))
     }
 
     /// Image entries (by extension), skipping macOS metadata, in natural order.
@@ -1092,6 +1119,35 @@ mod tests {
         assert_eq!(dims(&extract(&z, "mcaddon").unwrap()), (3, 3));
         let z = zip(&[("Index/Document.iwa", b"x"), ("preview.jpg", &jpeg(5, 4))]);
         assert_eq!(dims(&extract(&z, "key").unwrap()), (5, 4));
+    }
+
+    #[test]
+    fn xd_pixelorama_and_fusion_previews() {
+        let z = zip(&[
+            ("artwork/a/graphics/x.png", &png(9, 9, [0, 0, 0, 255])),
+            ("thumbnail.png", &png(3, 3, [0, 0, 0, 255])),
+            ("preview.png", &png(7, 5, [0, 0, 0, 255])),
+        ]);
+        assert_eq!(dims(&extract(&z, "xd").unwrap()), (7, 5));
+        let z = zip(&[("thumbnail.png", &png(3, 3, [0, 0, 0, 255]))]);
+        assert_eq!(dims(&extract(&z, "xd").unwrap()), (3, 3));
+        let z = zip(&[
+            ("data.json", b"{}"),
+            ("preview.png", &png(6, 4, [0, 0, 0, 255])),
+        ]);
+        assert_eq!(dims(&extract(&z, "pxo").unwrap()), (6, 4));
+        // Fusion archives: a preview or thumbnail image at any depth, textures ignored.
+        let z = zip(&[
+            ("Textures/wood.png", &png(9, 9, [0, 0, 0, 255])),
+            ("Manifest.dat", b"x"),
+            (
+                "FusionAssetName[Active]/Thumbnail.png",
+                &png(5, 5, [0, 0, 0, 255]),
+            ),
+        ]);
+        assert_eq!(dims(&extract(&z, "f3d").unwrap()), (5, 5));
+        let z = zip(&[("Textures/wood.png", &png(9, 9, [0, 0, 0, 255]))]);
+        assert_eq!(extract(&z, "f3d").err(), Some(DecodeError::Unsupported));
     }
 
     #[test]
