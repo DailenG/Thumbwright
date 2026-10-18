@@ -20,6 +20,9 @@ pub enum MenuPreview {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub thumbnails_enabled: bool,
+    /// "Thumbnails in cloud folders" (spec 4.3): the cloud-folder class refuses every
+    /// request while this is off.
+    pub cloud_thumbnails: bool,
     pub max_file_mb: u64,
     pub max_thumb_px: u32,
     pub menu_enabled: bool,
@@ -36,6 +39,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             thumbnails_enabled: true,
+            cloud_thumbnails: false,
             max_file_mb: limits::DEFAULT_MAX_FILE_MB,
             max_thumb_px: limits::DEFAULT_MAX_THUMB_EDGE,
             menu_enabled: true,
@@ -77,6 +81,7 @@ impl Settings {
         let v = value.trim();
         match key.trim() {
             "ThumbnailsEnabled" => self.thumbnails_enabled = parse_bool(v).unwrap_or(true),
+            "CloudThumbnails" => self.cloud_thumbnails = parse_bool(v).unwrap_or(false),
             "MaxFileMB" => {
                 if let Ok(n) = v.parse::<u64>() {
                     self.max_file_mb = n.clamp(1, limits::DEFAULT_MAX_FILE_MB);
@@ -167,6 +172,10 @@ mod tests {
         assert_eq!(s.max_file_bytes(), 4096 * 1024 * 1024);
         assert_eq!(s.max_thumb_px, 1024);
         assert!(s.menu_enabled && !s.menu_all_file_types && s.thumbnails_enabled);
+        assert!(
+            !s.cloud_thumbnails,
+            "cloud folders are off by default (spec 4.3)"
+        );
         assert_eq!(s.menu_preview, MenuPreview::InSubmenu);
     }
 

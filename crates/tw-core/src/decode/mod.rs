@@ -9,8 +9,10 @@
 //!   next tier can try.
 
 pub mod audio;
+pub mod exif;
 pub mod jxl;
 pub mod pcx;
+pub mod probe;
 pub mod psd;
 pub mod raster;
 pub mod raw;

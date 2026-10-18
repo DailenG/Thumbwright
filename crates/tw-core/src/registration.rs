@@ -31,8 +31,15 @@ use crate::ids::{self, ClassId};
 pub const THUMBNAIL_HANDLER_CATEGORY: &str = "{E357FCCD-A995-4576-B01F-234630154E96}";
 /// Microsoft-defined `IExtractImage` handler category (foreign-handler detection only).
 pub const EXTRACT_IMAGE_CATEGORY: &str = "{BB2E617C-0920-11D1-9A0B-00C04FC2D6C1}";
+/// Microsoft-defined `IPreviewHandler` handler category.
+pub const PREVIEW_HANDLER_CATEGORY: &str = "{8895B1C6-B41F-4C1C-A562-0D564250836F}";
+/// AppID of the 64-bit preview host `prevhost.exe` (Microsoft docs, "Preview Handlers").
+pub const PREVHOST_APPID: &str = "{6D2B5079-2F0B-48DD-AB7F-97CEC514D30B}";
 const APPROVED_KEY: &str =
     "Software\\Microsoft\\Windows\\CurrentVersion\\Shell Extensions\\Approved";
+const PREVIEW_HANDLERS_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\PreviewHandlers";
+const PROPERTY_HANDLERS_KEY: &str =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\PropertySystem\\PropertyHandlers";
 const MANIFEST_SUBKEY: &str = "Registration";
 const DLL_PATH_VALUE: &str = "DllPath";
 
@@ -51,6 +58,10 @@ pub struct Layout {
     pub product: String,
     /// Writes `Shell Extensions\Approved` entries (machine scope only).
     pub approve: bool,
+    /// The `PreviewHandlers` list that `prevhost.exe` enumerates.
+    pub preview_handlers: String,
+    /// The `PropertySystem\PropertyHandlers` key (one subkey per extension).
+    pub property_handlers: String,
     /// Broadcasts `SHCNE_ASSOCCHANGED` after changes (off for sandboxed tests).
     pub notify: bool,
 }
@@ -66,6 +77,8 @@ impl Layout {
             classes: "Software\\Classes".into(),
             product: crate::config::PRODUCT_KEY.into(),
             approve,
+            preview_handlers: PREVIEW_HANDLERS_KEY.into(),
+            property_handlers: PROPERTY_HANDLERS_KEY.into(),
             notify: true,
         }
     }
@@ -85,6 +98,21 @@ pub struct Plan<'a> {
     /// Extensions (lower-case, no dot) that get the thumbnail handler.
     pub extensions: Vec<&'a str>,
     pub context_menu: bool,
+    /// The cloud-folder thumbnail class and its surrogate AppID (spec 4.1, REQ-COM-2). The
+    /// class refuses every request until the "cloud folders" setting is on; registering it
+    /// links it to no sync root.
+    pub cloud: bool,
+    /// Installer-only classes (spec 4.2); `None` for per-user registration.
+    pub installer: Option<InstallerPlan<'a>>,
+}
+
+/// The preview and property handler classes and where they attach (spec 4.2).
+pub struct InstallerPlan<'a> {
+    /// Extensions (lower-case, no dot) that get the preview handler.
+    pub preview_extensions: Vec<&'a str>,
+    /// Extensions that get the property handler. An extension that already has a property
+    /// handler is skipped: replacing the OS handler would drop its richer properties.
+    pub property_extensions: Vec<&'a str>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -281,6 +309,67 @@ fn register_class(rec: &mut Recorder, layout: &Layout, class: ClassId, dll: &str
     Ok(())
 }
 
+/// Registers `class` and points its `AppID` value at `app_id`, so COM activates it in the
+/// process that AppID names.
+fn register_class_with_appid(
+    rec: &mut Recorder,
+    layout: &Layout,
+    class: ClassId,
+    dll: &str,
+    app_id: &str,
+) -> Result<()> {
+    register_class(rec, layout, class, dll)?;
+    let clsid = layout.classes_path(&format!("CLSID\\{}", class.braced()));
+    rec.set_string(&clsid, "AppID", app_id)
+}
+
+/// `AppID\{cloud}`: an empty `DllSurrogate` selects the system default surrogate.
+fn register_cloud(rec: &mut Recorder, layout: &Layout, dll: &str) -> Result<()> {
+    let app_id = ids::braced(ids::APPID_CLOUD);
+    register_class_with_appid(rec, layout, ids::CLSID_CLOUD_THUMBNAIL, dll, &app_id)?;
+    let app = layout.classes_path(&format!("AppID\\{app_id}"));
+    rec.set_string(&app, "", ids::CLSID_CLOUD_THUMBNAIL.display_name)?;
+    rec.set_string(&app, "DllSurrogate", "")
+}
+
+fn register_installer(
+    rec: &mut Recorder,
+    layout: &Layout,
+    plan: &InstallerPlan,
+    dll: &str,
+) -> Result<()> {
+    let preview = ids::CLSID_PREVIEW;
+    register_class_with_appid(rec, layout, preview, dll, PREVHOST_APPID)?;
+    let clsid = layout.classes_path(&format!("CLSID\\{}", preview.braced()));
+    rec.set_string(&clsid, "DisplayName", preview.display_name)?;
+    rec.set_string(
+        &layout.preview_handlers,
+        &preview.braced(),
+        preview.display_name,
+    )?;
+    for ext in &plan.preview_extensions {
+        for base in [format!(".{ext}"), format!("SystemFileAssociations\\.{ext}")] {
+            let path = layout.classes_path(&format!("{base}\\shellex\\{PREVIEW_HANDLER_CATEGORY}"));
+            rec.set_string(&path, "", &preview.braced())?;
+        }
+    }
+
+    register_class(rec, layout, ids::CLSID_PROPERTY, dll)?;
+    for ext in &plan.property_extensions {
+        let path = format!("{}\\.{ext}", layout.property_handlers);
+        let occupied = layout
+            .root
+            .open(&path)
+            .ok()
+            .and_then(|k| k.get_string("").ok())
+            .is_some_and(|v| !v.is_empty());
+        if !occupied {
+            rec.set_string(&path, "", &ids::CLSID_PROPERTY.braced())?;
+        }
+    }
+    Ok(())
+}
+
 /// Registers per `plan`, replacing any previous registration made by this engine.
 pub fn register(layout: &Layout, plan: &Plan) -> Result<Report> {
     if layout.root.open(layout.manifest_key()).is_ok() {
@@ -304,6 +393,12 @@ pub fn register(layout: &Layout, plan: &Plan) -> Result<Report> {
             ids::PRODUCT_NAME
         ));
         rec.set_string(&path, "", &ids::CLSID_CONTEXT_MENU.braced())?;
+    }
+    if plan.cloud {
+        register_cloud(&mut rec, layout, &dll)?;
+    }
+    if let Some(installer) = &plan.installer {
+        register_installer(&mut rec, layout, installer, &dll)?;
     }
     if layout.notify {
         notify_assoc_changed();
@@ -584,6 +679,8 @@ mod tests {
                 classes: format!("{base}\\Classes"),
                 product: format!("{base}\\Product"),
                 approve: false,
+                preview_handlers: format!("{base}\\PreviewHandlers"),
+                property_handlers: format!("{base}\\PropertyHandlers"),
                 notify: false,
             };
             Self { base, layout }
@@ -615,8 +712,10 @@ mod tests {
                 .ok()
         }
 
-        /// Pre-existing user state: a ProgID, an unrelated shellex handler, and a foreign
-        /// thumbnail handler on .svg that registration overrides and must restore.
+        /// Pre-existing user state: a ProgID, an unrelated shellex handler, a foreign
+        /// thumbnail handler and a foreign preview handler on .svg that registration
+        /// overrides and must restore, and the OS property handler on .png that it must
+        /// leave alone.
         fn seed_user_state(&self) {
             let classes = format!("{}\\Classes", self.base);
             CURRENT_USER
@@ -637,6 +736,23 @@ mod tests {
                 ))
                 .unwrap()
                 .set_string("", "{FOREIGN}")
+                .unwrap();
+            CURRENT_USER
+                .create(format!(
+                    "{classes}\\.svg\\shellex\\{PREVIEW_HANDLER_CATEGORY}"
+                ))
+                .unwrap()
+                .set_string("", "{FOREIGN-PREVIEW}")
+                .unwrap();
+            CURRENT_USER
+                .create(format!("{}\\.png", self.layout.property_handlers))
+                .unwrap()
+                .set_string("", "{OS-PROPERTY-HANDLER}")
+                .unwrap();
+            CURRENT_USER
+                .create(&self.layout.preview_handlers)
+                .unwrap()
+                .set_string("{FOREIGN-PREVIEW}", "Other previewer")
                 .unwrap();
         }
 
@@ -670,6 +786,11 @@ mod tests {
             dll_path: dll,
             extensions: vec!["png", "svg"],
             context_menu: true,
+            cloud: true,
+            installer: Some(InstallerPlan {
+                preview_extensions: vec!["png", "svg"],
+                property_extensions: vec!["png", "qoi"],
+            }),
         }
     }
 
@@ -728,6 +849,67 @@ mod tests {
         let st = status(&sb.layout).unwrap();
         assert_eq!(st.thumbnail_extensions, 2);
         assert!(st.context_menu);
+    }
+
+    #[test]
+    fn cloud_preview_and_property_classes_register_and_undo() {
+        let sb = Sandbox::new("classes");
+        sb.seed_user_state();
+        let before = sb.snapshot();
+        let dll = PathBuf::from(r"C:\x\thumbwright_shell.dll");
+        register(&sb.layout, &plan(&dll)).unwrap();
+
+        let value = |path: String, name: &str| CURRENT_USER.open(path).ok()?.get_string(name).ok();
+        let classes = format!("{}\\Classes", sb.base);
+        let cloud = ids::CLSID_CLOUD_THUMBNAIL.braced();
+        let appid = ids::braced(ids::APPID_CLOUD);
+        assert_eq!(
+            value(format!("{classes}\\CLSID\\{cloud}"), "AppID").as_deref(),
+            Some(appid.as_str())
+        );
+        assert_eq!(
+            value(format!("{classes}\\CLSID\\{cloud}\\InprocServer32"), "").as_deref(),
+            Some(r"C:\x\thumbwright_shell.dll")
+        );
+        // REQ-COM-2: the value must exist and be empty (default surrogate), not be absent.
+        assert_eq!(
+            value(format!("{classes}\\AppID\\{appid}"), "DllSurrogate").as_deref(),
+            Some("")
+        );
+
+        let preview = ids::CLSID_PREVIEW.braced();
+        assert_eq!(
+            value(format!("{classes}\\CLSID\\{preview}"), "AppID").as_deref(),
+            Some(PREVHOST_APPID)
+        );
+        assert_eq!(
+            value(sb.layout.preview_handlers.clone(), &preview).as_deref(),
+            Some(ids::CLSID_PREVIEW.display_name)
+        );
+        assert_eq!(
+            value(sb.layout.preview_handlers.clone(), "{FOREIGN-PREVIEW}").as_deref(),
+            Some("Other previewer"),
+            "other previewers stay listed"
+        );
+        for ext in ["png", "svg"] {
+            for base in [format!(".{ext}"), format!("SystemFileAssociations\\.{ext}")] {
+                assert_eq!(
+                    sb.get(&format!("{base}\\shellex\\{PREVIEW_HANDLER_CATEGORY}")),
+                    Some(preview.clone())
+                );
+            }
+        }
+
+        let property = |ext: &str| value(format!("{}\\.{ext}", sb.layout.property_handlers), "");
+        assert_eq!(
+            property("png").as_deref(),
+            Some("{OS-PROPERTY-HANDLER}"),
+            "an existing property handler is never replaced"
+        );
+        assert_eq!(property("qoi"), Some(ids::CLSID_PROPERTY.braced()));
+
+        unregister(&sb.layout).unwrap();
+        assert_eq!(sb.snapshot(), before, "zero-diff after unregister");
     }
 
     #[test]

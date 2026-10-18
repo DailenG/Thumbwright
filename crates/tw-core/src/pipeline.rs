@@ -117,3 +117,36 @@ pub fn run_inproc(
         }
     }
 }
+
+/// Header-only [`probe`](crate::decode::probe::probe) under the same containment as
+/// [`run_inproc`]: own thread, panic contained, budget enforced, module pinned under an
+/// abandoned thread.
+pub fn run_probe(
+    data: Arc<Vec<u8>>,
+    ext: Option<&str>,
+    timeout: Duration,
+) -> Result<crate::decode::probe::ImageInfo> {
+    let (tx, rx) = mpsc::channel();
+    let ext = ext.map(str::to_owned);
+    let handle = std::thread::Builder::new()
+        .name("tw-probe".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let out = catch_unwind(AssertUnwindSafe(|| {
+                crate::decode::probe::probe(&data, ext.as_deref())
+            }))
+            .unwrap_or_else(|_| Err(DecodeError::malformed("probe panicked")));
+            let _ = tx.send(out);
+        })
+        .map_err(|e| DecodeError::malformed(format!("spawn probe thread: {e}")))?;
+    match rx.recv_timeout(timeout) {
+        Ok(out) => {
+            let _ = handle.join();
+            out
+        }
+        Err(_) => {
+            pin_this_module();
+            Err(DecodeError::Timeout)
+        }
+    }
+}
