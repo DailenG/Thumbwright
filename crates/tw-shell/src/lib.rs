@@ -98,6 +98,9 @@ pub unsafe extern "system" fn DllGetClassObject(
 #[unsafe(no_mangle)]
 pub extern "system" fn DllCanUnloadNow() -> HRESULT {
     if REFS.load(Ordering::SeqCst) == 0 {
+        // Pre-spawned workers are waiting on pipes owned by this module's statics; end
+        // them rather than leave them behind an unloaded DLL.
+        tw_core::worker::drain();
         S_OK
     } else {
         S_FALSE
