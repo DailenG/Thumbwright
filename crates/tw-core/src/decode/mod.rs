@@ -9,7 +9,9 @@
 //!   next tier can try.
 
 pub mod audio;
+pub mod djvu;
 pub mod jxl;
+pub mod ole;
 pub mod pcx;
 pub mod psd;
 pub mod raster;
