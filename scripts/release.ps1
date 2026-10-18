@@ -231,10 +231,16 @@ if (-not $SkipSign) {
 }
 
 Write-Host '== Result'
+# .NET hashing: Get-FileHash is missing from Windows PowerShell 5.1 when PSModulePath is
+# inherited from PowerShell 7 (it then loads 7's Microsoft.PowerShell.Utility).
+$sha = [System.Security.Cryptography.SHA256]::Create()
 Get-ChildItem -LiteralPath $dist -File | ForEach-Object {
-    $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+    $stream = [System.IO.File]::OpenRead($_.FullName)
+    try { $hash = [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+    finally { $stream.Dispose() }
     '{0,-34} {1,12:N0} bytes  sha256 {2}' -f $_.Name, $_.Length, $hash
 }
+$sha.Dispose()
 if ($SkipSign) {
     Write-Warning "UNSIGNED build: $msi"
 } else {
