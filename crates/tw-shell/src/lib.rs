@@ -1,11 +1,18 @@
 //! Thumbwright shell extension: the in-process COM server loaded by the OS thumbnail
-//! surrogate (`IThumbnailProvider` + `IInitializeWithStream`) and by Explorer
-//! (`IShellExtInit` + `IContextMenu{,2,3}`).
+//! surrogate (`IThumbnailProvider` + `IInitializeWithStream`), by Explorer
+//! (`IShellExtInit` + `IContextMenu{,2,3}`), and, for the installer-registered classes, by
+//! the cloud-folder surrogate (`cloud`), `prevhost.exe` (`preview`), the property system
+//! (`property`) and the Windows 11 modern menu (`explorer_command`, declared by the sparse
+//! package under `packaging/msix`).
 #![cfg(windows)]
 
 mod bitmap;
+mod cloud;
+mod explorer_command;
 mod factory;
 mod menu;
+mod preview;
+mod property;
 mod thumbnail;
 
 use std::ffi::c_void;
@@ -20,7 +27,7 @@ use windows::Win32::System::Ole::SELFREG_E_CLASS;
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows::core::{BOOL, GUID, HRESULT, IUnknown, Interface};
 
-use tw_core::registration::{self, Layout, Plan, Scope};
+use tw_core::registration::{self, InstallerPlan, Layout, Plan, Scope};
 
 static MODULE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 /// Live COM objects plus `IClassFactory::LockServer` locks (DllCanUnloadNow).
@@ -95,6 +102,11 @@ pub unsafe extern "system" fn DllGetClassObject(
     unsafe { unknown.query(riid, ppv) }
 }
 
+/// The instance handle of this DLL, for window classes.
+pub(crate) fn module_handle() -> HINSTANCE {
+    HINSTANCE(MODULE.load(Ordering::Relaxed))
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn DllCanUnloadNow() -> HRESULT {
     if REFS.load(Ordering::SeqCst) == 0 {
@@ -112,6 +124,31 @@ fn machine_plan_extensions() -> Vec<&'static str> {
         .collect()
 }
 
+/// Extensions of plain image files: the preview handler shows the decoded image for these.
+/// Documents, archives, audio and RAW containers keep their own previewers.
+fn preview_extensions() -> Vec<&'static str> {
+    use tw_core::decode::route::{Decoder, chain_for_ext};
+    tw_core::formats::all()
+        .iter()
+        .map(|f| f.ext)
+        .filter(|e| {
+            matches!(
+                chain_for_ext(e).first(),
+                Some(Decoder::Raster | Decoder::Jxl | Decoder::Pcx | Decoder::Sgi | Decoder::Svg)
+            )
+        })
+        .collect()
+}
+
+/// Extensions whose header the property handler can read (`decode::probe`).
+fn property_extensions() -> Vec<&'static str> {
+    tw_core::formats::all()
+        .iter()
+        .map(|f| f.ext)
+        .filter(|e| tw_core::decode::raster::format_for_ext(e).is_some())
+        .collect()
+}
+
 /// Machine-wide registration for the elevated installer (`regsvr32`), REQ-REG-8.
 #[unsafe(no_mangle)]
 pub extern "system" fn DllRegisterServer() -> HRESULT {
@@ -120,6 +157,11 @@ pub extern "system" fn DllRegisterServer() -> HRESULT {
         dll_path: &dll,
         extensions: machine_plan_extensions(),
         context_menu: true,
+        cloud: true,
+        installer: Some(InstallerPlan {
+            preview_extensions: preview_extensions(),
+            property_extensions: property_extensions(),
+        }),
     };
     match registration::register(&Layout::for_scope(Scope::Machine), &plan) {
         Ok(_) => S_OK,
