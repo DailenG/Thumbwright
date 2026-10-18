@@ -344,6 +344,13 @@ function Get-RegistryValue {
     try { return $key.GetValue($Name, $null) } finally { $key.Close() }
 }
 
+# Subtrees owned and rewritten by Windows itself while anything runs: the shell's resource-string
+# cache, Explorer's per-folder view state (Bags/BagMRU), and the Host Activity Manager's last-use
+# timestamps of other packaged apps (AppModel\SystemAppData\<package>\HAM). They are not product
+# state and change between any two exports, so they are left out. Everything else, including the
+# rest of AppModel and PackagedCom, is still compared.
+$script:OsVolatileKeys = '(?i)^\[HKEY_CURRENT_USER\\Software\\Classes\\Local Settings\\(MuiCache|Software\\Microsoft\\Windows\\Shell\\(Bags|BagMRU)|Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\SystemAppData\\[^\\\]]+\\HAM)(\\|\])'
+
 # A .reg export is UTF-16. Flatten to "key header" and "key header<TAB>value line" entries so that a
 # value line is compared together with the key it belongs to (a bare '@="x"' line is meaningless alone).
 function Read-RegExport {
@@ -353,10 +360,10 @@ function Read-RegExport {
         if ($line.Length -eq 0) { continue }
         if ($line[0] -eq '[') {
             $key = $line
-            [void]$Into.Add($line)
+            if ($key -notmatch $script:OsVolatileKeys) { [void]$Into.Add($line) }
         } elseif ($line.StartsWith('Windows Registry Editor')) {
             continue
-        } else {
+        } elseif ($key -notmatch $script:OsVolatileKeys) {
             [void]$Into.Add($key + "`t" + $line)
         }
     }
