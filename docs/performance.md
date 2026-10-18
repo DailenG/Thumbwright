@@ -232,6 +232,44 @@ removed it (13 to 21 us for files up to 250 KB; 12 MP: 2.3 -> 1.5 ms). The 2 GiB
 cap is unchanged. In the surrogate the file is held once; for worker-placed decoders the worker holds a second copy under its
 512 MiB Job limit (audio gets extra), as before.
 
+## 6. Cold start through the OS thumbnail cache (issue #21)
+
+The live verification (#3) saw a first PDF thumbnail take 18.8 s and the first PNG, JPEG
+and SVG about 3.3 s. To check whether that is antivirus first-launch scanning, and whether
+Authenticode signing changes it, `C:\wt\live\coldstart.ps1` (local throwaway harness)
+copied each build to a never-seen directory, registered it per user, killed the thumbnail
+surrogate, and timed `IThumbnailCache::GetThumbnail(WTS_FORCEEXTRACTION |
+WTS_EXTRACTDONOTCACHE, 256)` twice over the same four files: a 2-page PDF, a PNG, a 12 MP
+(3000x4000) camera JPEG and an SVG. Release build, Defender real-time protection on,
+three rounds per variant, interleaved.
+
+| First request after a fresh copy | Unsigned (3 rounds) | Signed (3 rounds) |
+|---|---|---|
+| PDF, pass 1 (DLL load + surrogate start + first worker + Windows.Data.Pdf) | 2246 / 2540 / 2529 ms | 2771 / 2671 / 2929 ms |
+| PDF, pass 2 | 2408 / 1165 / 1047 ms | 3451 / 3004 / 3567 ms |
+| PNG, pass 1 | 48 / 38 / 73 ms | 89 / 46 / 92 ms |
+| 12 MP JPEG, pass 1 | 780 / 606 / 567 ms | 696 / 763 / 723 ms |
+| SVG (worker), pass 1 | 27 / 23 / 24 ms | 30 / 21 / 57 ms |
+
+Findings:
+
+- **18.8 s did not reproduce.** The worst first request was 2.9 s (a PDF, including
+  starting the surrogate and loading the 14 MB DLL). The live run took its 18.8 s right
+  after a 16-minute release build with other builds running [INFERENCE: load and a first
+  antivirus scan of never-seen binaries, not product code].
+- **Signing does not shorten it.** Signed and unsigned are within noise on PNG, JPEG and
+  SVG. Signed PDF pass-2 times are 1-2 s higher in all three rounds; the cause was not
+  isolated [INFERENCE: signature checks on each new worker image load].
+- **The PDF cost is Windows.Data.Pdf itself**, not process start: pass 2 (surrogate warm,
+  worker pre-spawned) still takes 1.0 to 3.6 s. The 30 s PDF budget leaves an 8x margin
+  over the worst case measured.
+- PNG and SVG first requests are tens of milliseconds; the 12 MP JPEG's ~0.6 to 0.8 s is
+  a full-resolution decode (the `image` crate's JPEG decoder has no scaled IDCT).
+
+Decision: no code change for cold start. Possible future work, if PDFs in Explorer feel
+slow: keep one pre-spawned worker with `Windows.Data.Pdf` already activated (it must still
+serve one request only), or use a scaled JPEG decode for large JPEGs.
+
 ## Not acted on
 
 - **Alpha is averaged without premultiplying** in `DynamicImage::thumbnail`, so a
