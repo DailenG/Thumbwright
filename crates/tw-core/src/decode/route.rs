@@ -30,6 +30,9 @@ pub enum Decoder {
     Svg = 9,
     /// Windows Imaging Component (OS codecs, C++): HEIF, JPEG XR, AVIF, RAW extension.
     Wic = 10,
+    /// Legacy bitmap formats: XBM/XPM, Sun raster, MacPaint, IFF ILBM, PIX, CUT, TIM, VTF,
+    /// PFM/PHM, PGX, SCR, ANI, CALS (pure Rust, bounded).
+    Bitmap = 30,
 }
 
 /// Where a decoder may run (REQ-ISO-2 / REQ-ISO-3).
@@ -45,7 +48,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 10] = [
+    pub const ALL: [Decoder; 11] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -56,6 +59,7 @@ impl Decoder {
         Self::Zip,
         Self::Svg,
         Self::Wic,
+        Self::Bitmap,
     ];
 
     pub fn placement(self) -> Placement {
@@ -86,6 +90,7 @@ impl Decoder {
             Self::Audio => super::audio::extract(data, ext),
             Self::Zip => super::zip_preview::extract(data, ext),
             Self::Svg => super::svg::render(data, edge),
+            Self::Bitmap => super::bitmap::decode(data, ext),
             #[cfg(windows)]
             Self::Wic => super::wic::decode(data, edge),
             #[cfg(not(windows))]
@@ -117,6 +122,7 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
         (super::raw::EXTENSIONS, &[Raw, Wic]),
         (super::audio::EXTENSIONS, &[Audio]),
         (super::zip_preview::EXTENSIONS, &[Zip]),
+        (super::bitmap::EXTENSIONS, &[Bitmap]),
     ];
     single
         .iter()
@@ -184,6 +190,7 @@ mod tests {
             .chain(super::super::raw::EXTENSIONS)
             .chain(super::super::audio::EXTENSIONS)
             .chain(super::super::zip_preview::EXTENSIONS)
+            .chain(super::super::bitmap::EXTENSIONS)
         {
             assert!(formats::lookup(ext).is_some(), "{ext} not in matrix");
         }

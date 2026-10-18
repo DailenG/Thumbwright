@@ -9,6 +9,7 @@
 //!   next tier can try.
 
 pub mod audio;
+pub mod bitmap;
 pub mod jxl;
 pub mod pcx;
 pub mod psd;
