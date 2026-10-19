@@ -23,6 +23,7 @@
 //! below that extension's two roots plus any shared parent that becomes empty. Everything
 //! else stays journaled, so a later full `unregister` still leaves zero product keys.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use windows::Win32::Foundation::{
@@ -792,6 +793,102 @@ pub fn taken_over(layout: &Layout) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Extension (no dot, lower-case) -> CLSID of the thumbnail handler that Thumbwright's
+/// registration replaced, read from the journal's `old` entries on the thumbnail-handler
+/// keys. The `.<ext>` entry wins over the `SystemFileAssociations` twin. Extensions
+/// Thumbwright added fresh are absent, and so are those it already unticked (the old handler
+/// was handed back and its journal entries dropped). Read-only; a missing or unreadable
+/// journal gives an empty map.
+pub fn replaced_handlers(layout: &Layout) -> BTreeMap<String, String> {
+    let Ok(journal) = layout.root.open(layout.manifest_key()) else {
+        return BTreeMap::new();
+    };
+    let Ok(entries) = read_indexed_journal(&journal) else {
+        return BTreeMap::new();
+    };
+    let classes = format!("{}\\", layout.classes).to_ascii_lowercase();
+    let tail = format!("\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}").to_ascii_lowercase();
+    let ours = ids::CLSID_THUMBNAIL.braced();
+    let mut direct = BTreeMap::new();
+    let mut twin = BTreeMap::new();
+    // Oldest first, so the first entry per extension is the value that was really there.
+    for (.., step) in &entries {
+        let Step::OldValue {
+            path,
+            name,
+            ty,
+            data,
+            ..
+        } = step
+        else {
+            continue;
+        };
+        if !name.is_empty() || *ty != type_code(Type::String) {
+            continue;
+        }
+        let lower = path.to_ascii_lowercase();
+        let Some(base) = lower
+            .strip_prefix(&classes)
+            .and_then(|rest| rest.strip_suffix(&tail))
+        else {
+            continue;
+        };
+        let (map, ext) = match base.strip_prefix("systemfileassociations\\") {
+            Some(ext) => (&mut twin, ext),
+            None => (&mut direct, base),
+        };
+        let Some(ext) = ext.strip_prefix('.').filter(|e| check_ext(e).is_ok()) else {
+            continue;
+        };
+        let units: Vec<u16> = data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes(*b))
+            .take_while(|&u| u != 0)
+            .collect();
+        let clsid = String::from_utf16_lossy(&units).trim().to_owned();
+        if clsid.is_empty() || clsid.eq_ignore_ascii_case(&ours) {
+            continue;
+        }
+        map.entry(ext.to_owned()).or_insert(clsid);
+    }
+    twin.extend(direct);
+    twin
+}
+
+/// A readable name for a handler CLSID: the default value of `HKCR\CLSID\<clsid>` (a
+/// `@dll,-id` resource reference is resolved), or the CLSID itself when it has none.
+pub fn handler_display_name(clsid: &str) -> String {
+    let name = windows_registry::CLASSES_ROOT
+        .open(format!("CLSID\\{clsid}"))
+        .ok()
+        .and_then(|key| key.get_string("").ok())
+        .map(|n| n.trim().to_owned())
+        .filter(|n| !n.is_empty());
+    match name {
+        Some(n) if n.starts_with('@') => {
+            let mut buf = [0u16; 260];
+            // SAFETY: the `HSTRING` is a NUL-terminated wide string alive for the call and
+            // `buf` is the writable output buffer whose length the API receives.
+            let resolved = unsafe {
+                windows::Win32::UI::Shell::SHLoadIndirectString(
+                    &HSTRING::from(n.as_str()),
+                    &mut buf,
+                    None,
+                )
+            };
+            let len = buf.iter().position(|&u| u == 0).unwrap_or(buf.len());
+            match String::from_utf16(&buf[..len]) {
+                Ok(s) if resolved.is_ok() && !s.trim().is_empty() => s.trim().to_owned(),
+                _ => clsid.to_owned(),
+            }
+        }
+        Some(n) => n,
+        None => clsid.to_owned(),
+    }
 }
 
 /// Deletes a key we created if it is empty. `RegDeleteKeyW` is not recursive, so a subkey
@@ -1718,6 +1815,50 @@ mod tests {
         // The journal must still describe everything left, so a full unregister is clean.
         unregister(&sb.layout).unwrap();
         assert_eq!(sb.snapshot(), pristine);
+    }
+
+    #[test]
+    fn replaced_handlers_lists_what_registration_took_over() {
+        let sb = Sandbox::new("replaced");
+        sb.seed_user_state();
+        assert!(replaced_handlers(&sb.layout).is_empty(), "no journal yet");
+        let twin = |ext: &str, clsid: &str| {
+            CURRENT_USER
+                .create(format!(
+                    "{}\\Classes\\SystemFileAssociations\\.{ext}\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}",
+                    sb.base
+                ))
+                .unwrap()
+                .set_string("", clsid)
+                .unwrap();
+        };
+        twin("svg", "{TWIN-SVG}");
+        twin("tga", "{TWIN-TGA}");
+        register(&sb.layout, &plan_for(&dll(), &["png", "svg", "tga", "bmp"])).unwrap();
+
+        let replaced = replaced_handlers(&sb.layout);
+        let want: BTreeMap<String, String> = [("svg", "{FOREIGN}"), ("tga", "{TWIN-TGA}")]
+            .into_iter()
+            .map(|(e, c)| (e.to_owned(), c.to_owned()))
+            .collect();
+        assert_eq!(
+            replaced, want,
+            "the .ext entry beats the twin; png and bmp had no handler"
+        );
+
+        unregister_extension(&sb.layout, "svg").unwrap();
+        assert!(
+            !replaced_handlers(&sb.layout).contains_key("svg"),
+            "handed back, so no longer replaced"
+        );
+        unregister(&sb.layout).unwrap();
+        assert!(replaced_handlers(&sb.layout).is_empty());
+    }
+
+    #[test]
+    fn handler_display_name_falls_back_to_the_clsid() {
+        let unknown = "{00000000-0000-0000-0000-00000000DEAD}";
+        assert_eq!(handler_display_name(unknown), unknown);
     }
 
     #[test]

@@ -11,6 +11,9 @@ on-disk formats may still change.
 
 ### Changed
 
+- **Workbench, File types:** a new "Before Thumbwright" column shows which handler each type
+  replaced (for example Microsoft's Photo Thumbnail Provider), and the page says that unticking
+  a type hands it back to that program. Types Thumbwright added fresh show nothing.
 - **Right-click menu, Windows 11:** the packaged entry is now one "Thumbwright" item (it was
   a submenu that Windows 11 showed empty, or cut off after 16 commands). Clicking it opens
   Thumbwright's own popup at the cursor (`twctl menu`), in the system's dark or light theme,

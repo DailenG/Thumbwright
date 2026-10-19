@@ -4,8 +4,8 @@
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Controls::{
     LIST_VIEW_ITEM_FLAGS, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_STATE,
-    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE,
-    LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOLUMNW,
+    LVM_GETITEMCOUNT, LVM_GETITEMTEXTW, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVNI_SELECTED,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -137,6 +137,45 @@ pub fn lv_add_row(h: HWND, cells: &[&str]) {
         // LVM_SETITEMTEXTW
         send(h, 0x1000 + 116, index, std::ptr::from_ref(&item) as isize);
     }
+}
+
+/// The header text of column `index`, `None` when the list has no such column.
+pub fn lv_column_title(h: HWND, index: i32) -> Option<String> {
+    let mut buf = [0u16; 128];
+    let mut col = LVCOLUMNW {
+        mask: LVCF_TEXT,
+        pszText: windows::core::PWSTR(buf.as_mut_ptr()),
+        cchTextMax: buf.len() as i32,
+        ..Default::default()
+    };
+    let ok = send(
+        h,
+        LVM_GETCOLUMNW,
+        index as usize,
+        std::ptr::from_mut(&mut col) as isize,
+    );
+    (ok != 0).then(|| {
+        let len = buf.iter().position(|&u| u == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..len])
+    })
+}
+
+/// The text of cell (`row`, `column`).
+pub fn lv_cell_text(h: HWND, row: usize, column: i32) -> String {
+    let mut buf = [0u16; 256];
+    let mut item = LVITEMW {
+        iSubItem: column,
+        pszText: windows::core::PWSTR(buf.as_mut_ptr()),
+        cchTextMax: buf.len() as i32,
+        ..Default::default()
+    };
+    let n = send(
+        h,
+        LVM_GETITEMTEXTW,
+        row,
+        std::ptr::from_mut(&mut item) as isize,
+    );
+    String::from_utf16_lossy(&buf[..usize::try_from(n).unwrap_or(0).min(buf.len())])
 }
 
 /// State image index 1 is "unchecked", 2 is "checked" (list views with check boxes).

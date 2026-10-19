@@ -1,6 +1,7 @@
 //! Settings-app behaviour that needs no window: saving settings, keeping the per-user
 //! registration in step with the File types list, and turning Explorer thumbnails on or off.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use tw_core::config::{self, Settings};
@@ -133,6 +134,16 @@ pub fn installed_summary(
     )
 }
 
+/// For the File types "Before Thumbwright" column: extension -> readable name of the
+/// thumbnail handler Thumbwright's registration in `layout` replaced. Names are resolved
+/// here, once; extensions Thumbwright added fresh have no entry.
+pub fn replaced_handler_names(layout: &Layout) -> BTreeMap<String, String> {
+    registration::replaced_handlers(layout)
+        .into_iter()
+        .map(|(ext, clsid)| (ext, registration::handler_display_name(&clsid)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +212,28 @@ mod tests {
         assert!(all.len() > 100, "{} formats", all.len());
         assert!(all.iter().any(|f| f.ext == "png"));
         assert!(all.iter().all(|f| !route::chain_for_ext(f.ext).is_empty()));
+    }
+
+    #[test]
+    fn replaced_handler_names_list_only_types_that_took_over_a_handler() {
+        let sb = Sandbox::new("replaced");
+        CURRENT_USER
+            .create(format!(
+                "{}\\.svg\\shellex\\{}",
+                sb.layout.classes,
+                registration::THUMBNAIL_HANDLER_CATEGORY
+            ))
+            .unwrap()
+            .set_string("", "{FOREIGN-SVG}")
+            .unwrap();
+        assert!(replaced_handler_names(&sb.layout).is_empty());
+        sb.register(&["png", "svg"], false);
+        let names = replaced_handler_names(&sb.layout);
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert_eq!(
+            names["svg"], "{FOREIGN-SVG}",
+            "unknown CLSID shows as itself"
+        );
     }
 
     #[test]

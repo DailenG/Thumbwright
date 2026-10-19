@@ -4,6 +4,7 @@
 //! cannot be the source of truth).
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::path::PathBuf;
 
@@ -42,9 +43,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, PCWSTR, w};
 
 use crate::win::{
-    confirm, error, get_text, info, is_checked, lv_add_column, lv_add_row, lv_clear, lv_count,
-    lv_select, lv_selected, lv_set_checked, lv_set_extended, send, set_checked, set_font, set_text,
-    wide,
+    confirm, error, get_text, info, is_checked, lv_add_column, lv_add_row, lv_cell_text, lv_clear,
+    lv_column_title, lv_count, lv_select, lv_selected, lv_set_checked, lv_set_extended, send,
+    set_checked, set_font, set_text, wide,
 };
 use crate::{cache, model};
 
@@ -181,6 +182,9 @@ struct App {
     menu: Vec<MenuRow>,
     /// Who draws the thumbnails of the enabled types, as last read from the registry.
     coverage: registration::Coverage,
+    /// Extension -> readable name of the handler Thumbwright replaced, resolved once when
+    /// the window opens (the "Before Thumbwright" column).
+    before: BTreeMap<String, String>,
 }
 
 thread_local! {
@@ -203,6 +207,17 @@ struct Init {
 
 fn user_layout() -> Layout {
     Layout::for_scope(Scope::User)
+}
+
+/// The registration this copy manages: machine-wide for an installed copy, the user's for a
+/// portable one. Names the "Before Thumbwright" column.
+fn replaced_before(dir: &std::path::Path) -> BTreeMap<String, String> {
+    let scope = if config::is_portable(dir) {
+        Scope::User
+    } else {
+        Scope::Machine
+    };
+    model::replaced_handler_names(&Layout::for_scope(scope))
 }
 
 impl App {
@@ -411,16 +426,17 @@ impl App {
         );
         self.c.types_count = self.label(p, "", (X0 + 280, 6, 240, 32), ID_TYPES_COUNT);
         let lv = self.list(p, (X0, 44, CONTENT_W, 326), ID_TYPES, true);
-        lv_add_column(lv, 0, "Extension", self.s(110));
-        lv_add_column(lv, 1, "Description", self.s(370));
+        lv_add_column(lv, 0, "Extension", self.s(70));
+        lv_add_column(lv, 1, "Description", self.s(210));
+        lv_add_column(lv, 2, "Before Thumbwright", self.s(200));
         self.c.types = lv;
         self.button(p, "Select all", (X0, 380, 100, 26), ID_TYPES_ALL);
         self.button(p, "Clear all", (X0 + 108, 380, 100, 26), ID_TYPES_NONE);
         self.button(p, "Defaults", (X0 + 216, 380, 100, 26), ID_TYPES_DEFAULTS);
         self.label(
             p,
-            "Checked types get Thumbwright's thumbnail handler. Select all and Clear all apply \
-             to the rows the filter shows.",
+            "Untick a type to hand it back to the program shown under Before Thumbwright. \
+             Select all and Clear all apply to the rows the filter shows.",
             (X0, 412, CONTENT_W, 32),
             0,
         );
@@ -678,7 +694,8 @@ impl App {
                 || t.ext.contains(filter.as_str())
                 || t.desc.to_ascii_lowercase().contains(&filter)
             {
-                lv_add_row(lv, &[&format!(".{}", t.ext), t.desc]);
+                let before = self.before.get(t.ext).map_or("", String::as_str);
+                lv_add_row(lv, &[&format!(".{}", t.ext), t.desc, before]);
                 lv_set_checked(lv, self.shown.len(), t.enabled);
                 self.shown.push(i);
             }
@@ -1103,6 +1120,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 shown: Vec::new(),
                 menu: Vec::new(),
                 coverage: registration::Coverage::default(),
+                before: replaced_before(&init.dir),
             };
             app.build(&init.settings);
             APP.with(|cell| *cell.borrow_mut() = Some(app));
@@ -1493,6 +1511,21 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
     check(
         cleared.type_enabled("png") && !cleared.type_enabled("svg"),
         "Clear all must only affect the filtered rows",
+    )?;
+
+    // The "Before Thumbwright" column exists and shows the name recorded for a type.
+    check(
+        lv_column_title(types, 2).as_deref() == Some("Before Thumbwright")
+            && lv_column_title(types, 3).is_none(),
+        "File types column headers",
+    )?;
+    with_app(|a| {
+        a.before.insert("png".into(), "Test Handler".into());
+        a.fill_types();
+    });
+    check(
+        lv_cell_text(types, png, 2) == "Test Handler",
+        "Before Thumbwright cells",
     )?;
 
     // The one preview checkbox maps straight onto the on/off setting.
