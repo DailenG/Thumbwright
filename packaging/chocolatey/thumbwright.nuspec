@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>thumbwright</id>
+    <version>0.1.0</version>
+    <title>Thumbwright</title>
+    <authors>Dailen Gunter</authors>
+    <owners>Dailen</owners>
+    <projectUrl>https://daileng.github.io/Thumbwright/</projectUrl>
+    <projectSourceUrl>https://github.com/DailenG/Thumbwright</projectSourceUrl>
+    <packageSourceUrl>https://github.com/DailenG/Thumbwright/tree/main/packaging/chocolatey</packageSourceUrl>
+    <bugTrackerUrl>https://github.com/DailenG/Thumbwright/issues</bugTrackerUrl>
+    <docsUrl>https://github.com/DailenG/Thumbwright#readme</docsUrl>
+    <licenseUrl>https://github.com/DailenG/Thumbwright/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <copyright>Copyright (C) 2026 Dailen Gunter</copyright>
+    <tags>thumbnails explorer shell-extension context-menu raw jpeg-xl heic image-converter foss</tags>
+    <summary>Windows Explorer thumbnails for 315 file formats, plus a right-click image toolkit.</summary>
+    <description><![CDATA[Thumbwright is a Windows Explorer thumbnail provider and context-menu toolkit written in Rust.
+
+## Features
+
+- **Thumbnails for 315 formats**: camera RAW (CR3, CR2, CRW, NEF, ARW, ORF, RW2, RAF, X3F, DNG and more), JPEG XL, JPEG 2000, HEIC/AVIF, Blender, Aseprite, GIMP XCF, PSD, Krita, SVG, DWG/DXF, FreeCAD, 3MF, G-code, PDF, EPUB, legacy Office, DjVu, ZIP/7z/RAR and CBZ/CBR comics, video frames, album art, Android APK icons and a long tail of scientific and legacy bitmaps.
+- **Right-click toolkit** in both the classic and the Windows 11 menu: convert, resize, lossless JPEG rotation, shrink for email, compress to size, OCR, combine into PDF or CBZ, rename by date or camera, sort into folders, wallpaper, lock screen and folder icon.
+- **Isolated decoders**: OS codecs and complex decoders run in a separate process limited by a Job Object (memory, CPU time, no UI access), so a malformed file cannot crash Explorer.
+- **Reversible registration**: Thumbwright never changes an extension's existing ProgID or default handler, and uninstall removes exactly what it wrote.
+- Command-line tool `twctl` for every menu verb plus batch conversion and diagnostics (`twctl doctor`).
+
+## Notes
+
+- Installs per-machine to `Program Files\Thumbwright` (requires administrator).
+- HEIC and AVIF thumbnails use Microsoft's HEIF, HEVC and AV1 codec extensions from the Microsoft Store.
+- Windows 11 may keep a newly installed menu entry hidden until you enable it in **Show more options > Customize menu**.
+- The Windows 11 menu entry appears after your next sign-in.
+]]></description>
+    <releaseNotes>https://github.com/DailenG/Thumbwright/blob/main/CHANGELOG.md</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+    <file src="legal\**" target="legal" />
+  </files>
+</package>

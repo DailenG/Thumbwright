@@ -1,0 +1,26 @@
+VERIFICATION
+
+Verification is intended to assist the Chocolatey moderators and community
+in verifying that this package's contents are trustworthy.
+
+The package maintainer is also the software author. The embedded MSI is the
+release asset published on the project's GitHub releases page:
+
+  https://github.com/DailenG/Thumbwright/releases/tag/v0.1.0
+
+To verify:
+
+1. Download Thumbwright-0.1.0-x64.msi from the page above.
+2. Compare its checksum with the embedded tools\Thumbwright-0.1.0-x64.msi:
+
+     Get-FileHash -Algorithm SHA256 Thumbwright-0.1.0-x64.msi
+
+   SHA256: E331E975219C886B4879220A0926E43F22FF144D782570410756A5E7EA259483
+
+3. The MSI and every binary inside it carry an Authenticode signature with
+   an RFC 3161 timestamp:
+
+     Get-AuthenticodeSignature Thumbwright-0.1.0-x64.msi
+
+The license (GPL-3.0) is in legal\LICENSE.txt and at
+https://github.com/DailenG/Thumbwright/blob/main/LICENSE

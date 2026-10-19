@@ -1,0 +1,4 @@
+# The embedded installer is the signed GitHub release asset; copy it in before building:
+#   gh release download v<version> -R DailenG/Thumbwright -p "*.msi" -D tools
+# legal\VERIFICATION.txt carries its SHA256.
+tools/*.msi
