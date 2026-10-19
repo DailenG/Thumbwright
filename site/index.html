@@ -319,10 +319,13 @@ footer h4{margin:0 0 12px;font:700 12.5px/1 var(--mono);letter-spacing:.12em;tex
 footer a{color:var(--muted)}
 footer a:hover{color:var(--fg)}
 
-/* scroll reveal (progressive) */
+/* scroll reveal (progressive): only where the browser drives it from scroll, never in print,
+   and content is fully visible by the time a third of it has entered the viewport */
 @supports (animation-timeline:view()){
-  .rv{animation:rise linear both;animation-timeline:view();animation-range:entry 0% entry 38%}
-  @keyframes rise{from{opacity:0;transform:translateY(26px)}to{opacity:1;transform:none}}
+  @media screen and (prefers-reduced-motion:no-preference){
+    .rv{animation:rise linear both;animation-timeline:view();animation-range:entry 0% entry 30%}
+    @keyframes rise{from{opacity:.001;transform:translateY(22px)}to{opacity:1;transform:none}}
+  }
 }
 
 /* ---------- responsive ---------- */
@@ -531,8 +534,7 @@ footer a:hover{color:var(--fg)}
       <p class="how"><b>Where is it?</b> On Windows 11, right-click and choose <b>Thumbwright</b>, or hold <kbd>Shift</kbd> while you right-click. Every tool also runs from a terminal as <code>twctl</code>.</p>
     </div>
     <figure class="shot">
-      <!-- PLACEHOLDER: replace img/menu-new.png with a real capture after the live test (see img/SOURCES.md). -->
-      <img src="img/menu-new.png" width="860" height="1024" alt="Thumbwright's right-click menu: a preview of the selected photo on top, then Convert to, Resize, Rotate and flip, Make smaller, Copy text from image, Copy, Organise, Set as and Thumbwright settings.">
+      <img src="img/menu.png" width="710" height="670" loading="lazy" alt="Thumbwright's popup menu in dark mode: a thumbnail of the selected camera RAW photo with its name and size on top, then Convert to, Resize, Rotate and flip, Make smaller, Copy text from image, Copy, Organise, Details, Set as and Thumbwright Workbench.">
     </figure>
   </div>
 </section>

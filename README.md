@@ -44,8 +44,7 @@ On Windows 11, right-click > Thumbwright, or Shift + right-click, or Show more o
 - Rename by date or camera, and sort into folders
 - Set as lock screen or folder icon
 
-![The Thumbwright right-click menu in File Explorer](site/img/menu-new.png)
-<!-- screenshot pending: site/img/menu-new.png -->
+![The Thumbwright popup menu in dark mode, with a thumbnail of the selected RAW photo on top](site/img/menu.png)
 
 ### Command line
 
