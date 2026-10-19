@@ -1,105 +1,140 @@
-# Thumbwright
+<p align="center"><img src="site/img/icon.png" width="96" alt="Thumbwright logo"></p>
+<h1 align="center">Thumbwright</h1>
+<p align="center"><b>See your HEIC, RAW, PDF and CAD files in Explorer. Convert, resize and OCR from the right-click menu.</b><br>
+Free · open source · no internet access · Windows 10/11</p>
 
-Clean-room Windows Explorer thumbnail provider and context-menu toolkit, written in Rust. Pre-1.0: interfaces and on-disk formats may still change.
+<p align="center">
+<a href="https://github.com/DailenG/Thumbwright/releases/latest"><img src="https://img.shields.io/github/v/release/DailenG/Thumbwright" alt="Latest release"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License: GPL-3.0"></a>
+<a href="#status-and-limits"><img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6" alt="Platform: Windows 10 | 11"></a>
+<a href="#safe-by-design"><img src="https://img.shields.io/badge/Authenticode-signed-success" alt="Authenticode signed"></a>
+</p>
 
-- `thumbwright_shell.dll`: COM server. Thumbnail provider (`IThumbnailProvider` + `IInitializeWithStream`, hosted by the OS thumbnail surrogate) and classic context menu (`IContextMenu{,2,3}`). Also the cloud-folder thumbnail provider (off by default; the "Thumbnails in cloud folders" setting is `CloudThumbnails`), and, registered only by the machine-wide installer (`regsvr32`), the preview-pane handler, the property handler and the Windows 11 `IExplorerCommand` menu.
-- `tw-worker.exe`: per-request decoder process (Job Object: 512 MiB, 20 s CPU, kill-on-close) for the decoders that must not run in the surrogate: OS codecs (WIC, Media Foundation video, PDF, GDI metafiles), SVG, audio tags, JPEG 2000, DjVu, 7z/RAR and Live Photo bundles.
-- `twctl.exe`: CLI, per-user registration, and the back end for every menu verb. It never hosts an OS codec itself: WIC, video, PDF and the other worker-placed decoders run in `tw-worker.exe` for conversions as well as thumbnails.
-- `thumbwright-settings.exe`: settings window (General, File types, Menu, Limits, Preview, Maintenance). Saves to `Thumbwright.ini` (portable) or `HKCU\Software\Thumbwright` (installed); toggling a file type updates the per-user registration through the journaled engine. `--self-test` creates, drives and destroys the window without showing it.
-- `packaging/msix/`: sparse MSIX package that declares the Windows 11 menu verb. `build.ps1 -Publisher "CN=<signing certificate subject>"` builds it unsigned with `makeappx`; `scripts/release.ps1` signs it with the release identity and the MSI registers it for all users (`packaging/wix/README.md`).
+![Before and after: the same folder in File Explorer, grey generic icons versus Thumbwright thumbnails](site/img/hero-before-after.png)
 
-Formats: 315 of the 363 formats in the spec matrix have a thumbnail route (`twctl formats --json`, entries with `thumbnail: true`; the 48 others and the verification state are tracked in `docs/ARCHITECTURE.md`, "Format coverage"). They cover camera RAW, JPEG XL, JPEG 2000, HEIC/AVIF (OS codecs), video frames (Media Foundation, offset set by `VideoFramePercent`), PDF, legacy Office and OLE previews, ebooks, archives, Android packages, design and CAD previews, meshes, and the scientific and legacy bitmap long tail. Types without a route are never registered, so Windows' own handlers stay in charge. Measurements of the thumbnail path and the decisions behind pre-spawned workers: `docs/performance.md`.
+## Install
 
-Requirements: `FUNCTIONAL_SPEC.md`. Architecture and invariants I1-I8: `docs/ARCHITECTURE.md`. Review records (the original reviewer brief, verification state and the security review with its fixes) are archived in `docs/history/`. Open work is tracked as GitHub issues.
+- **Download:** [Thumbwright-&lt;version&gt;-x64.msi](https://github.com/DailenG/Thumbwright/releases/latest) from the latest release (signed, per-machine, needs admin).
+- **Chocolatey:** `choco install thumbwright`
+- **winget:** not yet.
+- **Silent install:** `msiexec /i Thumbwright-<version>-x64.msi /qn`
+- **Upgrade:** run the newer MSI the same way, or `choco upgrade thumbwright`.
+- **Uninstall:** `msiexec /x Thumbwright-<version>-x64.msi /qn`, or `choco uninstall thumbwright`. It uninstalls cleanly; the registration is journaled and reversible.
 
-## Requirements
+<!-- verify: MENU=0 -->
+Thumbnails only, without the right-click menu: `msiexec /i Thumbwright-<version>-x64.msi /qn MENU=0` (coming in 0.1.2).
 
-- Windows 10 version 2004 (build 19041) or later, or Windows 11, x64. The sparse MSIX that carries the Windows 11 menu declares 10.0.19041.0 as its minimum.
-- Tested on Windows 11 build 26340 only. Windows 10 behaviour (classic menu only, no modern menu) has not been exercised.
-- HEIC, HEIF, AVCI and AVIF thumbnails come from the OS codecs, so they need the Microsoft Store HEIF, HEVC and AV1 codec extensions; without them those types show no thumbnail. JPEG XL, camera RAW, JPEG 2000 and the other pure-Rust formats need nothing extra.
-- Video frames need Media Foundation (part of Windows, absent from some "N" editions without the Media Feature Pack); some codecs inside video files need the matching Store extension.
-- `twctl doctor` reports which of these OS codecs are present on the machine.
+HEIC and HEIF files need the free Microsoft HEIF and HEVC extensions from the Microsoft Store; `twctl doctor` tells you whether they are present.
 
-## Build
+## What you get
 
-Requires Windows x64 and the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it). Linking needs the MSVC CRT/SDK libraries: either Visual Studio Build Tools ("Desktop development with C++"), or a self-contained local setup (rust-lld + xwin under a gitignored `.toolchain/`, wired up by `scripts/devenv.ps1`; optional, and not needed with Visual Studio). The CRT is linked statically (`.cargo/config.toml`), so the binaries need no VC++ redistributable. No crate may compile C/C++ (no C compiler is assumed).
+### Thumbnails
 
-```
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
-cargo xtask licenses --check        # dependency audit (permissive licenses, no native code); regenerates THIRD_PARTY_LICENSES.md without --check
-cargo build --release --workspace   # thin LTO; slow (11-28 min on the maintainer's machine)
-```
+Explorer shows real thumbnails for 315 file types: camera RAW, HEIC, AVIF, JPEG XL, PDF, Office and OpenDocument files, video frames, ebooks and comics, Photoshop, Krita, Blender and CAD previews, and more (see [Formats](#formats)). Risky decoding runs in a separate process, not inside Explorer.
 
-The DLL, `tw-worker.exe`, `twctl.exe` and `thumbwright-settings.exe` must sit in one directory.
+### Right-click tools
 
-Some tests write a throw-away key under `HKCU\Software\ThumbwrightTest-*` (removed on drop) and files under `%TEMP%`. Timing tests warm up freshly copied executables because antivirus scans them on first launch.
+On Windows 11, right-click > Thumbwright, or Shift + right-click, or Show more options. Select one file or many:
 
-## Try it (per-user, no elevation)
+- Convert to JPEG, PNG, WebP, AVIF or JPEG XL
+- Resize, and lossless JPEG rotate
+- Shrink for email, or to under X MB
+- Remove location and camera info
+- Copy text from an image (OCR)
+- Combine into one PDF, a searchable PDF or a CBZ
+- Rename by date or camera, and sort into folders
+- Set as lock screen or folder icon
 
-Portable mode is marked by a `Thumbwright.ini` next to the binaries.
+![The Thumbwright right-click menu in File Explorer](site/img/menu-new.png)
+<!-- screenshot pending: site/img/menu-new.png -->
 
-```
-twctl register            # HKCU only; refuses from a non-portable copy
-twctl register --status
-twctl register --off      # undoes exactly what register wrote
-```
+### Command line
 
-Windows ignores HKCU COM registrations for elevated processes, so test Explorer from a non-elevated session. Run `register --off` before moving the folder (the registration stores an absolute DLL path).
+`twctl` runs every menu verb from a terminal or script, converts whole folders (`twctl batch`), warms the thumbnail cache (`twctl prebuild`) and checks your setup (`twctl doctor`). `twctl --mcp` is an MCP server over stdio, so an AI assistant can drive the same operations. `twctl --help` lists everything.
 
-The settings window (`thumbwright-settings.exe`) edits the same settings. The conversion defaults it saves are honoured by `twctl`: `JpegQuality` is the default for `--quality` (and for any JPEG written without one), `PngCompression` sets the PNG level, `KeepMetadata` decides whether EXIF, the ICC colour profile and XMP are carried over from JPEG, PNG, WebP and TIFF sources by `convert`, `convert-to`, `resize`, `email`, `compress`, `batch convert` and the rotate fallback (a losslessly rotated JPEG is stripped of EXIF and XMP when off; its ICC profile stays), and `PreserveFileDate` gives the output the source's modification time in `convert`, `convert-to`, `resize`, `rotate` and `batch convert`. The profile is written unchanged and the pixels are never colour converted, so a profile that does not describe the pixels written (CMYK, or grey for RGB output) is dropped with a note; AVIF output holds EXIF only and JPEG XL output EXIF and XMP (neither writer can embed an ICC profile). `rotate --trim` makes a JPEG flip or turn lossless even when the image is not a whole number of MCUs, by dropping the partial edge row/column (like `jpegtran -trim`). `UseEmbeddedThumbs` decides whether a camera RAW file's embedded JPEG preview is tried before the OS RAW codec (default) or after it; other embedded previews (Office, design, archive covers) have no alternative decoder, so the setting does not apply to them. With a registration present, Apply adds or removes exactly the handler keys of the file types you toggled and broadcasts `SHCNE_ASSOCCHANGED`. Maintenance has Repair (re-register, then clear the thumbnail cache), Rebuild thumbnail cache, Turn on/off thumbnails and Open log. Windows has no API to purge the thumbnail cache, so Rebuild ends this user's `explorer.exe`, deletes `%LOCALAPPDATA%\Microsoft\Windows\Explorer\thumbcache_*.db`, and makes sure the shell is running again; the window asks for confirmation first.
+## Formats
 
-## Install (per-machine MSI)
+315 of the 363 formats in the spec matrix have a thumbnail route. The other 48 are tracked in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#format-coverage), and types without a route are never registered, so Windows' own handlers stay in charge.
 
-`Thumbwright-<version>-x64.msi` installs to `Program Files\Thumbwright` for all users and needs elevation (REQ-REG-8). It ships `thumbwright_shell.dll`, `tw-worker.exe`, `twctl.exe`, `thumbwright-settings.exe`, `Thumbwright.msix`, `LICENSE` and `THIRD_PARTY_LICENSES.md`, and never a `Thumbwright.ini`, so an installed copy is not in portable mode.
+| Family | Types | Examples |
+|---|---:|---|
+| Raster | 148 | JPEG, PNG, WebP, HEIC, AVIF, JPEG XL, JPEG 2000, TIFF, legacy bitmaps |
+| Document | 46 | PDF, Word, Excel, PowerPoint, OpenDocument, Visio, DjVu, InDesign |
+| Design | 41 | Photoshop, Illustrator, Affinity, Krita, Blender, DWG, DXF, FreeCAD, 3MF, G-code |
+| CameraRaw | 30 | CR2, CR3, NEF, ARW, DNG, RAF, ORF and other camera RAW |
+| Audio | 18 | cover art from tagged MP3, FLAC, M4A, Ogg, WMA |
+| Video | 17 | frames from MP4, MKV, MOV, AVI, WebM |
+| Ebook | 12 | EPUB, MOBI, AZW, FB2, CBZ, CBR |
+| Archive | 3 | ZIP, 7z, RAR (contact sheet) |
 
-```
-msiexec /i Thumbwright-0.1.1-x64.msi /qn      # silent install
-msiexec /fa Thumbwright-0.1.1-x64.msi /qn     # repair (re-registers)
-msiexec /x  Thumbwright-0.1.1-x64.msi /qn     # uninstall
-```
+Run `twctl formats` for the full list, or use the lookup box on the [website](https://daileng.github.io/Thumbwright/#formats). CAD (DWG, DXF, FreeCAD, 3MF, G-code) is thumbnail-only: the thumbnail is the preview embedded in the file, not a render of the drawing.
 
-Registration is done by the DLL, not by the MSI's registry tables: a deferred custom action runs `regsvr32 /s thumbwright_shell.dll` (`DllRegisterServer`, `Scope::Machine`: HKLM class and handler keys plus `Shell Extensions\Approved`, journaled under `HKLM\Software\Thumbwright\Registration`); uninstall runs `regsvr32 /u` before the files are removed, and upgrade and repair re-register cleanly. Details and the reasoning: `packaging/wix/README.md`. Per-user (`twctl register`) is for portable copies only and refuses to run from an installed copy.
+## Safe by design
 
-The Windows 11 modern menu verb needs package identity. The MSI ships `Thumbwright.msix` (a sparse package; `packaging/msix/`) and registers it for all users the way Microsoft documents for machine-wide installers: `Add-AppxPackage -Stage ... -ExternalLocation <install dir>` followed by `Add-AppxProvisionedPackage -Online`; uninstall deprovisions it and removes it for all users. Windows registers a provisioned package for each user at their next sign-in, so the verb appears after the next sign-in (right away with `Add-AppxPackage -RegisterByFamilyName -MainPackage <family name>`). A failure to register does not fail the install (the exit codes are in the verbose MSI log). Reasoning and alternatives: `packaging/wix/README.md`.
+- **Offline.** No component opens a network connection: no upload, telemetry or update check ([SECURITY.md](SECURITY.md)).
+- **Isolated decoders.** Risky decoding runs in `tw-worker.exe`, one process per request, inside a Job Object (512 MiB, 20 s CPU, kill-on-close).
+- **Memory-safe Rust.** No C or C++ is compiled into any binary.
+- **Reversible registration.** Every registry change is journaled. Thumbwright never changes an existing ProgID or default handler, and uninstall removes exactly what it wrote.
+- **Signed binaries** with a `SHA256SUMS` checksum file for each release.
 
-`scripts/test-install.ps1` (elevated, on a test machine) installs, upgrades, repairs and uninstalls the MSI and fails on any registry difference (HKLM and HKCU) between the state before install and after uninstall; for a signed package it also checks that the Windows 11 menu package is provisioned after install and gone after uninstall. `scripts/test-install.ps1 -DryRun` needs no elevation and inspects the package tables and the `.msix` inside instead.
+## Status and limits
 
-## Release build and signing
+- Pre-1.0: interfaces and on-disk formats may still change.
+- Tested on Windows 11 build 26340. Windows 10 is not yet tested (classic menu only there).
+- HEIC, HEIF, AVCI and AVIF thumbnails need the Microsoft Store codec extensions (HEIF, HEVC, AV1).
+- Video frames use Media Foundation. "N" editions of Windows need the Media Feature Pack.
+- File types already owned by another program (for example a cloud-storage app's thumbnail handler) are left alone. Thumbwright never takes over another app's handler automatically, and `twctl doctor` lists them.
+- Windows' own handler wins for some types, such as .jpg (Photo Thumbnail Provider) and .ico.
 
-```
-scripts\release.ps1 -SkipSign                     # unsigned dev build -> dist\Thumbwright-<version>-x64.msi
-scripts\release.ps1 -CertThumbprint <sha1>        # signtool with a code-signing certificate in your store: the reproducible route
-scripts\release.ps1                               # Azure Trusted Signing: needs $env:TW_SIGN_HELPER (or -SignHelper) and the AZURE_* variables
-```
+## Troubleshooting
 
-There is no default signing helper: a release with neither `-CertThumbprint` nor a usable helper stops before building, with a message naming both routes. The helper runs with the Azure signing secrets in its environment, so keep it in a folder only you can write to (not a synced or shared one).
+Run `twctl doctor`: it checks each part and prints a fix hint for every problem. To report one, run `twctl doctor --bundle out.zip` and attach `out.zip` to an [issue](https://github.com/DailenG/Thumbwright/issues). If thumbnails look stale after a change, use Rebuild thumbnail cache on the Maintenance page of Thumbwright settings. The log is `%LOCALAPPDATA%\Thumbwright.log` ([details](docs/DEVELOPING.md#diagnostics-log)).
 
-Release binaries must not carry the builder's paths (rustc embeds cargo registry paths in panic locations). `release.ps1` therefore passes `--config target.x86_64-pc-windows-msvc.rustflags=[...]` to both `cargo build` runs with a `--remap-path-prefix` for the builder's `USERPROFILE`, rustup home, cargo home, `CARGO_TARGET_DIR` and the repository root. The prefixes are derived from the current machine at run time, so every builder remaps their own paths with no edit, and the script scans the binaries afterwards and fails if any of those paths is still in them. `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` replace the rustflags in `.cargo/config.toml` outright, so `release.ps1` refuses to run with either set. A plain `cargo build --release` outside the script does not remap and its binaries must not be distributed.
+## FAQ
 
-The script runs the dependency audit, `cargo build --release --workspace --locked`, collects the binaries into `dist\`, Authenticode-signs `thumbwright_shell.dll`, `tw-worker.exe` and `twctl.exe` (REQ-SEC-4), and reads the subject of the certificate that signed the DLL. That subject is the sparse package's `Publisher` (it must equal the signing certificate's subject exactly, so it is derived, never typed in). It then rebuilds so `thumbwright-settings.exe` embeds the matching `<msix>` identity manifest element (`crates/tw-settings/build.rs`), signs it, builds `dist\Thumbwright.msix` with `packaging\msix\build.ps1 -Publisher <that subject>`, signs it the same way and checks its signer subject against the manifest. The MSI is built from the signed files (the `.msix` inside) and signed, and then `signtool verify /pa /v` runs on every file, failing on any that is unsigned or not RFC 3161 timestamped. With `-SkipSign` the package carries the placeholder publisher `-DevPublisher` and is unsigned, so Windows cannot register it. It needs the Windows SDK's `signtool.exe` and `makeappx.exe` and WiX v7 (`dotnet tool install --global wix --version 7.0.0`); WiX v7 requires accepting its Open Source Maintenance Fee EULA once (`wix eula accept wix7`; free below US$10,000/year of revenue, see `packaging/wix/README.md`). Azure Trusted Signing needs `AzureTrustedSignTool` on PATH and `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TRUSTED_SIGNING_ACCOUNT` and `AZURE_TRUSTED_SIGNING_PROFILE` in the environment. `dist\` is gitignored.
+<details>
+<summary>Why do my HEIC files have no thumbnail?</summary>
 
-## twctl
+Windows needs the free HEIF and HEVC extensions from the Microsoft Store to decode HEIC. Install them, then run `twctl doctor` to confirm. Another program may also own .heic; see the next question.
+</details>
 
-`twctl --help` lists every command; `twctl <command> --help` shows one. Besides the image verbs (convert, resize, rotate, compress, strip, clip, wallpaper, ...):
+<details>
+<summary>Why does another app still own .jpg or .heic?</summary>
 
-- `doctor [file] [--bundle out.zip]`: sectioned self-check (spec 7.1) with FIX hints; foreign ProgID-level thumbnail handlers are reported.
-- `batch <thumbnail|convert|info> <in|dir...> [--json]` and `batch --retry-from report.json`: multi-file jobs on all cores; the JSON report lists each file's outcome and the retry reruns only the failures.
-- `prebuild <dir|file...> [--size N,N] [--rebuild-all]`: warms Explorer's thumbnail cache (also the "Build thumbnails here" folder-menu entry).
-- `pdf` / `cbz <out> <in...> [--strict] [--json]`: combine images; `pdf --searchable` adds an invisible OCR text layer. The JSON result is `{combined, omitted[{input,cause,detail}], output, requested, status}`.
-- `ocr <in>`: Windows' built-in OCR engine (runs in `twctl`, never in the shell DLL).
-- `rename`, `sort`, `folder-icon`, `lock-screen`, `pick-color`, `settings`.
-- `convert-to avif|jxl`: pure-Rust encoders (AVIF through `ravif`/`rav1e` without assembly; JPEG XL is lossless only).
-- `--mcp`: MCP server over stdio exposing the CLI's operations plus `view`.
+Thumbwright never changes an existing handler on its own. A cloud-storage app may already own a type, and Windows keeps its own Photo Thumbnail Provider for .jpg. `twctl doctor` lists what is owned elsewhere.
+</details>
 
-## Diagnostics log
+<details>
+<summary>How do I get the full menu?</summary>
 
-All components append to `%LOCALAPPDATA%\Thumbwright.log`. Failures are always logged (`ERROR GetThumbnail: failed ... ext=<ext> size=<bytes>`). With "Verbose logging" on in the settings window (`VerboseLog=1`), the shell DLL also logs one `TRACE` line per successful request: the class (`thumbnail`, `cloud`, `preview`, `property`, `menu`), the file extension (never the path), the requested size, the decoder that produced the result with its position in the routed chain (`attempt`), the `tw-worker.exe` pid (`-` for an in-process tier), elapsed milliseconds and the output size. Example: `TRACE GetThumbnail: ok class=thumbnail ext=svg size=112 req=256 decoder=Svg attempt=1 worker_pid=4812 ms=21 out=256x128`. With the setting off nothing is formatted or written.
+Shift + right-click, or choose Show more options on the Windows 11 menu.
+</details>
 
-## Clean-room rules
+<details>
+<summary>How do I uninstall it?</summary>
 
-This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, official Microsoft documentation and permissively licensed crate sources. Do not consult the reference product's binaries or source. The reference product is deliberately not named in this repository.
+Apps > Installed apps > Thumbwright > Uninstall, or `msiexec /x Thumbwright-<version>-x64.msi /qn`, or `choco uninstall thumbwright`.
+</details>
+
+<details>
+<summary>Does it phone home?</summary>
+
+No. No component opens a network connection, and there is no telemetry or update check.
+</details>
+
+<details>
+<summary>Is it safe for corrupt or hostile files?</summary>
+
+Risky decoders run in an isolated process with memory and CPU limits. If one fails, only that process dies and Explorer keeps running.
+</details>
+
+## Contributing and building
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Build steps, components, packaging and signing are in [docs/DEVELOPING.md](docs/DEVELOPING.md).
+
+## Provenance
+
+Thumbwright is an independent clean-room implementation, built from [FUNCTIONAL_SPEC.md](FUNCTIONAL_SPEC.md), official Microsoft documentation and permissively licensed crates. The product it is modelled on is deliberately not named.
 
 ## License
 

@@ -1,0 +1,59 @@
+# Site image sources and licences
+
+Every picture on the website and in the README is either public domain (CC0), made by the
+project, or a screenshot of the site itself. Nothing comes from a private collection.
+
+## Thumbnails (`tiles/*.jpg`)
+
+Each was drawn by Thumbwright's own thumbnail path, so the pictures show what Explorer shows:
+
+```
+twctl thumbnail <source file> out.png --size 420
+twctl convert out.png tiles/<name>.jpg --quality 80
+```
+
+### Camera RAW: raw.pixls.us, CC0
+
+[raw.pixls.us](https://raw.pixls.us/) asks every contributor to release their sample under CC0
+(public domain). The same files, with the same SHA-256 hashes, are pinned in
+`scripts/fetch-samples.ps1`, whose index rows all read "Creative Commons 0 - Public Domain".
+
+| Image | Source file | Where | SHA-256 of the source |
+|---|---|---|---|
+| `tiles/otters-cr3.jpg` | `canon-eos-r6.cr3` | https://raw.pixls.us/ (file id 4659) | `74abb0a113d075ad9887a058082f40dd2a938c4813a08474d82356f11a027778` |
+| `tiles/robots-arw.jpg` | `sony-a100.arw` | https://raw.pixls.us/ (file id 2346) | `4df7981ac4baec9648b4f106751ea4b09a6e27bc70a15f8ef09bec051fec362d` |
+| `tiles/colour-fan-orf.jpg` | `olympus-em5.orf` | https://raw.pixls.us/ (file id 1084) | `b2221977cbc6eba0d3b363351072092e5647eaa0d02a5d8432b5d985b29f669f` |
+| `tiles/flower-pot-nef.jpg` | `nikon-df-rotated.nef` | https://raw.pixls.us/ (file id 1386) | `902483437706df59bed669ebb4eb7d9ecaf95b23a70d6c79e319316ce50ee884` |
+| `tiles/house-raf.jpg` | `fujifilm-s5000.raf` | https://raw.pixls.us/ (file id 2726) | `dabd5e74521a6980156be9fd4b88d0c37b0fe4d0e0e6f5c12db8cffff1b76297` |
+| `tiles/castle-orf.jpg` | `olympus-e3.orf` | https://raw.pixls.us/ (file id 1803) | `ba4605bbd9fe9b77971da444bcdb1698904c0ad4ebdf9dd42dd45ab255f3f6d4` |
+| `tiles/garden-cr3.jpg` | `canon-eos-r6-mark-iii.cr3` | https://raw.pixls.us/ (file id 8964) | `7e1a5d84297a52853b0bbe5a5c03a5d4f5b93e00b7020271523240f9cabfe50e` |
+| `tiles/buddha-cr3.jpg` | `canon-eos-m50.cr3` | https://raw.pixls.us/ (file id 4656) | `27a88fdae82516ba136e12c2cc9b934f25dbaaac24d64ab4e5517f8524463594` |
+| `tiles/town-arw.jpg` | `sony-ilce-7s.arw` | https://raw.pixls.us/ (file id 1582) | `a35ebb2fbec929daa5beb20d1ce5c15a8aac7b1a7a231455387f3df8a7442e07` |
+| `tiles/autumn-rw2.jpg` | `panasonic-lx7.rw2` | https://raw.pixls.us/ (file id 7010) | `18dfc3877e944020299635a8c2fad61fca2485b1c9b67645a495ee870a86e599` |
+
+The RAW files are not committed. Download them with `scripts/fetch-samples.ps1`.
+
+### JPEG XL: libjxl conformance set, CC0
+
+| Image | Source file | Licence |
+|---|---|---|
+| `tiles/bicycles-jxl.jpg` | `crates/tw-core/tests/fixtures/jxl/bicycles.jxl` | CC0 (listed as such in the libjxl `testcases/README.md`; see `crates/tw-core/tests/fixtures/README.md` and `LICENSE-libjxl-conformance.txt`) |
+
+### PDF page: made for this project
+
+| Image | Source | Licence |
+|---|---|---|
+| `tiles/report-pdf.jpg` | `src/report-page.svg` (artwork drawn for this page, no third-party content), rendered with `twctl convert`, turned into a PDF with `twctl pdf`, and thumbnailed from that PDF | Same as the repository (GPL-3.0-or-later) |
+
+## Composed images
+
+| Image | What it is |
+|---|---|
+| `hero-before-after.png` | Screenshot of the before/after demo on the home page (the folder mock, split in the middle). Built only from the thumbnails above. |
+| `social-card.svg`, `social-card.png` | 1280 x 640 sharing card (Open Graph and Twitter). Source SVG embeds downsized copies of the thumbnails above. |
+| `menu-new.png` | **PLACEHOLDER.** A drawing of the planned right-click menu with the "Otters" thumbnail on top, made so the page layout has an image. It is not a screenshot. Replace it with a real capture after the live Explorer test (860 px wide, dark mode, 100% scale). |
+| `icon.png`, `icon.svg` | The current Thumbwright mark. Replace after the logo is chosen (`packaging/icons/concepts/`). |
+
+## Not used
+
+No image on this site shows anyone's own files, folder names or personal data.
