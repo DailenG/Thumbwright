@@ -15,7 +15,7 @@ To verify:
 
      Get-FileHash -Algorithm SHA256 Thumbwright-0.1.2-x64.msi
 
-   SHA256: <filled in from the release's SHA256SUMS.txt when the package is built>
+   SHA256: 8D1C67E69298026E881D43EDD1B7F89DD10C9350137B0D3A9431B402D59B5E5C
 
 3. The MSI and every binary inside it carry an Authenticode signature with
    an RFC 3161 timestamp:
