@@ -46,15 +46,24 @@
 
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/DailenG/Thumbwright" />
 
+    <!-- The install directory Id is deliberately MIXED CASE (audit P-1, P-2). Windows Installer
+         treats a property whose name has no lower-case letter as PUBLIC: it can be set on the
+         msiexec command line (msiexec /i ... INSTALLFOLDER=...), and the value is then pasted,
+         unescaped, into the PowerShell command lines of the custom actions below and decides
+         where a SYSTEM-run regsvr32 loads the DLL from. A private (mixed-case) property cannot be
+         overridden from the command line, so the location is always
+         [ProgramFiles64Folder]Thumbwright\ . Never rename it to an all-upper-case Id;
+         scripts/test-install.ps1 -DryRun fails if any public property or directory is referenced
+         by an action. -->
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="Thumbwright" />
+      <Directory Id="InstallFolder" Name="Thumbwright" />
     </StandardDirectory>
 
     <Feature Id="Main" Title="Thumbwright" AllowAbsent="no">
       <ComponentGroupRef Id="ProductFiles" />
     </Feature>
 
-    <ComponentGroup Id="ProductFiles" Directory="INSTALLFOLDER">
+    <ComponentGroup Id="ProductFiles" Directory="InstallFolder">
       <Component Id="ShellDll">
         <File Id="ShellDllFile" Name="thumbwright_shell.dll" Source="$(SourceDir)\thumbwright_shell.dll" KeyPath="yes" />
       </Component>
@@ -82,30 +91,30 @@
 
     <!-- Deferred actions run in the elevated installer service (LocalSystem), so they cannot
          read session properties at run time. For an EXE-type action, Windows Installer
-         formats ExeCommand when it writes the script, so [INSTALLFOLDER] below is the
+         formats ExeCommand when it writes the script, so [InstallFolder] below is the
          resolved install path.
 
          regsvr32 comes from System64Folder (the 64-bit regsvr32): the DLL is x64 and its
          HKLM writes must land in the 64-bit registry view. Exit code 0 is DllRegisterServer
          returning S_OK. -->
-    <CustomAction Id="RegisterShell" Directory="INSTALLFOLDER"
+    <CustomAction Id="RegisterShell" Directory="InstallFolder"
         Execute="deferred" Impersonate="no" Return="check"
-        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s &quot;[INSTALLFOLDER]thumbwright_shell.dll&quot;" />
+        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s &quot;[InstallFolder]thumbwright_shell.dll&quot;" />
 
     <!-- Rollback of a failed install/repair/upgrade: undo the registration while the files are
          still present. Rollback scripts run in reverse order, so this runs before InstallFiles
          is rolled back. Best effort: a failure here cannot be recovered from. -->
-    <CustomAction Id="RegisterShellRollback" Directory="INSTALLFOLDER"
+    <CustomAction Id="RegisterShellRollback" Directory="InstallFolder"
         Execute="rollback" Impersonate="no" Return="ignore"
-        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[INSTALLFOLDER]thumbwright_shell.dll&quot;" />
+        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[InstallFolder]thumbwright_shell.dll&quot;" />
 
     <!-- Uninstall, and the removal half of a major upgrade. Return="ignore": a failing
          unregistration (for example a corrupt journal) must not make the product
          impossible to uninstall; regsvr32's exit code is in the verbose MSI log, and
          scripts/test-install.ps1 fails on any residue. -->
-    <CustomAction Id="UnregisterShell" Directory="INSTALLFOLDER"
+    <CustomAction Id="UnregisterShell" Directory="InstallFolder"
         Execute="deferred" Impersonate="no" Return="ignore"
-        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[INSTALLFOLDER]thumbwright_shell.dll&quot;" />
+        ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[InstallFolder]thumbwright_shell.dll&quot;" />
 
     <!-- Windows 11 modern menu: the sparse package is registered for ALL users, by the route
          the Microsoft documentation gives a machine-wide installer ("Grant package identity by
@@ -132,35 +141,35 @@
     <?define PowerShell="[System64Folder]WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command" ?>
     <?define CmdDeprovision="Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq '$(PackageName)' | Remove-AppxProvisionedPackage -Online" ?>
     <?define CmdRemove="Get-AppxPackage -AllUsers -Name '$(PackageName)' | Remove-AppxPackage -AllUsers" ?>
-    <?define CmdStage="Add-AppxPackage -Stage '[INSTALLFOLDER]Thumbwright.msix' -ExternalLocation ('[INSTALLFOLDER]'.TrimEnd('\'))" ?>
-    <?define CmdRegisterUser="Add-AppxPackage -Path '[INSTALLFOLDER]Thumbwright.msix' -ExternalLocation ('[INSTALLFOLDER]'.TrimEnd('\'))" ?>
-    <?define CmdProvision="Add-AppxProvisionedPackage -Online -PackagePath '[INSTALLFOLDER]Thumbwright.msix' -SkipLicense" ?>
+    <?define CmdStage="Add-AppxPackage -Stage '[InstallFolder]Thumbwright.msix' -ExternalLocation ('[InstallFolder]'.TrimEnd('\'))" ?>
+    <?define CmdRegisterUser="Add-AppxPackage -Path '[InstallFolder]Thumbwright.msix' -ExternalLocation ('[InstallFolder]'.TrimEnd('\'))" ?>
+    <?define CmdProvision="Add-AppxProvisionedPackage -Online -PackagePath '[InstallFolder]Thumbwright.msix' -SkipLicense" ?>
 
     <!-- Removal: deprovision (so nobody new is registered), then remove for every user, which
          also stops the package's COM surrogate that holds the DLL. They run on uninstall and
          on the removal half of a major upgrade, and also on install and repair, where they
          clear an earlier registration of the same package first (Add-AppxPackage refuses a
          version that is already registered); on a clean machine they find nothing. -->
-    <CustomAction Id="DeprovisionPackage" Directory="INSTALLFOLDER"
+    <CustomAction Id="DeprovisionPackage" Directory="InstallFolder"
         Execute="deferred" Impersonate="no" Return="ignore"
         ExeCommand="$(PowerShell) &quot;$(CmdDeprovision)&quot;" />
-    <CustomAction Id="RemovePackage" Directory="INSTALLFOLDER"
+    <CustomAction Id="RemovePackage" Directory="InstallFolder"
         Execute="deferred" Impersonate="no" Return="ignore"
         ExeCommand="$(PowerShell) &quot;$(CmdRemove)&quot;" />
 
-    <CustomAction Id="StagePackage" Directory="INSTALLFOLDER"
+    <CustomAction Id="StagePackage" Directory="InstallFolder"
         Execute="deferred" Impersonate="no" Return="ignore"
         ExeCommand="$(PowerShell) &quot;$(CmdStage)&quot;" />
-    <CustomAction Id="ProvisionPackage" Directory="INSTALLFOLDER"
+    <CustomAction Id="ProvisionPackage" Directory="InstallFolder"
         Execute="deferred" Impersonate="no" Return="ignore"
         ExeCommand="$(PowerShell) &quot;$(CmdProvision)&quot;" />
 
     <!-- Rollback of a failed install: undo provisioning, then staging (rollback scripts run in
          reverse order). Best effort. -->
-    <CustomAction Id="StagePackageRollback" Directory="INSTALLFOLDER"
+    <CustomAction Id="StagePackageRollback" Directory="InstallFolder"
         Execute="rollback" Impersonate="no" Return="ignore"
         ExeCommand="$(PowerShell) &quot;$(CmdRemove)&quot;" />
-    <CustomAction Id="ProvisionPackageRollback" Directory="INSTALLFOLDER"
+    <CustomAction Id="ProvisionPackageRollback" Directory="InstallFolder"
         Execute="rollback" Impersonate="no" Return="ignore"
         ExeCommand="$(PowerShell) &quot;$(CmdDeprovision)&quot;" />
 
@@ -173,9 +182,11 @@
          still gets the verb at their next sign-in (the provisioned family), so nothing
          depends on it. If the same version is already registered for that user (a repair),
          Add-AppxPackage fails and the action is ignored; the earlier registration stands. -->
-    <CustomAction Id="RegisterPackageForUser" Directory="INSTALLFOLDER"
+    <CustomAction Id="RegisterPackageForUser" Directory="InstallFolder"
         Execute="deferred" Impersonate="yes" Return="ignore"
         ExeCommand="$(PowerShell) &quot;$(CmdRegisterUser)&quot;" />
+
+    <CustomAction Id="RejectUnsafeInstallFolder" Error="The install folder must not contain a single quote (')." />
 
     <InstallExecuteSequence>
       <!-- Remove the package first, so none of our code is loaded when the DLL is unregistered
@@ -196,6 +207,10 @@
       <Custom Action="ProvisionPackage" After="StagePackage" Condition='NOT (REMOVE="ALL")' />
       <Custom Action="ProvisionPackageRollback" Before="ProvisionPackage" Condition='NOT (REMOVE="ALL")' />
       <Custom Action="RegisterPackageForUser" After="ProvisionPackage" Condition='NOT (REMOVE="ALL")' />
+      <!-- Defence in depth for the PowerShell actions: their paths sit in single-quoted strings
+           that cannot be escaped here, so refuse an install directory containing a single quote
+           (reachable only through a transform or a relocated Program Files). -->
+      <Custom Action="RejectUnsafeInstallFolder" After="CostFinalize" Condition='NOT (REMOVE="ALL") AND InstallFolder &gt;&lt; "&apos;"' />
     </InstallExecuteSequence>
   </Package>
 </Wix>

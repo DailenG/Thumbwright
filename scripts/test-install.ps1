@@ -43,7 +43,11 @@
     -DryRun is the non-elevated mode: it builds an MSI from -SourceDir (or inspects -Msi) and checks
     its tables through the Windows Installer API (files, no INI, no Registry rows, the deferred
     register action after InstallFiles, the unregister action before RemoveFiles, the package
-    register/unregister actions), extracts it with an administrative install into the work
+    register/unregister actions, and that no public property can inject into them: the install
+    directory Id is the private InstallFolder, no INSTALLFOLDER exists, no directory Id other
+    than TARGETDIR is all upper case, and no action formats an all-upper-case [PROPERTY], so
+    nothing on the msiexec command line reaches a command), extracts it with an administrative
+    install into the work
     directory, inspects the Thumbwright.msix in it, and runs `wix msi validate` (ICE). Nothing is
     installed and no registry is touched.
 
@@ -183,8 +187,8 @@ function Test-MsiPackage {
 
     $components = Get-MsiRows $db 'SELECT Component, Directory_, Attributes FROM Component' 3
     $components | ForEach-Object { Write-Host ("    Component {0,-24} dir {1} attrs {2}" -f $_[0], $_[1], $_[2]) }
-    Assert-Check 'All components are 64-bit in INSTALLFOLDER' (
-        -not ($components | Where-Object { (([int]$_[2]) -band 256) -eq 0 -or $_[1] -ne 'INSTALLFOLDER' }))
+    Assert-Check 'All components are 64-bit in InstallFolder' (
+        -not ($components | Where-Object { (([int]$_[2]) -band 256) -eq 0 -or $_[1] -ne 'InstallFolder' }))
 
     $hasRegistry = Test-MsiTable $db 'Registry'
     $registryRows = if ($hasRegistry) { (Get-MsiRows $db 'SELECT Registry FROM Registry' 1).Count } else { 0 }
@@ -212,7 +216,7 @@ function Test-MsiPackage {
             Assert-Check "$($a[0]) is a deferred, non-impersonated EXE action" (
                 (($type -band 1024) -ne 0) -and (($type -band 2048) -ne 0) -and (($type -band 7) -eq 2))
             Assert-Check "$($a[0]) runs the 64-bit regsvr32 on the installed DLL" (
-                $a[3] -match 'System64Folder\]regsvr32\.exe' -and $a[3] -match 'INSTALLFOLDER\]thumbwright_shell\.dll')
+                $a[3] -match 'System64Folder\]regsvr32\.exe' -and $a[3] -match 'InstallFolder\]thumbwright_shell\.dll')
         }
         Assert-Check 'RegisterShell registers (no /u); UnregisterShell unregisters (/u)' (
             ($reg[3] -notmatch ' /u ') -and ($unreg[3] -match ' /s /u '))
@@ -264,11 +268,11 @@ function Test-MsiPackage {
             $actions['RemovePackage'][3].Contains($remove) -and $actions['RemovePackage'][3].EndsWith(' | Remove-AppxPackage -AllUsers"') -and
             $actions['StagePackageRollback'][3] -eq $actions['RemovePackage'][3])
         Assert-Check 'StagePackage stages Thumbwright.msix with the install directory as external location' (
-            $actions['StagePackage'][3].Contains("Add-AppxPackage -Stage '[INSTALLFOLDER]Thumbwright.msix' -ExternalLocation ('[INSTALLFOLDER]'.TrimEnd('\'))"))
+            $actions['StagePackage'][3].Contains("Add-AppxPackage -Stage '[InstallFolder]Thumbwright.msix' -ExternalLocation ('[InstallFolder]'.TrimEnd('\'))"))
         Assert-Check 'ProvisionPackage provisions the staged package for all users' (
-            $actions['ProvisionPackage'][3].Contains("Add-AppxProvisionedPackage -Online -PackagePath '[INSTALLFOLDER]Thumbwright.msix' -SkipLicense"))
+            $actions['ProvisionPackage'][3].Contains("Add-AppxProvisionedPackage -Online -PackagePath '[InstallFolder]Thumbwright.msix' -SkipLicense"))
         Assert-Check 'RegisterPackageForUser registers the msix for the installing user' (
-            $actions['RegisterPackageForUser'][3] -match 'Add-AppxPackage -Path .\[INSTALLFOLDER\]Thumbwright\.msix. -ExternalLocation' -and
+            $actions['RegisterPackageForUser'][3] -match 'Add-AppxPackage -Path .\[InstallFolder\]Thumbwright\.msix. -ExternalLocation' -and
             $actions['RegisterPackageForUser'][3] -notmatch 'AllUsers')
         $names = @(foreach ($name in 'DeprovisionPackage', 'RemovePackage') { [regex]::Matches($actions[$name][3], "'([^'\[]+)'") | ForEach-Object { $_.Groups[1].Value } })
         $script:CaPackageName = $names | Select-Object -First 1
@@ -289,6 +293,35 @@ function Test-MsiPackage {
         Assert-Check 'Each rollback action is scheduled just before the action it undoes' (
             (& $seq 'StagePackageRollback') -lt (& $seq 'StagePackage') -and (& $seq 'ProvisionPackageRollback') -lt (& $seq 'ProvisionPackage') -and
             (& $seq 'StagePackageRollback') -gt (& $seq 'RegisterShell'))
+    }
+
+    # P-1 / P-2: a public property (no lower-case letter in its name) can be set on the msiexec
+    # command line and would be pasted into the elevated custom actions. The install directory
+    # must be private, and no action may format a public property or directory.
+    $propertyNames = @(Get-MsiRows $db 'SELECT Property FROM Property' 1 | ForEach-Object { $_[0] })
+    Assert-Check 'Property table has no INSTALLFOLDER (a public install directory would be overridable and injectable)' (
+        -not ($propertyNames | Where-Object { $_ -ceq 'INSTALLFOLDER' }))
+    $secure = Get-MsiProperty $db 'SecureCustomProperties'
+    Assert-Check 'SecureCustomProperties does not list INSTALLFOLDER' (-not $secure -or (@($secure -split ';') -cnotcontains 'INSTALLFOLDER')) $secure
+    $directoryIds = @(Get-MsiRows $db 'SELECT Directory FROM Directory' 1 | ForEach-Object { $_[0] })
+    $publicDirectories = @($directoryIds | Where-Object { $_ -cne 'TARGETDIR' -and $_ -cnotmatch '[a-z]' })
+    Assert-Check 'Every Directory Id except TARGETDIR is private (has a lower-case letter)' ($publicDirectories.Count -eq 0) ($publicDirectories -join ', ')
+    Assert-Check 'The install directory Id is InstallFolder' ($directoryIds -ccontains 'InstallFolder')
+    $publicRefs = New-Object System.Collections.Generic.List[string]
+    foreach ($a in $actions.Values) {
+        foreach ($m in [regex]::Matches($a[3], '\[([^\[\]]+)\]')) {
+            if ($m.Groups[1].Value -cnotmatch '[a-z]') { $publicRefs.Add("$($a[0]): $($m.Value)") }
+        }
+    }
+    Assert-Check 'No custom action formats a public property or directory ([UPPERCASE]), so nothing on the msiexec command line can reach a command' (
+        $publicRefs.Count -eq 0) ($publicRefs -join '; ')
+    if ($actions.ContainsKey('RejectUnsafeInstallFolder') -and $sequence.ContainsKey('RejectUnsafeInstallFolder')) {
+        Assert-Check 'RejectUnsafeInstallFolder is an error action (type 19) after CostFinalize, install only' (
+            ([int]$actions['RejectUnsafeInstallFolder'][1] -band 63) -eq 19 -and
+            [int]$sequence['RejectUnsafeInstallFolder'][2] -gt [int](Get-MsiRows $db "SELECT Sequence FROM InstallExecuteSequence WHERE Action='CostFinalize'" 1)[0][0] -and
+            $sequence['RejectUnsafeInstallFolder'][1] -match 'NOT \(REMOVE="ALL"\)' -and $sequence['RejectUnsafeInstallFolder'][1] -match 'InstallFolder')
+    } else {
+        Assert-Check 'RejectUnsafeInstallFolder exists and is sequenced' $false
     }
 
     Assert-Check 'Package is per-machine (ALLUSERS=1)' ((Get-MsiProperty $db 'ALLUSERS') -eq '1')
