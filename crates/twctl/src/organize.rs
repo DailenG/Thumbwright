@@ -288,7 +288,10 @@ pub fn rename(files: &[PathBuf], pattern: &str, max: u64) -> Result<String> {
             move_unique(f, dir, &stem, &ext)
         })();
         match result {
-            Ok(to) => lines.push(format!("{} -> {}", f.display(), to.display())),
+            Ok(to) => {
+                lines.push(format!("{} -> {}", f.display(), to.display()));
+                crate::feedback::created([to]);
+            }
             Err(e) => errors.push(e),
         }
     }
@@ -343,7 +346,11 @@ pub fn sort(files: &[PathBuf], by: &str, tag: &str, max: u64) -> Result<String> 
             move_unique(f, &dir, &stem, &ext)
         })();
         match result {
-            Ok(to) => lines.push(format!("{} -> {}", f.display(), to.display())),
+            Ok(to) => {
+                lines.push(format!("{} -> {}", f.display(), to.display()));
+                // The new folders are what the user wants to see; one window for all.
+                crate::feedback::created(to.parent().map(Path::to_path_buf));
+            }
             Err(e) => errors.push(e),
         }
     }

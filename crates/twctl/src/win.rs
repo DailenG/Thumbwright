@@ -1,6 +1,7 @@
-//! Windows integration for the menu verbs: clipboard, wallpaper, message boxes.
+//! Windows integration for the menu verbs: clipboard, wallpaper, message boxes, selecting
+//! result files in Explorer.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
@@ -14,11 +15,12 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::Shell::{
     DESKTOP_WALLPAPER_POSITION, DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH,
-    DWPOS_TILE, DesktopWallpaper, IDesktopWallpaper,
+    DWPOS_TILE, DesktopWallpaper, IDesktopWallpaper, ILCreateFromPathW, ILFindLastID, ILFree,
+    SHOpenFolderAndSelectItems,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, HWND_MESSAGE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-    MessageBoxW, WINDOW_EX_STYLE, WINDOW_STYLE,
+    MB_SETFOREGROUND, MessageBoxW, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -41,15 +43,70 @@ pub fn shell_path(path: &Path) -> std::path::PathBuf {
     )
 }
 
+/// Shows `text` in a message box. Errors are first turned into plain language (one
+/// sentence, then the technical detail); Ctrl+C copies the whole box text.
 pub fn message(text: &str, error: bool) {
-    let style = MB_OK
-        | if error {
-            MB_ICONERROR
-        } else {
-            MB_ICONINFORMATION
-        };
+    let (body, style) = if error {
+        (
+            format!(
+                "{}\n\nPress Ctrl+C to copy these details.",
+                crate::friendly::explain(text)
+            ),
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+        )
+    } else {
+        (text.to_owned(), MB_OK | MB_ICONINFORMATION)
+    };
     // SAFETY: owner-less message box with valid strings.
-    unsafe { MessageBoxW(None, &HSTRING::from(text), w!("Thumbwright"), style) };
+    unsafe { MessageBoxW(None, &HSTRING::from(body), w!("Thumbwright"), style) };
+}
+
+/// Opens Explorer on the folder of each path with the path selected (one window per
+/// folder; the shell reuses a window that already shows the folder). Best effort: a path
+/// that is gone or a shell failure is ignored, because the verb itself succeeded.
+pub fn reveal(paths: &[PathBuf]) {
+    let groups = group_by_folder(paths.iter().map(|p| shell_path(p)));
+    if groups.is_empty() {
+        return;
+    }
+    // SAFETY: COM on this thread; every item-id list is freed after the call.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        for (folder, files) in groups {
+            let folder_id = ILCreateFromPathW(&HSTRING::from(folder.as_os_str()));
+            let full: Vec<_> = files
+                .iter()
+                .map(|f| ILCreateFromPathW(&HSTRING::from(f.as_os_str())))
+                .filter(|id| !id.is_null())
+                .collect();
+            let children: Vec<_> = full
+                .iter()
+                .map(|id| ILFindLastID(*id).cast_const())
+                .collect();
+            if !folder_id.is_null() && !children.is_empty() {
+                let _ = SHOpenFolderAndSelectItems(folder_id, Some(&children), 0);
+            }
+            for id in full {
+                ILFree(Some(id));
+            }
+            ILFree(Some(folder_id));
+        }
+    }
+}
+
+/// Groups `paths` by parent folder, keeping first-seen order of folders and of files.
+fn group_by_folder(paths: impl Iterator<Item = PathBuf>) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let mut groups: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+    for p in paths {
+        let Some(parent) = p.parent().map(Path::to_path_buf) else {
+            continue;
+        };
+        match groups.iter_mut().find(|(f, _)| *f == parent) {
+            Some((_, files)) => files.push(p),
+            None => groups.push((parent, vec![p])),
+        }
+    }
+    groups
 }
 
 fn global_from(bytes: &[u8]) -> Result<HGLOBAL> {
@@ -195,5 +252,24 @@ pub fn set_wallpaper(image_path: &Path, position: DESKTOP_WALLPAPER_POSITION) ->
         dw.SetPosition(position).map_err(|e| e.to_string())?;
         dw.SetWallpaper(PCWSTR::null(), &HSTRING::from(image_path.as_os_str()))
             .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reveal_groups_files_by_folder_in_first_seen_order() {
+        let paths = ["C:\\a\\1.jpg", "C:\\b\\2.jpg", "C:\\a\\3.jpg"].map(PathBuf::from);
+        let groups = group_by_folder(paths.into_iter());
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, PathBuf::from("C:\\a"));
+        assert_eq!(
+            groups[0].1,
+            [PathBuf::from("C:\\a\\1.jpg"), PathBuf::from("C:\\a\\3.jpg")]
+        );
+        assert_eq!(groups[1].0, PathBuf::from("C:\\b"));
+        assert!(group_by_folder(std::iter::empty()).is_empty());
     }
 }

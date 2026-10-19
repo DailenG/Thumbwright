@@ -10,6 +10,8 @@ mod cmds;
 mod doctor;
 mod exif;
 mod eyedropper;
+mod feedback;
+mod friendly;
 mod jobs;
 mod jpeg_lossless;
 mod mcp;
@@ -70,7 +72,8 @@ const USAGE: &str = "usage: twctl <command> [args]
   formats [--json]
   register [--off|--status|--reset-journal]
   --help | <command> --help
-global options: --notify (show errors in a message box), --files-from <list.txt>;
+global options: --notify (menu invocations: select the new files in Explorer, show errors and
+  confirmations in windows), --files-from <list.txt>;
   -- ends options (later arguments are file names even if they start with --)";
 
 struct Cli {
@@ -232,53 +235,124 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Runs `f` for every file across all cores; collects per-file errors. A panic in `f`
-/// (hostile input reaching an in-process decoder) becomes that file's error, like
-/// `jobs::run_isolated`; a panicked worker thread can no longer discard its results and
-/// let the command exit 0.
-fn batch(files: &[PathBuf], f: impl Fn(&Path) -> Result<PathBuf> + Sync) -> Result<String> {
+/// Result of running a per-file job over a selection.
+struct BatchOutcome {
+    /// Files written or changed in place, in input order; failed files are not in here.
+    created: Vec<PathBuf>,
+    errors: Vec<String>,
+    total: usize,
+    /// Files never started because the user pressed Cancel.
+    skipped: usize,
+}
+
+impl BatchOutcome {
+    /// stdout text on success (one path per line); `N of M failed:` plus the errors
+    /// otherwise. A cancelled run counts as a partial failure (exit status 1).
+    fn into_result(self) -> Result<String> {
+        let mut text = self
+            .created
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !self.errors.is_empty() {
+            return Err(format!(
+                "{} of {} failed:\n{}",
+                self.errors.len(),
+                self.total,
+                self.errors.join("\n")
+            ));
+        }
+        if self.skipped > 0 {
+            mark_partial_failure();
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&format!(
+                "cancelled: {} of {} files done",
+                self.created.len(),
+                self.total
+            ));
+        }
+        Ok(text)
+    }
+}
+
+/// Runs `f` for every file across all cores and collects what it created and what failed.
+/// A panic in `f` (hostile input reaching an in-process decoder) becomes that file's error,
+/// like `jobs::run_isolated`; a panicked worker thread can no longer discard its results
+/// and let the command exit 0. With `show`, a progress window with a Cancel button appears
+/// when the job runs long; Cancel stops the workers before their next file.
+fn run_files(
+    verb: &str,
+    progress: &Arc<feedback::Progress>,
+    show: bool,
+    files: &[PathBuf],
+    f: impl Fn(&Path) -> Result<PathBuf> + Sync,
+) -> BatchOutcome {
     let workers = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .min(files.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut results: Vec<(usize, Result<PathBuf>)> = std::thread::scope(|s| {
+        let window = show.then(|| s.spawn(|| feedback::progress_window(verb, progress)));
         let handles: Vec<_> = (0..workers)
             .map(|_| {
                 s.spawn(|| {
                     let mut mine = Vec::new();
                     loop {
+                        if progress.cancelled() {
+                            break mine;
+                        }
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(file) = files.get(i) else { break mine };
                         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(file)))
                             .unwrap_or_else(|_| Err("decoder panicked".into()));
+                        progress.step();
                         mine.push((i, r));
                     }
                 })
             })
             .collect();
-        handles
+        let all = handles
             .into_iter()
             .flat_map(|h| h.join().unwrap_or_default())
-            .collect()
+            .collect();
+        progress.finish();
+        if let Some(w) = window {
+            let _ = w.join();
+        }
+        all
     });
     results.sort_by_key(|(i, _)| *i);
-    let (mut ok, mut errs) = (Vec::new(), Vec::new());
+    let skipped = files.len() - results.len();
+    let (mut created, mut errors) = (Vec::new(), Vec::new());
     for (_, r) in results {
         match r {
-            Ok(p) => ok.push(p.display().to_string()),
-            Err(e) => errs.push(e),
+            Ok(p) => created.push(p),
+            Err(e) => errors.push(e),
         }
     }
-    if errs.is_empty() {
-        Ok(ok.join("\n"))
-    } else {
-        Err(format!(
-            "{} of {} failed:\n{}",
-            errs.len(),
-            files.len(),
-            errs.join("\n")
-        ))
+    BatchOutcome {
+        created,
+        errors,
+        total: files.len(),
+        skipped,
     }
+}
+
+/// `run_files` for a menu verb: `verb` is the progress window's lead word ("Converting"),
+/// and the created files are handed to `feedback` so `--notify` can select them in
+/// Explorer.
+fn batch(
+    verb: &str,
+    files: &[PathBuf],
+    f: impl Fn(&Path) -> Result<PathBuf> + Sync,
+) -> Result<String> {
+    let progress = feedback::Progress::new(files.len());
+    let outcome = run_files(verb, &progress, feedback::notify(), files, f);
+    feedback::created(outcome.created.iter().cloned());
+    outcome.into_result()
 }
 
 /// Synopsis of one command from `USAGE` (every line that starts with it), or the whole
@@ -382,7 +456,7 @@ fn run(cli: &Cli) -> Result<String> {
                 return Err("convert-to needs at least one file".into());
             }
             let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
-            batch(&files, |f| {
+            batch("Converting", &files, |f| {
                 let (img, meta) = ops::decode_full_with_meta(f, max, settings.keep_metadata)?;
                 let bytes = ops::encode_with_meta(&img, &target, quality, &meta)?;
                 ops::write_new_like(f, "", &target, &bytes, settings.preserve_file_date)
@@ -391,7 +465,7 @@ fn run(cli: &Cli) -> Result<String> {
         "resize" => {
             cli.allow(&["--to"], &[])?;
             let spec = ops::parse_resize(cli.require("--to")?)?;
-            batch(&cli.files()?, |f| {
+            batch("Resizing", &cli.files()?, |f| {
                 let ext = writable_ext(f);
                 let (img, meta) = ops::decode_full_with_meta(f, max, settings.keep_metadata)?;
                 let img = ops::apply_resize(&img, spec);
@@ -404,7 +478,7 @@ fn run(cli: &Cli) -> Result<String> {
             let by = cli.require("--by")?.to_owned();
             ops::rotate(&image::DynamicImage::new_rgb8(1, 1), &by)?;
             let notes = std::sync::Mutex::new(Vec::<String>::new());
-            let result = batch(&cli.files()?, |f| {
+            let result = batch("Rotating", &cli.files()?, |f| {
                 let r = ops::rotate_file(
                     f,
                     &by,
@@ -438,7 +512,7 @@ fn run(cli: &Cli) -> Result<String> {
                 .ok()
                 .filter(|n| *n > 0)
                 .ok_or("bad --edge")?;
-            batch(&cli.files()?, |f| {
+            batch("Shrinking", &cli.files()?, |f| {
                 let (img, meta) = ops::decode_full_with_meta(f, max, settings.keep_metadata)?;
                 let img = ops::apply_resize(&img, ops::Resize::Fit(edge, edge));
                 let bytes = ops::encode_with_meta(&img, "jpg", Some(85), &meta)?;
@@ -448,7 +522,7 @@ fn run(cli: &Cli) -> Result<String> {
         "compress" => {
             cli.allow(&["--max-size"], &[])?;
             let limit = ops::parse_size(cli.require("--max-size")?)?;
-            batch(&cli.files()?, |f| {
+            batch("Compressing", &cli.files()?, |f| {
                 let (img, meta) = ops::decode_full_with_meta(f, max, settings.keep_metadata)?;
                 let (bytes, notes) = ops::compress_to(&img, limit, &meta)
                     .map_err(|e| format!("{}: {e}", f.display()))?;
@@ -460,7 +534,7 @@ fn run(cli: &Cli) -> Result<String> {
         }
         "strip" => {
             cli.allow(&[], &[])?;
-            batch(&cli.files()?, |f| {
+            batch("Removing metadata from", &cli.files()?, |f| {
                 let data = ops::read_input(f, max)?;
                 let out = strip::strip(&data).map_err(|e| format!("{}: {e}", f.display()))?;
                 ops::write_atomic(f, &out)?;
@@ -472,7 +546,9 @@ fn run(cli: &Cli) -> Result<String> {
             let [input] = cli.exactly(1)? else {
                 unreachable!()
             };
-            win::copy_image(&ops::decode_full(Path::new(input), max)?)?;
+            let img = ops::decode_full(Path::new(input), max)?;
+            win::copy_image(&img)?;
+            feedback::confirm(format!("Copied image ({} x {})", img.width(), img.height()));
             Ok("image copied to the clipboard".into())
         }
         "data-uri" => {
@@ -488,7 +564,12 @@ fn run(cli: &Cli) -> Result<String> {
                     ops::encode(&ops::decode_full(p, max)?, "png", None)?,
                 ),
             };
-            win::copy_text(&format!("data:{mime};base64,{}", base64(&bytes)))?;
+            let uri = format!("data:{mime};base64,{}", base64(&bytes));
+            win::copy_text(&uri)?;
+            feedback::confirm(format!(
+                "Copied data URI ({} characters)",
+                uri.chars().count()
+            ));
             Ok("data URI copied to the clipboard".into())
         }
         "to-folder" => {
@@ -510,6 +591,7 @@ fn run(cli: &Cli) -> Result<String> {
                 let dest = folder.join(f.file_name().ok_or("bad file name")?);
                 std::fs::rename(f, &dest).map_err(|e| format!("{}: {e}", f.display()))?;
             }
+            feedback::created([folder.clone()]);
             Ok(folder.display().to_string())
         }
         "info" => {
@@ -559,6 +641,7 @@ fn run(cli: &Cli) -> Result<String> {
             let out = store.join("wallpaper.png");
             ops::write_atomic(&out, &ops::encode(&img, "png", None)?)?;
             win::set_wallpaper(&out, pos)?;
+            feedback::confirm("Wallpaper set");
             Ok(format!("wallpaper set from {input}"))
         }
         "formats" => {
@@ -849,9 +932,9 @@ fn take_partial_failure() -> bool {
 fn main() -> ExitCode {
     log::init("twctl");
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let notify = args.iter().any(|a| a == "--notify");
+    feedback::set_notify(args.iter().any(|a| a == "--notify"));
     let result = parse(args).and_then(|cli| run(&cli));
-    match result {
+    let code = match &result {
         Ok(msg) => {
             if !msg.is_empty() {
                 println!("{msg}");
@@ -865,12 +948,12 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("twctl: {e}");
             log::error(&format!("twctl: {e}"));
-            if notify {
-                win::message(&e, true);
-            }
             ExitCode::FAILURE
         }
-    }
+    };
+    // `--notify`: error box, new files selected in Explorer, or the confirmation window.
+    feedback::finish(&result);
+    code
 }
 
 #[cfg(test)]
@@ -1165,9 +1248,105 @@ mod s_fixes_tests {
             std::fs::write(&target, b"ok").map_err(|e| e.to_string())?;
             Ok(target)
         };
-        let res = batch(&files, f).unwrap_err();
+        let res = batch("Testing", &files, f).unwrap_err();
         assert!(res.contains("decoder panicked"), "{res}");
         assert!(res.contains("1 of 2 failed"), "{res}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Inputs `0.src..{n}.src` in a fresh temp dir plus an `out` dir; `fail` lists the
+    /// indexes whose job returns an error without writing.
+    fn job_dir(tag: &str, n: usize) -> (PathBuf, Vec<PathBuf>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("twctl-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let files = (0..n)
+            .map(|i| {
+                let p = dir.join(format!("{i}.src"));
+                std::fs::write(&p, b"x").unwrap();
+                p
+            })
+            .collect();
+        (dir, files, out)
+    }
+
+    fn write_job(out: &Path, fail: &'static [usize]) -> impl Fn(&Path) -> Result<PathBuf> + Sync {
+        let out = out.to_path_buf();
+        move |p: &Path| {
+            let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
+            if fail.contains(&stem.parse::<usize>().unwrap()) {
+                return Err(format!("{}: unsupported file type", p.display()));
+            }
+            let target = out.join(format!("{stem}.dst"));
+            std::fs::write(&target, b"ok").map_err(|e| e.to_string())?;
+            Ok(target)
+        }
+    }
+
+    #[test]
+    fn batch_outcome_lists_exactly_the_files_written_in_input_order() {
+        let (dir, files, out) = job_dir("created", 6);
+        let progress = feedback::Progress::new(files.len());
+        let o = run_files(
+            "Testing",
+            &progress,
+            false,
+            &files,
+            write_job(&out, &[2, 4]),
+        );
+        let expected: Vec<PathBuf> = [0, 1, 3, 5]
+            .iter()
+            .map(|i| out.join(format!("{i}.dst")))
+            .collect();
+        assert_eq!(o.created, expected);
+        assert!(o.created.iter().all(|p| p.is_file()));
+        assert!(!out.join("2.dst").exists() && !out.join("4.dst").exists());
+        assert_eq!((o.errors.len(), o.total, o.skipped), (2, 6, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn batch_records_created_files_for_the_explorer_selection() {
+        let (dir, files, out) = job_dir("recorded", 4);
+        let err = batch("Testing", &files, write_job(&out, &[1])).unwrap_err();
+        assert!(err.starts_with("1 of 4 failed:"), "{err}");
+        let recorded = feedback::recorded();
+        for i in [0, 2, 3] {
+            assert!(recorded.contains(&out.join(format!("{i}.dst"))), "{i}");
+        }
+        assert!(!recorded.contains(&out.join("1.dst")));
+        // All succeeded: stdout is one created path per line.
+        let (dir2, files2, out2) = job_dir("recorded-ok", 2);
+        let ok = batch("Testing", &files2, write_job(&out2, &[])).unwrap();
+        let lines: Vec<&str> = ok.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                out2.join("0.dst").display().to_string(),
+                out2.join("1.dst").display().to_string()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn cancelling_skips_the_files_not_started_and_keeps_the_finished_ones() {
+        let (dir, files, out) = job_dir("cancel", 400);
+        let progress = feedback::Progress::new(files.len());
+        let cancel = Arc::clone(&progress);
+        let job = write_job(&out, &[]);
+        let o = run_files("Testing", &progress, false, &files, |p: &Path| {
+            let r = job(p);
+            cancel.cancel_now();
+            r
+        });
+        assert!(o.skipped > 0, "workers must stop after Cancel");
+        assert_eq!(o.created.len() + o.errors.len() + o.skipped, 400);
+        assert!(o.created.iter().all(|p| p.is_file()));
+        assert!(o.into_result().unwrap().contains("cancelled: "));
+        assert!(take_partial_failure());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

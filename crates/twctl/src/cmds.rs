@@ -8,7 +8,8 @@ use tw_core::config::Settings;
 
 use crate::ops::{self, Result};
 use crate::{
-    Cli, doctor, eyedropper, jobs, mcp, meta, ocr, organize, pdf, prebuild, ui, verbs, win,
+    Cli, doctor, eyedropper, feedback, jobs, mcp, meta, ocr, organize, pdf, prebuild, ui, verbs,
+    win,
 };
 
 /// Page margin (PDF units) when the "margin on combined PDFs" setting is on.
@@ -75,6 +76,7 @@ fn write_combined(
         }
         Target::Auto(first) => ops::write_new(&first, " (combined)", ext, bytes)?,
     };
+    feedback::created([out.clone()]);
     Ok(if json { c.json(&out) } else { c.summary(&out) })
 }
 
@@ -250,6 +252,10 @@ fn ocr_cmd(cli: &Cli, max: u64) -> Result<String> {
     }
     if cli.flag("--copy") {
         win::copy_text(&result.text)?;
+        feedback::confirm(format!(
+            "Copied text ({} characters)",
+            result.text.chars().count()
+        ));
     }
     if cli.flag("--window") {
         ui::text_window("Thumbwright OCR", &result.text);
@@ -280,6 +286,7 @@ fn pick_color_cmd(cli: &Cli) -> Result<String> {
         Some(rgb) => {
             let hex = eyedropper::hex(rgb);
             win::copy_text(&hex)?;
+            feedback::confirm(format!("Copied {hex}"));
             Ok(hex)
         }
         None => Ok(String::new()),
@@ -310,11 +317,15 @@ pub fn run(cli: &Cli, dir: &Path, settings: &Settings, max: u64) -> Option<Resul
         "pick-color" => pick_color_cmd(cli),
         "lock-screen" => (|| {
             cli.allow(&[], &[])?;
-            verbs::lock_screen(single_path(cli)?, max)
+            let done = verbs::lock_screen(single_path(cli)?, max)?;
+            feedback::confirm("Lock screen set");
+            Ok(done)
         })(),
         "folder-icon" => (|| {
             cli.allow(&[], &[])?;
-            verbs::folder_icon(single_path(cli)?, max)
+            let done = verbs::folder_icon(single_path(cli)?, max)?;
+            feedback::confirm("Folder icon set");
+            Ok(done)
         })(),
         "settings" => (|| {
             cli.allow(&[], &[])?;
