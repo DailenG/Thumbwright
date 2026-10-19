@@ -8,7 +8,9 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{E_FAIL, E_POINTER, E_UNEXPECTED, ERROR_ALREADY_INITIALIZED};
+use windows::Win32::Foundation::{
+    E_FAIL, E_OUTOFMEMORY, E_POINTER, E_UNEXPECTED, ERROR_ALREADY_INITIALIZED,
+};
 use windows::Win32::Graphics::Gdi::HBITMAP;
 use windows::Win32::System::Com::{
     CoTaskMemFree, IStream, STATFLAG_DEFAULT, STATSTG, STREAM_SEEK_SET,
@@ -206,10 +208,18 @@ pub(crate) fn stat(stream: &IStream) -> Result<StreamInfo> {
     }
 }
 
+/// What [`read_all`] allocates before the stream has delivered a byte, and the smallest step
+/// it grows by afterwards. `size` is what the stream's `Stat` claims, not data: a virtual
+/// folder or an MTP device can declare 2 GiB and deliver nothing, and `Vec::with_capacity`
+/// of that size aborts the whole surrogate when the allocation fails.
+const FIRST_ALLOCATION: usize = 64 << 20;
+
 /// Reads the whole stream straight into the result; `size` comes from Stat and bounds the
-/// allocation. A stream that yields more than it declared is rejected. (A 1 MiB bounce
-/// buffer cost 0.4-0.7 ms per call, ten times the read itself on small files:
-/// docs/performance.md.)
+/// result. A stream that yields more than it declared is rejected, and an allocation that
+/// cannot be satisfied is an error, not an abort. Files up to [`FIRST_ALLOCATION`] are read
+/// into one exactly-sized allocation; larger ones start there and double as data arrives.
+/// (A 1 MiB bounce buffer cost 0.4-0.7 ms per call, ten times the read itself on small
+/// files: docs/performance.md.)
 pub(crate) fn read_all(stream: &IStream, size: u64) -> Result<Vec<u8>> {
     // SAFETY: seeking a stream we hold a reference to.
     unsafe { stream.Seek(0, STREAM_SEEK_SET, None)? };
@@ -218,13 +228,20 @@ pub(crate) fn read_all(stream: &IStream, size: u64) -> Result<Vec<u8>> {
         .ok()
         .and_then(|n| n.checked_add(1))
         .ok_or(E_FAIL)?;
-    let mut buf: Vec<u8> = Vec::with_capacity(cap);
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve_exact(cap.min(FIRST_ALLOCATION))
+        .map_err(|_| E_OUTOFMEMORY)?;
     loop {
-        // `buf.len() <= size` here, so there is always room for at least one byte.
-        let want = (cap - buf.len()).min(1 << 20) as u32;
+        // `buf.len() <= size` here, so `cap - buf.len() >= 1`.
+        if buf.len() == buf.capacity() {
+            let more = (cap - buf.len()).min(buf.len().max(FIRST_ALLOCATION));
+            buf.try_reserve_exact(more).map_err(|_| E_OUTOFMEMORY)?;
+        }
+        let room = (buf.capacity() - buf.len()).min(cap - buf.len());
+        let want = room.min(1 << 20) as u32;
         let mut read = 0u32;
         // SAFETY: the stream writes at most `want` bytes into the vector's spare capacity,
-        // which holds `cap - buf.len() >= want` bytes.
+        // which holds `capacity - len >= room >= want` bytes.
         let hr = unsafe {
             stream.Read(
                 buf.as_mut_ptr().add(buf.len()).cast(),
@@ -364,5 +381,22 @@ mod tests {
         let s = mem_stream(&data);
         assert!(read_all(&s, 500).unwrap() == data);
         assert!(read_all(&s, 500).unwrap() == data);
+    }
+
+    /// U-2: Stat's size is a claim. A stream that declares nearly 2 GiB and delivers nothing
+    /// used to cost a 2 GiB `Vec::with_capacity` (an abort when it fails); now the allocation
+    /// follows the data.
+    #[test]
+    fn read_all_does_not_allocate_what_a_stream_only_declares() {
+        let got = read_all(&mem_stream(&[]), 2_000_000_000).unwrap();
+        assert!(got.is_empty());
+        assert!(got.capacity() <= 64 << 20, "capacity {}", got.capacity());
+        // Data beyond the first allocation still arrives intact, across a growth step.
+        let n = (64 << 20) + 1000;
+        let data = pattern(n);
+        let got = read_all(&mem_stream(&data), n as u64).unwrap();
+        assert!(got == data, "bytes differ across the growth step");
+        // And a stream over-delivering across the step is still rejected.
+        assert!(read_all(&mem_stream(&data), (64 << 20) - 1).is_err());
     }
 }
