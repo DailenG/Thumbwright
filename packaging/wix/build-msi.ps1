@@ -98,7 +98,8 @@ if ($wix) {
 }
 
 # -pdbtype none: no .wixpdb next to the MSI (dist\ must hold only shippable files).
-$wixArgs = @('build', '-arch', 'x64', '-pdbtype', 'none', '-d', "Version=$Version", '-d', "PackageName=$packageName", '-d', "SourceDir=$SourceDir")
+$iconFile = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\icons\thumbwright.ico')).Path
+$wixArgs = @('build', '-arch', 'x64', '-pdbtype', 'none', '-d', "Version=$Version", '-d', "PackageName=$packageName", '-d', "SourceDir=$SourceDir", '-d', "IconFile=$iconFile")
 $settingsPresent = Test-Path -LiteralPath (Join-Path $SourceDir 'thumbwright-settings.exe')
 if ($settingsPresent -and -not $NoSettings) {
     $wixArgs += @('-d', 'IncludeSettings=1')

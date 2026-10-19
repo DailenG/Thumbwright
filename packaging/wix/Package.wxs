@@ -3,7 +3,7 @@
   Thumbwright per-machine installer (REQ-REG-8, FUNCTIONAL_SPEC.md 4.2). WiX v7, schema v4.
 
   Build (normally via scripts/release.ps1 or packaging/wix/build-msi.ps1):
-    wix build -arch x64 -d Version=0.1.1 -d PackageName=Thumbwright.ShellExtension -d SourceDir=dist [-d IncludeSettings=1] Package.wxs -o out.msi
+    wix build -arch x64 -d Version=0.1.1 -d PackageName=Thumbwright.ShellExtension -d SourceDir=dist -d IconFile=packaging\icons\thumbwright.ico [-d IncludeSettings=1] Package.wxs -o out.msi
 
   Defines:
     Version          MSI ProductVersion, major.minor.build (Windows Installer ignores a 4th field).
@@ -45,8 +45,9 @@
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/DailenG/Thumbwright" />
-    <!-- Programs and Features icon (packaging/icons/generate.ps1). Path relative to this file. -->
-    <Icon Id="ThumbwrightIcon" SourceFile="..\icons\thumbwright.ico" />
+    <!-- Programs and Features icon (packaging/icons/generate.ps1); build-msi.ps1 passes its
+         absolute path as IconFile. -->
+    <Icon Id="ThumbwrightIcon" SourceFile="$(IconFile)" />
     <Property Id="ARPPRODUCTICON" Value="ThumbwrightIcon" />
 
     <!-- The install directory Id is deliberately MIXED CASE (audit P-1, P-2). Windows Installer
