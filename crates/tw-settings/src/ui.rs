@@ -8,14 +8,17 @@ use std::ffi::c_void;
 use std::path::PathBuf;
 
 use tw_core::config::{self, MENU_ITEMS, MenuPreview, Settings};
-use tw_core::registration::{Layout, Scope};
+use tw_core::registration::{self, Layout, Scope};
 use windows::Win32::Foundation::{
-    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HANDLE, HWND,
+    LPARAM, LRESULT, RECT, WPARAM,
 };
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, HBRUSH, HGDIOBJ,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE,
     LVIS_STATEIMAGEMASK, LVN_ITEMCHANGED, LVS_EX_CHECKBOXES, LVS_EX_FULLROWSELECT, NMHDR,
@@ -24,16 +27,19 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, SystemParametersInfoForDpi};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, BM_CLICK, CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, DispatchMessageW, EN_CHANGE, FindWindowW, GetDlgItem, GetMessageW, HMENU,
-    IDC_ARROW, IsDialogMessageW, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LBN_SELCHANGE,
-    LoadCursorW, MSG, NONCLIENTMETRICSW, PostQuitMessage, RegisterClassExW, SHOW_WINDOW_CMD,
-    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, ShowWindow, TranslateMessage,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_NCDESTROY, WM_NOTIFY,
-    WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_GROUP,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    AdjustWindowRectEx, BM_CLICK, BringWindowToTop, CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW,
+    DefWindowProcW, DestroyWindow, DispatchMessageW, EN_CHANGE, FindWindowW, GetDlgItem,
+    GetMessageW, GetSystemMetrics, HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON,
+    IsDialogMessageW, IsIconic, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LBN_SELCHANGE,
+    LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MSG, NONCLIENTMETRICSW, PostQuitMessage,
+    RegisterClassExW, SHOW_WINDOW_CMD, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
+    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SetForegroundWindow,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETICON, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CHILD,
+    WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::{BOOL, PCWSTR, w};
 
 use crate::win::{
     confirm, error, get_text, info, is_checked, lv_add_column, lv_add_row, lv_clear, lv_count,
@@ -43,12 +49,13 @@ use crate::win::{
 use crate::{cache, model};
 
 const CLASS: PCWSTR = w!("ThumbwrightSettingsWindow");
-const TITLE: PCWSTR = w!("Thumbwright Settings");
+const TITLE: PCWSTR = w!("Thumbwright Workbench");
+/// Named mutex that makes the Workbench single-instance within a user session.
+const INSTANCE_MUTEX: &str = "Local\\Thumbwright.Workbench";
 
 // Raw control style bits (documented values; the `windows` constants are typed unevenly).
 const BS_PUSHBUTTON: u32 = 0;
 const BS_AUTOCHECKBOX: u32 = 3;
-const BS_AUTORADIOBUTTON: u32 = 9;
 const BS_GROUPBOX: u32 = 7;
 const ES_AUTOHSCROLL: u32 = 0x80;
 const ES_NUMBER: u32 = 0x2000;
@@ -90,9 +97,7 @@ const ID_MENU_RESET: i32 = 406;
 const ID_MENU_SHOWALL: i32 = 407;
 const ID_MAX_FILE: i32 = 500;
 const ID_MAX_THUMB: i32 = 501;
-const ID_PREVIEW_OFF: i32 = 600;
-const ID_PREVIEW_SUB: i32 = 601;
-const ID_PREVIEW_MENU: i32 = 602;
+const ID_PREVIEW: i32 = 600;
 const ID_CLOUD: i32 = 603;
 const ID_VIDEO_PCT: i32 = 604;
 const ID_MODE: i32 = 700;
@@ -102,20 +107,12 @@ const ID_TURN_ON: i32 = 703;
 const ID_TURN_OFF: i32 = 704;
 const ID_OPEN_LOG: i32 = 705;
 
-const PAGES: [&str; 6] = [
-    "General",
-    "File types",
-    "Menu",
-    "Limits",
-    "Preview",
-    "Maintenance",
-];
+const PAGES: [&str; 5] = ["General", "File types", "Menu", "Thumbnails", "Maintenance"];
 const PAGE_GENERAL: usize = 0;
 const PAGE_TYPES: usize = 1;
 const PAGE_MENU: usize = 2;
-const PAGE_LIMITS: usize = 3;
-const PAGE_PREVIEW: usize = 4;
-const PAGE_MAINT: usize = 5;
+const PAGE_THUMBS: usize = 3;
+const PAGE_MAINT: usize = 4;
 /// Controls on no page: always visible.
 const ALL_PAGES: usize = usize::MAX;
 
@@ -158,7 +155,7 @@ struct Controls {
     menu_list: HWND,
     max_file: HWND,
     max_thumb: HWND,
-    preview: [HWND; 3],
+    preview: HWND,
     cloud: HWND,
     video_pct: HWND,
     mode: HWND,
@@ -182,6 +179,8 @@ struct App {
     /// Indices into `types` of the rows the filter currently shows.
     shown: Vec<usize>,
     menu: Vec<MenuRow>,
+    /// Who draws the thumbnails of the enabled types, as last read from the registry.
+    coverage: registration::Coverage,
 }
 
 thread_local! {
@@ -329,8 +328,7 @@ impl App {
         self.build_general();
         self.build_types();
         self.build_menu();
-        self.build_limits();
-        self.build_preview();
+        self.build_thumbnails();
         self.build_maintenance();
         self.load(settings);
         send(nav, LB_SETCURSEL, PAGE_GENERAL, 0);
@@ -345,7 +343,7 @@ impl App {
             "Thumbnails",
             BS_GROUPBOX,
             0,
-            (X0, 8, CONTENT_W, 104),
+            (X0, 8, CONTENT_W, 78),
             0,
         );
         self.c.thumbs = self.check(
@@ -356,11 +354,10 @@ impl App {
         );
         self.c.embedded = self.check(
             p,
-            "Prefer a file's embedded (EXIF) thumbnail when it has one",
+            "Use the picture stored in the file when available (faster)",
             (X0 + 14, 56, 480, 20),
             ID_EMBEDDED,
         );
-        self.c.verbose = self.check(p, "Verbose logging", (X0 + 14, 82, 480, 20), ID_VERBOSE);
 
         self.add(
             p,
@@ -368,52 +365,52 @@ impl App {
             "Conversion defaults",
             BS_GROUPBOX,
             0,
-            (X0, 124, CONTENT_W, 174),
+            (X0, 98, CONTENT_W, 174),
             0,
         );
-        self.label(p, "JPEG quality (1-100):", (X0 + 14, 150, 190, 18), 0);
-        self.c.jpeg = self.number_edit(p, (X0 + 210, 146, 60, 22), ID_JPEG);
+        self.label(p, "JPEG quality (1-100):", (X0 + 14, 124, 240, 18), 0);
+        self.c.jpeg = self.number_edit(p, (X0 + 260, 120, 60, 22), ID_JPEG);
         self.label(
             p,
-            "PNG compression level (0-9):",
-            (X0 + 14, 180, 190, 18),
+            "PNG compression (0 = fast, 9 = smallest):",
+            (X0 + 14, 154, 240, 18),
             0,
         );
-        self.c.png = self.number_edit(p, (X0 + 210, 176, 60, 22), ID_PNG);
+        self.c.png = self.number_edit(p, (X0 + 260, 150, 60, 22), ID_PNG);
         self.c.keep_meta = self.check(
             p,
             "Keep EXIF and other metadata when converting",
-            (X0 + 14, 208, 480, 20),
+            (X0 + 14, 182, 480, 20),
             ID_KEEP_META,
         );
         self.c.keep_date = self.check(
             p,
-            "Keep the original date on saved files",
-            (X0 + 14, 234, 480, 20),
+            "Give converted files the original's date",
+            (X0 + 14, 208, 480, 20),
             ID_KEEP_DATE,
         );
         self.c.pdf_margin = self.check(
             p,
             "Add a margin around pages when combining images into a PDF",
-            (X0 + 14, 260, 480, 20),
+            (X0 + 14, 234, 480, 20),
             ID_PDF_MARGIN,
         );
     }
 
     fn build_types(&mut self) {
         let p = PAGE_TYPES;
-        self.label(p, "Filter:", (X0, 14, 44, 18), 0);
+        self.label(p, "Search file types:", (X0, 14, 104, 18), 0);
         self.c.filter = self.add(
             p,
             w!("EDIT"),
             "",
             ES_AUTOHSCROLL | WS_TABSTOP.0,
             WS_EX_CLIENTEDGE.0,
-            (X0 + 48, 10, 200, 22),
+            (X0 + 108, 10, 160, 22),
             ID_FILTER,
         );
-        self.c.types_count = self.label(p, "", (X0 + 270, 14, 250, 18), ID_TYPES_COUNT);
-        let lv = self.list(p, (X0, 40, CONTENT_W, 330), ID_TYPES, true);
+        self.c.types_count = self.label(p, "", (X0 + 280, 6, 240, 32), ID_TYPES_COUNT);
+        let lv = self.list(p, (X0, 44, CONTENT_W, 326), ID_TYPES, true);
         lv_add_column(lv, 0, "Extension", self.s(110));
         lv_add_column(lv, 1, "Description", self.s(370));
         self.c.types = lv;
@@ -433,13 +430,13 @@ impl App {
         let p = PAGE_MENU;
         self.c.menu_on = self.check(
             p,
-            "Enable the right-click menu",
+            "Show the Thumbwright menu",
             (X0, 12, 480, 20),
             ID_MENU_ON,
         );
         self.c.menu_all = self.check(
             p,
-            "Show the menu on all file types",
+            "Also show it for non-image files",
             (X0, 38, 480, 20),
             ID_MENU_ALL,
         );
@@ -449,125 +446,105 @@ impl App {
             (X0, 64, 480, 20),
             ID_MENU_HERE,
         );
+        self.c.preview = self.check(
+            p,
+            "Show a preview of the file in the menu",
+            (X0, 90, 480, 20),
+            ID_PREVIEW,
+        );
         self.label(
             p,
-            "Menu items. Checked items are shown; the list order is the menu order.",
-            (X0, 96, CONTENT_W, 18),
+            "Choose what appears; use Move up and Move down to reorder.",
+            (X0, 122, CONTENT_W, 18),
             0,
         );
-        let lv = self.list(p, (X0, 118, 390, 290), ID_MENU_LIST, false);
+        let lv = self.list(p, (X0, 144, 390, 264), ID_MENU_LIST, false);
         lv_add_column(lv, 0, "Menu item", self.s(350));
         self.c.menu_list = lv;
-        self.button(p, "Move up", (X0 + 404, 118, 116, 26), ID_MENU_UP);
-        self.button(p, "Move down", (X0 + 404, 150, 116, 26), ID_MENU_DOWN);
-        self.button(p, "Reset order", (X0 + 404, 190, 116, 26), ID_MENU_RESET);
-        self.button(p, "Show all", (X0 + 404, 222, 116, 26), ID_MENU_SHOWALL);
+        self.button(p, "Move up", (X0 + 404, 144, 116, 26), ID_MENU_UP);
+        self.button(p, "Move down", (X0 + 404, 176, 116, 26), ID_MENU_DOWN);
+        self.button(p, "Reset order", (X0 + 404, 216, 116, 26), ID_MENU_RESET);
+        self.button(p, "Show all", (X0 + 404, 248, 116, 26), ID_MENU_SHOWALL);
         self.label(
             p,
-            "Settings is always in the menu. Items the menu does not have yet are kept in the \
-             list so your choices survive updates.",
-            (X0, 414, CONTENT_W, 30),
+            "Settings is always in the menu.",
+            (X0, 414, CONTENT_W, 18),
             0,
         );
     }
 
-    fn build_limits(&mut self) {
-        let p = PAGE_LIMITS;
-        self.label(p, "Maximum file size (MB):", (X0, 20, 200, 18), 0);
-        self.c.max_file = self.number_edit(p, (X0 + 210, 16, 80, 22), ID_MAX_FILE);
-        self.label(
-            p,
-            "Larger files get no thumbnail (1 - 4096).",
-            (X0 + 300, 20, 220, 18),
-            0,
-        );
-        self.label(p, "Maximum thumbnail size (px):", (X0, 56, 200, 18), 0);
-        self.c.max_thumb = self.number_edit(p, (X0 + 210, 52, 80, 22), ID_MAX_THUMB);
-        self.label(
-            p,
-            "Longest edge of a produced thumbnail (16 - 1024).",
-            (X0 + 300, 56, 220, 32),
-            0,
-        );
-    }
-
-    fn build_preview(&mut self) {
-        let p = PAGE_PREVIEW;
-        self.add(
-            p,
-            w!("BUTTON"),
-            "Preview in the right-click menu",
-            BS_GROUPBOX,
-            0,
-            (X0, 8, CONTENT_W, 118),
-            0,
-        );
-        let radio = BS_AUTORADIOBUTTON | WS_TABSTOP.0;
-        self.c.preview[0] = self.add(
-            p,
-            w!("BUTTON"),
-            "Off",
-            radio | WS_GROUP.0,
-            0,
-            (X0 + 14, 30, 480, 20),
-            ID_PREVIEW_OFF,
-        );
-        self.c.preview[1] = self.add(
-            p,
-            w!("BUTTON"),
-            "In the submenu",
-            radio,
-            0,
-            (X0 + 14, 56, 480, 20),
-            ID_PREVIEW_SUB,
-        );
-        self.c.preview[2] = self.add(
-            p,
-            w!("BUTTON"),
-            "In the right-click menu itself",
-            radio,
-            0,
-            (X0 + 14, 82, 480, 20),
-            ID_PREVIEW_MENU,
-        );
+    fn build_thumbnails(&mut self) {
+        let p = PAGE_THUMBS;
         self.add(
             p,
             w!("BUTTON"),
             "Thumbnail content",
             BS_GROUPBOX,
             0,
-            (X0, 138, CONTENT_W, 90),
+            (X0, 8, CONTENT_W, 92),
             0,
         );
         self.c.cloud = self.check(
             p,
             "Thumbnails in cloud folders (never downloads online-only files)",
-            (X0 + 14, 160, 490, 20),
+            (X0 + 14, 30, 490, 20),
             ID_CLOUD,
         );
         self.label(
             p,
             "Video thumbnail frame (% into the video):",
-            (X0 + 14, 194, 270, 18),
+            (X0 + 14, 66, 270, 18),
             0,
         );
-        self.c.video_pct = self.number_edit(p, (X0 + 290, 190, 60, 22), ID_VIDEO_PCT);
-        self.label(p, "0 - 100", (X0 + 360, 194, 100, 18), 0);
+        self.c.video_pct = self.number_edit(p, (X0 + 290, 62, 60, 22), ID_VIDEO_PCT);
+        self.label(p, "0 - 100", (X0 + 360, 66, 100, 18), 0);
+
+        self.add(
+            p,
+            w!("BUTTON"),
+            "Advanced",
+            BS_GROUPBOX,
+            0,
+            (X0, 112, CONTENT_W, 100),
+            0,
+        );
+        self.label(p, "Maximum file size (MB):", (X0 + 14, 140, 196, 18), 0);
+        self.c.max_file = self.number_edit(p, (X0 + 216, 136, 70, 22), ID_MAX_FILE);
+        self.label(
+            p,
+            "Larger files get no thumbnail (1 - 4096).",
+            (X0 + 296, 140, 214, 18),
+            0,
+        );
+        self.label(
+            p,
+            "Maximum thumbnail size (px):",
+            (X0 + 14, 172, 196, 18),
+            0,
+        );
+        self.c.max_thumb = self.number_edit(p, (X0 + 216, 168, 70, 22), ID_MAX_THUMB);
+        self.label(
+            p,
+            "Longest edge of a thumbnail (16 - 1024).",
+            (X0 + 296, 172, 214, 18),
+            0,
+        );
     }
 
     fn build_maintenance(&mut self) {
         let p = PAGE_MAINT;
         self.c.mode = self.label(p, "", (X0, 12, CONTENT_W, 48), ID_MODE);
+        let portable = config::is_portable(&self.dir);
         let rows = [
             (
                 ID_REPAIR,
-                "Repair associations",
-                "Re-registers every enabled file type, then clears the thumbnail cache.",
+                "Repair thumbnails",
+                "Fixes missing or wrong thumbnails (Explorer will briefly redraw).",
             ),
             (
                 ID_REBUILD,
-                "Rebuild thumbnail cache",
-                "Deletes Windows' cached thumbnails; Explorer restarts.",
+                "Refresh all thumbnails...",
+                "Deletes Windows' cached thumbnails so they are drawn again; Explorer restarts.",
             ),
             (
                 ID_TURN_ON,
@@ -579,13 +556,29 @@ impl App {
                 "Turn off thumbnails",
                 "Removes every registry key Thumbwright created for this user.",
             ),
-            (ID_OPEN_LOG, "Open log file", "Shows the diagnostics log."),
+            (
+                ID_OPEN_LOG,
+                "Open diagnostics log",
+                "Shows the diagnostics log.",
+            ),
         ];
-        for (i, (id, label, hint)) in rows.into_iter().enumerate() {
-            let y = 70 + i as i32 * 44;
+        let mut y = 70;
+        for (id, label, hint) in rows {
+            // An installed copy is registered for all users by the installer; the per-user
+            // switches exist for portable copies only.
+            if !portable && matches!(id, ID_TURN_ON | ID_TURN_OFF) {
+                continue;
+            }
             self.button(p, label, (X0, y, 190, 28), id);
             self.label(p, hint, (X0 + 202, y, 318, 36), 0);
+            y += 44;
         }
+        self.c.verbose = self.check(
+            p,
+            "Verbose logging (for troubleshooting)",
+            (X0, y + 4, 480, 20),
+            ID_VERBOSE,
+        );
     }
 
     fn show_page(&mut self, page: usize) {
@@ -601,17 +594,30 @@ impl App {
         set_text(self.c.status, text);
     }
 
-    fn refresh_mode(&self) {
-        let mode = if config::is_portable(&self.dir) {
-            format!("Portable copy: settings are in {}.", config::PORTABLE_INI)
-        } else {
+    /// Re-reads who draws the thumbnails and updates the Maintenance status and the File
+    /// types summary.
+    fn refresh_mode(&mut self) {
+        let enabled: Vec<&str> = model::registrable()
+            .iter()
+            .map(|f| f.ext)
+            .filter(|e| self.base.type_enabled(e))
+            .collect();
+        self.coverage = registration::coverage(enabled);
+        let text = if config::is_portable(&self.dir) {
             format!(
-                "Installed copy: settings are in HKCU\\{}.",
-                config::PRODUCT_KEY
+                "Portable copy: settings are in {}.\n{}",
+                config::PORTABLE_INI,
+                model::registration_summary(&user_layout())
+            )
+        } else {
+            model::installed_summary(
+                registration::status(&Layout::for_scope(Scope::Machine)).is_some(),
+                &self.coverage,
+                self.types.len(),
             )
         };
-        let reg = model::registration_summary(&user_layout());
-        set_text(self.c.mode, &format!("{mode}\n{reg}"));
+        set_text(self.c.mode, &text);
+        self.update_types_count();
     }
 
     // ---- model <-> controls ----
@@ -635,14 +641,7 @@ impl App {
         set_checked(self.c.menu_here, s.menu_build_here);
         set_text(self.c.max_file, &s.max_file_mb.to_string());
         set_text(self.c.max_thumb, &s.max_thumb_px.to_string());
-        let which = match s.menu_preview {
-            MenuPreview::Off => 0,
-            MenuPreview::InSubmenu => 1,
-            MenuPreview::InContextMenu => 2,
-        };
-        for (i, &h) in self.c.preview.iter().enumerate() {
-            set_checked(h, i == which);
-        }
+        set_checked(self.c.preview, s.menu_preview != MenuPreview::Off);
         self.types = model::registrable()
             .into_iter()
             .map(|f| TypeRow {
@@ -690,9 +689,16 @@ impl App {
 
     fn update_types_count(&self) {
         let on = self.types.iter().filter(|t| t.enabled).count();
+        let c = &self.coverage;
         set_text(
             self.c.types_count,
-            &format!("{on} of {} file types enabled", self.types.len()),
+            &format!(
+                "{} active \u{b7} {} used by other apps \u{b7} {} by Windows\n{on} of {} file types enabled",
+                c.hooked,
+                c.foreign.len(),
+                c.progid_overridden,
+                self.types.len()
+            ),
         );
     }
 
@@ -730,7 +736,7 @@ impl App {
         s.cloud_thumbnails = is_checked(self.c.cloud);
         s.video_frame_percent = number(
             self.c.video_pct,
-            PAGE_PREVIEW,
+            PAGE_THUMBS,
             "Video thumbnail frame",
             0,
             100,
@@ -746,25 +752,19 @@ impl App {
         s.menu_build_here = is_checked(self.c.menu_here);
         s.max_file_mb = number(
             self.c.max_file,
-            PAGE_LIMITS,
+            PAGE_THUMBS,
             "Maximum file size",
             1,
             tw_core::limits::DEFAULT_MAX_FILE_MB,
         )?;
         s.max_thumb_px = number(
             self.c.max_thumb,
-            PAGE_LIMITS,
+            PAGE_THUMBS,
             "Maximum thumbnail size",
             16,
             u64::from(tw_core::limits::DEFAULT_MAX_THUMB_EDGE),
         )? as u32;
-        s.menu_preview = if is_checked(self.c.preview[0]) {
-            MenuPreview::Off
-        } else if is_checked(self.c.preview[2]) {
-            MenuPreview::InContextMenu
-        } else {
-            MenuPreview::InSubmenu
-        };
+        s.menu_preview = model::menu_preview(is_checked(self.c.preview), self.base.menu_preview);
         // Entries for extensions or menu items this window does not list are not ours to drop.
         let listed_type = |e: &str| self.types.iter().any(|t| t.ext == e);
         s.disabled_types = self
@@ -985,7 +985,16 @@ fn turn_on(hwnd: HWND) {
 
 fn turn_off(hwnd: HWND) {
     match model::unregister_user(&user_layout()) {
-        Ok(()) => after_registration_change(hwnd, "Explorer thumbnails turned off for this user."),
+        Ok(left) => {
+            let mut text = String::from("Explorer thumbnails turned off for this user.");
+            if left > 0 {
+                text.push_str(&format!(
+                    "\n\n{left} registered value(s) were taken over by another program and \
+                     left alone."
+                ));
+            }
+            after_registration_change(hwnd, &text);
+        }
         Err(e) => error(hwnd, &e),
     }
 }
@@ -1017,9 +1026,11 @@ fn repair(hwnd: HWND) {
 fn rebuild_cache(hwnd: HWND) {
     if !confirm(
         hwnd,
-        "Rebuilding the thumbnail cache deletes Windows' cached thumbnails (thumbcache_*.db). \
-         Explorer must be closed to do that, so all File Explorer windows close and the taskbar \
-         restarts.\n\nSave your work in Explorer first. Continue?",
+        "Refreshing thumbnails deletes Windows' cached thumbnails (thumbcache_*.db) so every \
+         folder draws them again. Explorer must be closed to do that, so all File Explorer \
+         windows close and the taskbar restarts.\n\nIn cloud folders (OneDrive, Egnyte and \
+         similar), Explorer may download files again to redraw their thumbnails.\n\nSave your \
+         work in Explorer first. Continue?",
     ) {
         return;
     }
@@ -1091,9 +1102,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 types: Vec::new(),
                 shown: Vec::new(),
                 menu: Vec::new(),
+                coverage: registration::Coverage::default(),
             };
             app.build(&init.settings);
             APP.with(|cell| *cell.borrow_mut() = Some(app));
+            set_window_icons(hwnd);
+            apply_dark_title_bar(hwnd);
             LRESULT(0)
         }
         WM_COMMAND => {
@@ -1107,6 +1121,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_NOTIFY => {
             wm_notify(lparam);
             LRESULT(0)
+        }
+        WM_SETTINGCHANGE => {
+            // The apps' light/dark choice arrives as "ImmersiveColorSet".
+            apply_dark_title_bar(hwnd);
+            // SAFETY: default handling for the message.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_DESTROY => {
             if with_app(|a| a.quit_on_destroy) == Some(true) {
@@ -1158,7 +1178,121 @@ fn init_controls() {
     let _ = unsafe { InitCommonControlsEx(&icc) };
 }
 
+/// Held for the life of the running Workbench; closing the handle frees the name.
+struct Instance(HANDLE);
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateMutexW and is closed exactly once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Takes the named mutex that makes the Workbench single-instance. `None` when another
+/// process already holds it.
+fn acquire_instance(name: &str) -> Result<Option<Instance>, String> {
+    // SAFETY: creates or opens a named mutex with a NUL-terminated name that lives for the
+    // statement; GetLastError is read right after the call that sets it.
+    unsafe {
+        let handle = CreateMutexW(None, false, PCWSTR(wide(name).as_ptr()))
+            .map_err(|e| format!("cannot create the instance mutex: {e}"))?;
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = CloseHandle(handle);
+            return Ok(None);
+        }
+        Ok(Some(Instance(handle)))
+    }
+}
+
+/// Brings the running Workbench window forward. The first instance may still be creating its
+/// window, so the lookup retries for a couple of seconds.
+fn raise_running_window() -> bool {
+    for _ in 0..40 {
+        // SAFETY: lookup and show calls on a top-level window; a window that vanishes meanwhile
+        // only makes them fail harmlessly.
+        unsafe {
+            if let Ok(hwnd) = FindWindowW(CLASS, PCWSTR::null()) {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = BringWindowToTop(hwnd);
+                let _ = SetForegroundWindow(hwnd);
+                return true;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// The product icon (resource 1, embedded by build.rs) at the given size; null when the
+/// executable has no such resource (test binaries).
+fn product_icon(cx: i32, cy: i32) -> HICON {
+    // SAFETY: loads an icon resource of this module; the handle is shared and process-owned.
+    unsafe {
+        let Ok(hinstance) = GetModuleHandleW(None) else {
+            return HICON::default();
+        };
+        LoadImageW(
+            Some(hinstance.into()),
+            PCWSTR(std::ptr::without_provenance(1)),
+            IMAGE_ICON,
+            cx,
+            cy,
+            LR_DEFAULTCOLOR,
+        )
+        .map_or(HICON::default(), |h| HICON(h.0))
+    }
+}
+
+/// Big and small caption icon sizes of the system DPI, as `(width, height)`.
+fn icon_sizes() -> ((i32, i32), (i32, i32)) {
+    // SAFETY: plain metric queries.
+    unsafe {
+        (
+            (GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON)),
+            (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)),
+        )
+    }
+}
+
+fn set_window_icons(hwnd: HWND) {
+    let (big, small) = icon_sizes();
+    for (kind, icon) in [
+        (ICON_BIG, product_icon(big.0, big.1)),
+        (ICON_SMALL, product_icon(small.0, small.1)),
+    ] {
+        if !icon.is_invalid() {
+            send(hwnd, WM_SETICON, kind as usize, icon.0 as isize);
+        }
+    }
+}
+
+/// Whether apps use the light theme (the default when the setting is absent).
+fn apps_use_light_theme() -> bool {
+    windows_registry::CURRENT_USER
+        .open("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+        .ok()
+        .and_then(|k| k.get_u32("AppsUseLightTheme").ok())
+        .is_none_or(|v| v != 0)
+}
+
+/// Makes the title bar follow the apps' dark/light setting.
+fn apply_dark_title_bar(hwnd: HWND) {
+    let dark = BOOL::from(!apps_use_light_theme());
+    // SAFETY: documented DWM attribute on our own window; the value is a BOOL of the stated size.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            std::ptr::from_ref(&dark).cast(),
+            size_of::<BOOL>() as u32,
+        )
+    };
+}
+
 fn register_class() -> Result<(), String> {
+    let (big, small) = icon_sizes();
     // SAFETY: registers a window class whose procedure and strings are 'static.
     unsafe {
         let hinstance = GetModuleHandleW(None).map_err(|e| e.to_string())?;
@@ -1166,6 +1300,8 @@ fn register_class() -> Result<(), String> {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),
+            hIcon: product_icon(big.0, big.1),
+            hIconSm: product_icon(small.0, small.1),
             hCursor: LoadCursorW(None, IDC_ARROW).map_err(|e| e.to_string())?,
             hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut c_void),
             lpszClassName: CLASS,
@@ -1232,8 +1368,15 @@ fn create(
     }
 }
 
-/// Runs the settings window until it closes.
+/// Runs the settings window until it closes. One Workbench runs per user session: a second
+/// launch brings the first window to the front (restoring it if minimized) and returns.
 pub fn run(dir: PathBuf, settings: Settings) -> Result<(), String> {
+    let Some(_instance) = acquire_instance(INSTANCE_MUTEX)? else {
+        if !raise_running_window() {
+            tw_core::log::info("workbench: another instance holds the mutex but shows no window");
+        }
+        return Ok(());
+    };
     let hwnd = create(dir, settings, true, true)?;
     let mut msg = MSG::default();
     // SAFETY: standard message loop on the thread that created the window.
@@ -1352,6 +1495,24 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         "Clear all must only affect the filtered rows",
     )?;
 
+    // The one preview checkbox: unticked is Off; ticked keeps a stored "in the menu itself".
+    with_app(|a| set_checked(a.c.preview, false));
+    let off = with_app(|a| a.collect())
+        .ok_or("window state busy")?
+        .map_err(|(_, e)| e)?;
+    check(
+        off.menu_preview == MenuPreview::Off,
+        "unticked preview checkbox must store Off",
+    )?;
+    with_app(|a| set_checked(a.c.preview, true));
+    let on = with_app(|a| a.collect())
+        .ok_or("window state busy")?
+        .map_err(|(_, e)| e)?;
+    check(
+        on.menu_preview == MenuPreview::InContextMenu,
+        "ticked preview checkbox must keep the stored mode",
+    )?;
+
     // Bad numbers are refused with the page that holds them.
     with_app(|a| set_text(a.c.jpeg, "0"));
     let bad = with_app(|a| a.collect()).ok_or("window state busy")?;
@@ -1363,7 +1524,7 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
     with_app(|a| set_text(a.c.video_pct, "101"));
     let bad = with_app(|a| a.collect()).ok_or("window state busy")?;
     check(
-        matches!(bad, Err((PAGE_PREVIEW, _))),
+        matches!(bad, Err((PAGE_THUMBS, _))),
         "video frame 101% must be rejected",
     )?;
 
@@ -1393,5 +1554,28 @@ mod tests {
         let dir = std::env::temp_dir();
         let summary = super::self_test(dir).unwrap();
         assert!(summary.contains("destroyed"), "{summary}");
+    }
+
+    #[test]
+    fn the_instance_mutex_admits_one_holder_at_a_time() {
+        let name = format!(
+            "Local\\ThumbwrightTest.Workbench.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let first = super::acquire_instance(&name).unwrap();
+        assert!(first.is_some(), "the first caller owns the instance");
+        assert!(
+            super::acquire_instance(&name).unwrap().is_none(),
+            "a second caller is told one is running"
+        );
+        drop(first);
+        assert!(
+            super::acquire_instance(&name).unwrap().is_some(),
+            "the name is free again once the owner is gone"
+        );
     }
 }

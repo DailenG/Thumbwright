@@ -787,8 +787,15 @@ fn register(cli: &Cli, dir: &Path, settings: &Settings) -> Result<String> {
         });
     }
     if cli.flag("--off") {
-        registration::unregister(&layout).map_err(|e| e.to_string())?;
-        return Ok("Explorer thumbnails turned OFF for this user".into());
+        let report = registration::unregister(&layout).map_err(|e| e.to_string())?;
+        let mut msg = String::from("Explorer thumbnails turned OFF for this user");
+        if report.values_left_foreign > 0 {
+            msg.push_str(&format!(
+                "\n{} registered value(s) were taken over by another program and left alone",
+                report.values_left_foreign
+            ));
+        }
+        return Ok(msg);
     }
     // REQ-REG-6: per-user registration is for portable copies only; from an installed
     // copy it would survive uninstall and block thumbnails.

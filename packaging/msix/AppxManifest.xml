@@ -11,10 +11,12 @@
       Add-AppxPackage -Stage Thumbwright.msix -ExternalLocation "<install dir>"     (all users:
       Add-AppxProvisionedPackage -Online -PackagePath Thumbwright.msix -SkipLicense  the MSI)
 
-  The Application below names thumbwright-settings.exe, whose embedded manifest carries the
-  matching <msix publisher packageName applicationId> element (crates/tw-settings/build.rs,
-  fed by scripts/release.ps1), so that executable runs with this package's identity. Publisher,
-  Name and Application Id must be identical in the two places.
+  The Application below must name an executable of the install directory, and names
+  thumbwright-settings.exe. That executable deliberately carries NO matching <msix> element
+  in its embedded manifest, so it always runs unpackaged: a process with package identity has
+  its HKCU writes redirected into the package's private registry hive, and the settings it
+  saved would never reach Explorer (docs/ARCHITECTURE.md, "Settings store"). The package gives
+  identity only to the COM class below (loaded in the package's own surrogate).
 
   Names between at-signs below are tokens that build.ps1 fills; do not edit them by hand:
     @PACKAGE_NAME@            fresh package identity name (build.ps1 -PackageName)

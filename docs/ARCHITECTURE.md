@@ -91,6 +91,35 @@ mode; its presence is the marker) or `HKCU\Software\Thumbwright` (installed
 mode), saved by `Settings::save`, edited by `thumbwright-settings.exe`. The
 same keys are honoured by the shell DLL and `twctl`.
 
+### Settings store: why the settings window has no package identity
+
+The Windows 11 menu verb needs a sparse MSIX package (`packaging/msix`), and the package
+must name an `Application` executable. `thumbwright-settings.exe` is that executable, but
+it deliberately does **not** embed the `<msix>` identity element in its manifest, so it
+always runs unpackaged.
+
+Why: a process that has package identity gets registry write virtualization. Its writes to
+`HKCU\Software\Thumbwright` land in the package's private hive
+(`%LOCALAPPDATA%\Packages\<package family>\SystemAppData\Helium\User.dat`), while the shell
+DLL loaded into Explorer has no identity and reads the real `HKCU` key. In 0.1.1 the
+settings exe had identity, so every setting saved from the window was invisible to
+Explorer (confirmed: the real key was empty while the private hive held the values).
+
+Alternatives considered and rejected: declaring `desktop6:RegistryWriteVirtualization`
+disabled plus `rescap:unvirtualizedResources` (a restricted capability to declare and
+validate, with no visible failure when it is not honoured), and saving through a
+`twctl settings-save` child process (an extra moving
+part that exists only to dodge the identity). Dropping the element needs nothing from the
+sparse package: the Explorer verb is a COM class the package registers itself, and nothing
+in the settings window uses package identity.
+
+Guards: `scripts/release.ps1` fails the release if the built settings exe contains an
+`<msix>` element, `scripts/test-install.ps1` checks the installed and the extracted copy,
+and `twctl doctor` reports how many values `HKCU\Software\Thumbwright` holds. Values saved
+by a 0.1.1 settings window stay in the package's private hive and are read only by
+packaged processes (the COM surrogate of the Explorer verb); they disappear when the
+package is removed (the MSI removes it on uninstall).
+
 ## History
 
 `docs/history/` holds the project's review artefacts: the reviewer brief

@@ -131,6 +131,9 @@ pub struct Report {
     pub values_written: usize,
     pub keys_removed: usize,
     pub values_restored: usize,
+    /// Values whose journaled step was skipped on undo because another program has since
+    /// replaced or deleted what we wrote; the journal entry is dropped and the value stays.
+    pub values_left_foreign: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -168,21 +171,26 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// One journal entry. Line formats (tab-separated):
-/// `K <path>`                         key created by us
-/// `V <path> <name> new`              value created by us
-/// `V <path> <name> old <type> <hex>` value replaced by us (restored on unregister)
+/// One journal entry. Line formats (tab-separated; `<w>` is the hex of the UTF-8 string we
+/// wrote, absent in journals written before it was recorded):
+/// `K <path>`                              key created by us
+/// `V <path> <name> new [<w>]`             value created by us
+/// `V <path> <name> old <type> <hex> [<w>]` value replaced by us (restored on unregister)
+///
+/// Undo only touches a value that still equals `<w>`; without `<w>` it acts unconditionally.
 enum Step {
     Key(String),
     NewValue {
         path: String,
         name: String,
+        written: Option<String>,
     },
     OldValue {
         path: String,
         name: String,
         ty: u32,
         data: Vec<u8>,
+        written: Option<String>,
     },
 }
 
@@ -194,16 +202,34 @@ impl Step {
             ["V", path, name, "new"] => Self::NewValue {
                 path: path.to_string(),
                 name: name.to_string(),
+                written: None,
+            },
+            ["V", path, name, "new", written] => Self::NewValue {
+                path: path.to_string(),
+                name: name.to_string(),
+                written: Some(unhex_string(written)?),
             },
             ["V", path, name, "old", ty, data] => Self::OldValue {
                 path: path.to_string(),
                 name: name.to_string(),
                 ty: ty.parse().ok()?,
                 data: unhex(data)?,
+                written: None,
+            },
+            ["V", path, name, "old", ty, data, written] => Self::OldValue {
+                path: path.to_string(),
+                name: name.to_string(),
+                ty: ty.parse().ok()?,
+                data: unhex(data)?,
+                written: Some(unhex_string(written)?),
             },
             _ => return None,
         })
     }
+}
+
+fn unhex_string(s: &str) -> Option<String> {
+    String::from_utf8(unhex(s)?).ok()
 }
 
 fn journal_name(index: usize) -> String {
@@ -307,6 +333,7 @@ impl<'a> Recorder<'a> {
 
     fn set_string(&mut self, path: &str, name: &str, value: &str) -> Result<()> {
         let key = self.ensure_key(path)?;
+        let written = hex(value.as_bytes());
         let line = match key.get_value(name) {
             Ok(prev)
                 if prev.ty() == Type::String
@@ -315,11 +342,11 @@ impl<'a> Recorder<'a> {
                 return Ok(()); // already ours or identical: nothing to own
             }
             Ok(prev) => format!(
-                "V\t{path}\t{name}\told\t{}\t{}",
+                "V\t{path}\t{name}\told\t{}\t{}\t{written}",
                 type_code(prev.ty()),
                 hex(&prev)
             ),
-            Err(_) => format!("V\t{path}\t{name}\tnew"),
+            Err(_) => format!("V\t{path}\t{name}\tnew\t{written}"),
         };
         self.log(&line)?;
         key.set_string(name, value)?;
@@ -609,6 +636,7 @@ pub fn sync_extensions(layout: &Layout, enabled: &[&str], universe: &[&str]) -> 
         total.values_written += step.values_written;
         total.keys_removed += step.keys_removed;
         total.values_restored += step.values_restored;
+        total.values_left_foreign += step.values_left_foreign;
         Ok(())
     });
     if changed && layout.notify {
@@ -661,16 +689,66 @@ enum Undo {
     Kept,
 }
 
+/// Who holds a journaled value right now.
+enum Holder {
+    /// It still equals what we wrote (or the journal predates written values: assume ours).
+    Ours,
+    /// It is absent, or still the value we meant to replace (a crash before the write).
+    Untouched,
+    /// Another program has replaced it with something else.
+    Foreign,
+}
+
+fn holder(key: &Key, step: &Step) -> Result<Holder> {
+    let (name, written) = match step {
+        Step::Key(_) => return Ok(Holder::Ours),
+        Step::NewValue { name, written, .. } | Step::OldValue { name, written, .. } => {
+            (name, written)
+        }
+    };
+    let Some(written) = written else {
+        return Ok(Holder::Ours);
+    };
+    let current = match key.get_value(name) {
+        Ok(current) => current,
+        Err(e) if is_not_found(&e) => return Ok(Holder::Untouched),
+        Err(e) => return Err(e),
+    };
+    if current.ty() == Type::String
+        && String::try_from(current.clone()).is_ok_and(|c| c == *written)
+    {
+        return Ok(Holder::Ours);
+    }
+    if let Step::OldValue { ty, data, .. } = step
+        && type_code(current.ty()) == *ty
+        && *current == data[..]
+    {
+        return Ok(Holder::Untouched);
+    }
+    Ok(Holder::Foreign)
+}
+
+/// Undoes one value or key step. A value is removed or restored only while it still holds
+/// what we wrote; if another program has replaced it, it stays, the step counts in
+/// `Report::values_left_foreign`, and the caller drops the journal entry.
 fn undo(root: &Key, step: &Step, report: &mut Report) -> Result<Undo> {
     let (path, name) = match step {
         Step::Key(path) => return remove_created_key(root, path, report),
-        Step::NewValue { path, name } | Step::OldValue { path, name, .. } => (path, name),
+        Step::NewValue { path, name, .. } | Step::OldValue { path, name, .. } => (path, name),
     };
     let key = match root.options().read().write().open(path) {
         Ok(key) => key,
         Err(e) if is_not_found(&e) => return Ok(Undo::Done),
         Err(e) => return Err(e),
     };
+    match holder(&key, step)? {
+        Holder::Ours => {}
+        Holder::Untouched => return Ok(Undo::Done),
+        Holder::Foreign => {
+            report.values_left_foreign += 1;
+            return Ok(Undo::Done);
+        }
+    }
     if let Step::OldValue { ty, data, .. } = step {
         key.set_bytes(name, Type::from(*ty), data)?;
     } else {
@@ -682,6 +760,38 @@ fn undo(root: &Key, step: &Step, report: &mut Report) -> Result<Undo> {
     }
     report.values_restored += 1;
     Ok(Undo::Done)
+}
+
+/// Registry values (`path`, `name`) this engine journaled whose current content is no longer
+/// what it wrote: another program has taken them over, and unregistration would leave them
+/// alone. Read-only; for diagnostics. Journals written before written values were recorded
+/// report nothing. A missing journal reports nothing.
+pub fn taken_over(layout: &Layout) -> Vec<(String, String)> {
+    let Ok(journal) = layout.root.open(layout.manifest_key()) else {
+        return Vec::new();
+    };
+    let Ok(entries) = read_indexed_journal(&journal) else {
+        return Vec::new();
+    };
+    // Only the newest step on a value says what is expected there now.
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (.., step) in entries.iter().rev() {
+        let (Step::NewValue { path, name, .. } | Step::OldValue { path, name, .. }) = step else {
+            continue;
+        };
+        if !seen.insert((path.to_ascii_lowercase(), name.to_ascii_lowercase())) {
+            continue;
+        }
+        let foreign = layout
+            .root
+            .open(path)
+            .is_ok_and(|key| matches!(holder(&key, step), Ok(Holder::Foreign)));
+        if foreign {
+            out.push((path.clone(), name.clone()));
+        }
+    }
+    out
 }
 
 /// Deletes a key we created if it is empty. `RegDeleteKeyW` is not recursive, so a subkey
@@ -872,6 +982,50 @@ pub fn foreign_progid_handler(ext: &str) -> Option<(String, String)> {
         }
     }
     None
+}
+
+/// The thumbnail handler CLSID Windows resolves at `.ext` (or its `SystemFileAssociations`
+/// twin) in the merged classes view, whoever registered it.
+pub fn extension_handler(ext: &str) -> Option<String> {
+    let classes = windows_registry::CLASSES_ROOT;
+    [format!(".{ext}"), format!("SystemFileAssociations\\.{ext}")]
+        .iter()
+        .find_map(|base| {
+            classes
+                .open(format!("{base}\\ShellEx\\{THUMBNAIL_HANDLER_CATEGORY}"))
+                .ok()?
+                .get_string("")
+                .ok()
+        })
+}
+
+/// Who draws the thumbnails of a set of extensions right now.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Coverage {
+    /// Extensions whose handler is this product's.
+    pub hooked: usize,
+    /// `(extension, handler CLSID)` where another program's handler is registered.
+    pub foreign: Vec<(String, String)>,
+    /// Extensions where a foreign ProgID-level handler takes precedence over the extension.
+    pub progid_overridden: usize,
+}
+
+/// Reads the registry (read-only) for every extension in `exts`, as `twctl doctor` section 4
+/// and the settings window's status line report it.
+pub fn coverage<'a>(exts: impl IntoIterator<Item = &'a str>) -> Coverage {
+    let ours = ids::CLSID_THUMBNAIL.braced();
+    let mut out = Coverage::default();
+    for ext in exts {
+        match extension_handler(ext) {
+            Some(c) if c.eq_ignore_ascii_case(&ours) => out.hooked += 1,
+            Some(c) => out.foreign.push((ext.to_owned(), c)),
+            None => {}
+        }
+        if foreign_progid_handler(ext).is_some() {
+            out.progid_overridden += 1;
+        }
+    }
+    out
 }
 
 fn notify_assoc_changed() {
@@ -1205,6 +1359,118 @@ mod tests {
             sb.get(&format!(".svg\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}")),
             None
         );
+    }
+
+    fn handler_path(ext: &str) -> String {
+        format!(".{ext}\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}")
+    }
+
+    #[test]
+    fn value_overwritten_by_another_program_is_left_alone_on_unregister() {
+        let sb = Sandbox::new("takeover");
+        sb.seed_user_state();
+        let dll = PathBuf::from(r"C:\x\thumbwright_shell.dll");
+        register(&sb.layout, &plan(&dll)).unwrap();
+        assert!(taken_over(&sb.layout).is_empty());
+        // .png had no handler (a value we created); .svg had a foreign one (a value we
+        // replaced). Another program now owns both.
+        for (ext, clsid) in [("png", "{EGNYTE-PNG}"), ("svg", "{EGNYTE-SVG}")] {
+            CURRENT_USER
+                .create(format!("{}\\Classes\\{}", sb.base, handler_path(ext)))
+                .unwrap()
+                .set_string("", clsid)
+                .unwrap();
+        }
+        let mut listed: Vec<String> = taken_over(&sb.layout)
+            .into_iter()
+            .map(|(path, name)| {
+                assert_eq!(name, "");
+                path.rsplit_once("Classes\\").unwrap().1.to_owned()
+            })
+            .collect();
+        listed.sort();
+        assert_eq!(listed, [handler_path("png"), handler_path("svg")]);
+
+        let report = unregister(&sb.layout).unwrap();
+        assert_eq!(report.values_left_foreign, 2);
+        assert_eq!(
+            sb.get(&handler_path("png")).as_deref(),
+            Some("{EGNYTE-PNG}")
+        );
+        assert_eq!(
+            sb.get(&handler_path("svg")).as_deref(),
+            Some("{EGNYTE-SVG}")
+        );
+        // What was still ours is gone.
+        assert_eq!(
+            sb.get(&format!(
+                "SystemFileAssociations\\.png\\shellex\\{THUMBNAIL_HANDLER_CATEGORY}"
+            )),
+            None
+        );
+        assert!(status(&sb.layout).is_none());
+    }
+
+    #[test]
+    fn untouched_values_are_removed_and_restored_with_nothing_left_foreign() {
+        let sb = Sandbox::new("untouched");
+        sb.seed_user_state();
+        let before = sb.snapshot();
+        let dll = PathBuf::from(r"C:\x\thumbwright_shell.dll");
+        register(&sb.layout, &plan(&dll)).unwrap();
+        assert!(taken_over(&sb.layout).is_empty());
+        let report = unregister(&sb.layout).unwrap();
+        assert_eq!(report.values_left_foreign, 0);
+        assert!(report.values_restored > 0);
+        assert_eq!(sb.snapshot(), before);
+    }
+
+    #[test]
+    fn extension_toggle_leaves_a_taken_over_value_alone() {
+        let sb = Sandbox::new("toggle-takeover");
+        register(&sb.layout, &plan_for(&dll(), &["png", "svg"])).unwrap();
+        CURRENT_USER
+            .create(format!("{}\\Classes\\{}", sb.base, handler_path("svg")))
+            .unwrap()
+            .set_string("", "{EGNYTE}")
+            .unwrap();
+        let report = unregister_extension(&sb.layout, "svg").unwrap();
+        assert_eq!(report.values_left_foreign, 1);
+        assert_eq!(sb.get(&handler_path("svg")).as_deref(), Some("{EGNYTE}"));
+        assert!(extension_registered(&sb.layout, "png"));
+    }
+
+    #[test]
+    fn journal_without_written_values_still_unregisters_unconditionally() {
+        // Journals written before the written value was recorded: `new` has 4 fields, `old`
+        // has 6. Undo must behave exactly as it did then.
+        let sb = Sandbox::new("oldjournal");
+        sb.seed_user_state();
+        let before = sb.snapshot();
+        let dll = PathBuf::from(r"C:\x\thumbwright_shell.dll");
+        register(&sb.layout, &plan(&dll)).unwrap();
+        let journal = sb.journal();
+        for (name, value) in journal.values().unwrap() {
+            if journal_index(&name).is_none() {
+                continue;
+            }
+            let line = String::try_from(value).unwrap();
+            let mut fields: Vec<&str> = line.split('\t').collect();
+            if fields[0] == "V" {
+                fields.truncate(if fields[3] == "new" { 4 } else { 6 });
+            }
+            journal.set_string(&name, fields.join("\t")).unwrap();
+        }
+        assert!(taken_over(&sb.layout).is_empty());
+        // An old journal cannot tell a takeover apart, so it removes what is at the path.
+        CURRENT_USER
+            .create(format!("{}\\Classes\\{}", sb.base, handler_path("png")))
+            .unwrap()
+            .set_string("", "{OTHER}")
+            .unwrap();
+        let report = unregister(&sb.layout).unwrap();
+        assert_eq!(report.values_left_foreign, 0);
+        assert_eq!(sb.snapshot(), before);
     }
 
     #[test]
