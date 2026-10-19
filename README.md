@@ -21,8 +21,7 @@ Free · open source · no internet access · Windows 10/11</p>
 - **Upgrade:** run the newer MSI the same way, or `choco upgrade thumbwright`.
 - **Uninstall:** `msiexec /x Thumbwright-<version>-x64.msi /qn`, or `choco uninstall thumbwright`. It uninstalls cleanly; the registration is journaled and reversible.
 
-<!-- verify: MENU=0 -->
-Thumbnails only, without the right-click menu: `msiexec /i Thumbwright-<version>-x64.msi /qn MENU=0` (coming in 0.1.2).
+- **Thumbnails only** (no right-click menu): `msiexec /i Thumbwright-<version>-x64.msi /qn MENU=0`. Pick a Starter kit with `KIT=photos|paperwork|design|cad|thumbnails|everything`; with Chocolatey, `choco install thumbwright --params "/Menu:0 /Kit:photos"`.
 
 HEIC and HEIF files need the free Microsoft HEIF and HEVC extensions from the Microsoft Store; `twctl doctor` tells you whether they are present.
 

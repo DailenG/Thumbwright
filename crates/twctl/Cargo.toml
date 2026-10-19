@@ -10,7 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-tw-core = { version = "0.1.1", path = "../tw-core" }
+tw-core = { version = "0.1.2", path = "../tw-core" }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
 # Pure-Rust deflate for PDF streams (the same backend `zip` and `png` already use).
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }

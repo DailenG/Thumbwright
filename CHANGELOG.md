@@ -7,6 +7,8 @@ on-disk formats may still change.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-19
+
 ### Changed
 
 - **Right-click menu, Windows 11:** the packaged entry is now one "Thumbwright" item (it was

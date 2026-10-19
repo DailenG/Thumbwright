@@ -919,7 +919,11 @@ fn verbose_log_keeps_failures_and_never_logs_paths() {
     }
     let log = log_since(before);
     assert_eq!(trace_lines(&log).len(), 1, "{log}");
-    assert!(log.contains("ERROR GetThumbnail: failed"), "{log}");
+    // An undecodable file is an expected "no preview here": logged, at INFO, without a path.
+    assert!(
+        log.contains("GetThumbnail: refused") && log.contains("cause=unsupported input"),
+        "{log}"
+    );
     assert!(!log.contains("tw-cls-verbose"), "no file path in {log}");
 }
 

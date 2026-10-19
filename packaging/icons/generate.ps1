@@ -39,8 +39,18 @@ if (-not $Twctl) {
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('tw-icons-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
+# Small sizes come from hand-drawn pixel-grid sources (thumbwright-16/24/32.svg) when present:
+# 16, 24 and 32 render exactly; 20 uses the 24 grid and 40 the master.
+function Source([int]$Size) {
+    $grid = @{ 16 = 16; 20 = 24; 24 = 24; 32 = 32 }
+    if ($grid.ContainsKey($Size)) {
+        $p = Join-Path $here ("thumbwright-{0}.svg" -f $grid[$Size])
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    return $svg
+}
 function Render([int]$Size, [string]$Out) {
-    & $Twctl convert $svg $Out --resize "${Size}x${Size}" | Out-Null
+    & $Twctl convert (Source $Size) $Out --resize "${Size}x${Size}" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "twctl convert failed for $Size px" }
 }
 
