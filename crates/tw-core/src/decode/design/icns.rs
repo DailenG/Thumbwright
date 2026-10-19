@@ -8,6 +8,7 @@
 use image::{DynamicImage, RgbaImage};
 
 use crate::decode::{DecodeError, Result, check_dimensions, decode_bytes};
+use crate::limits;
 
 const MAX_ENTRIES: usize = 256;
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -70,7 +71,7 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
         .collect();
     pngs.sort_by_key(|&(area, _)| std::cmp::Reverse(area));
     let mut last = DecodeError::Unsupported;
-    for (_, payload) in pngs {
+    for (_, payload) in pngs.into_iter().take(limits::MAX_PAYLOAD_ATTEMPTS) {
         match decode_bytes(payload) {
             Ok(img) => return Ok(img),
             Err(e) if e.falls_through() => last = e,
@@ -254,5 +255,21 @@ mod tests {
             decode(&icns(&[entry(b"ic07", &png)])),
             Err(DecodeError::TooLarge)
         );
+    }
+
+    /// DB-04: undecodable PNG entries are not retried without bound.
+    #[test]
+    fn gives_up_after_the_attempt_cap() {
+        // Larger-looking but truncated PNGs sort ahead of the real small one.
+        let bad = |i: u32| testutil::png(100, 100 + i, [9, 9, 9, 255])[..60].to_vec();
+        let good = entry(b"ic07", &testutil::png(16, 16, [255, 0, 0, 255]));
+        let many: Vec<Vec<u8>> = (0..6).map(|i| entry(b"ic07", &bad(i))).collect();
+        let mut entries = many.clone();
+        entries.push(good.clone());
+        let err = decode(&icns(&entries)).unwrap_err();
+        assert!(err.falls_through(), "{err:?}");
+        let mut entries = many[..limits::MAX_PAYLOAD_ATTEMPTS - 1].to_vec();
+        entries.push(good);
+        assert_eq!(decode(&icns(&entries)).unwrap().width(), 16);
     }
 }
