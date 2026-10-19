@@ -7,6 +7,30 @@ on-disk formats may still change.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Settings now reach Explorer.** `thumbwright-settings.exe` carried the sparse package's
+  identity, so Windows redirected its `HKCU` writes into the package's private registry
+  hive and Explorer never saw them. The executable no longer embeds the identity element
+  (`release.ps1` and `test-install.ps1` check this); see `docs/ARCHITECTURE.md`.
+- **Removing a file type or uninstalling no longer deletes another program's handler.** The
+  registration journal now records the value Thumbwright wrote, and undo removes or
+  restores a value only while it still holds that. A value another program has taken over
+  stays, and is reported ("taken over by another program, left alone") by `twctl register
+  --off`, the Workbench and `twctl doctor`. Journals written by earlier versions undo as
+  before.
+- `twctl doctor`: names Windows 11 by its build number, no longer says the cloud and
+  embedded-preview settings do not exist, and reports how many values the settings store
+  holds. A file with no preview to draw (`unsupported input`) is logged as INFO, not ERROR.
+
+### Changed
+
+- The settings window is now "Thumbwright Workbench": one instance per session (a second
+  launch brings the first to the front), the product icon, a dark title bar when apps use
+  the dark theme, clearer labels, a single "Show a preview of the file in the menu" check
+  box, and an honest status line on installed copies ("Active for all users. N of 315
+  types use Thumbwright, M are handled by other apps").
+
 ## [0.1.1] - 2026-10-19
 
 ### Fixed

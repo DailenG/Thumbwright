@@ -339,6 +339,15 @@ function Test-MsiPackage {
     }
 }
 
+# The settings executable must carry no <msix> element: with package identity its HKCU writes
+# would be virtualized into the package's private hive and never reach Explorer.
+function Test-SettingsExeHasNoIdentity {
+    param([string]$Path, [string]$Label)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($Path))
+    Assert-Check "[$Label] thumbwright-settings.exe embeds no <msix> package identity (settings reach the real HKCU)" ($text -notmatch '<msix\b')
+}
+
 # Inspects a sparse package file without installing it: identity, the executable that carries it,
 # external-content flag, and that the verb and the COM class behind it use CLSID_EXPLORER_COMMAND
 # from crates\tw-core\src\ids.rs. Returns Name, Publisher, Executable and Signed.
@@ -372,7 +381,7 @@ function Test-SparsePackageFile {
         -not ($entries | Where-Object { $_ -match '\.(dll|exe)$' }))
     Assert-Check "[$Label] package has an identity name and a CN= publisher" (
         $identity.Name -match '^[A-Za-z0-9][A-Za-z0-9.\-]+$' -and $identity.Publisher -like 'CN=*') "$($identity.Name) / $($identity.Publisher)"
-    Assert-Check "[$Label] package Application is thumbwright-settings.exe (the exe with the embedded msix manifest)" (
+    Assert-Check "[$Label] package Application is thumbwright-settings.exe (shipped by the MSI; carries no identity itself)" (
         $null -ne $application -and $application.Executable -eq 'thumbwright-settings.exe')
     Assert-Check "[$Label] explorer verb uses CLSID_EXPLORER_COMMAND $explorerCommand" (
         $null -ne $verb -and $verb.Clsid -eq $explorerCommand)
@@ -422,6 +431,8 @@ function Test-AdminImage {
         Assert-Check 'Package identity equals the one the register/unregister actions manage' ($package.Name -eq $script:CaPackageName) "$($package.Name) vs $($script:CaPackageName)"
         Assert-Check 'MSI ships the executable that the package Application names' ($names -contains $package.Executable) $package.Executable
     }
+    $settingsFile = Get-ChildItem -LiteralPath $target -Recurse -File -Filter 'thumbwright-settings.exe' | Select-Object -First 1
+    if ($settingsFile) { Test-SettingsExeHasNoIdentity $settingsFile.FullName 'extracted' }
 }
 
 function Test-IceValidation {
@@ -707,6 +718,7 @@ function Test-Installed {
     Assert-Check "[$Label] context menu handler" ((Get-RegistryValue 'HKLM' 'SOFTWARE\Classes\*\shellex\ContextMenuHandlers\Thumbwright') -eq $menu)
 
     $package = Test-SparsePackageFile (Join-Path $script:InstallDir 'Thumbwright.msix') $Label
+    Test-SettingsExeHasNoIdentity (Join-Path $script:InstallDir 'thumbwright-settings.exe') $Label
     Assert-Check "[$Label] sparse package identity equals the one the MSI actions manage" ($package.Name -eq $script:CaPackageName) "$($package.Name) vs $($script:CaPackageName)"
     if ($package.Signed) {
         # The MSI stages the package with the install directory as its external location and

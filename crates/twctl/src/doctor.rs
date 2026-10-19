@@ -30,8 +30,6 @@ use windows_registry::{CLASSES_ROOT, CURRENT_USER, Key, LOCAL_MACHINE};
 
 use crate::ops;
 
-/// `{E357FCCD-...}`: the IThumbnailProvider shell-extension category.
-const THUMB_CATEGORY: &str = "{E357FCCD-A995-4576-B01F-234630154E96}";
 const LOG_TAIL_BYTES: u64 = 256 * 1024;
 const EXAMPLES: usize = 5;
 
@@ -136,6 +134,18 @@ pub fn log_tail() -> Vec<String> {
     lines
 }
 
+/// The OS line. The registry's `ProductName` still reads "Windows 10 ..." on Windows 11, so
+/// the build number decides (Windows 11 starts at build 22000).
+fn os_label(product: &str, display: &str, build: &str, ubr: &str) -> String {
+    let product = match product.strip_prefix("Windows 10") {
+        Some(rest) if build.parse::<u32>().is_ok_and(|b| b >= 22000) => {
+            format!("Windows 11{rest}")
+        }
+        _ => product.to_owned(),
+    };
+    format!("{product} {display} (build {build}{ubr})")
+}
+
 fn environment(doc: &mut Doc, dir: &Path) {
     doc.section(1, "Environment");
     doc.line(
@@ -149,7 +159,7 @@ fn environment(doc: &mut Doc, dir: &Path) {
     let ubr = reg_u32(LOCAL_MACHINE, nt, "UBR").map_or(String::new(), |u| format!(".{u}"));
     doc.line(
         Level::Info,
-        format!("OS: {product} {display} (build {build}{ubr})"),
+        format!("OS: {}", os_label(&product, &display, &build, &ubr)),
     );
     let dll = dir.join(ids::SHELL_DLL_NAME);
     match std::fs::metadata(&dll) {
@@ -185,10 +195,6 @@ fn environment(doc: &mut Doc, dir: &Path) {
             doc.plain(l);
         }
     }
-    doc.line(
-        Level::Info,
-        "Last self-update log: none (this build has no updater)",
-    );
 }
 
 fn windows_settings(doc: &mut Doc) {
@@ -360,38 +366,24 @@ fn clsid_name(clsid: &str) -> String {
     reg_string(CLASSES_ROOT, &format!("CLSID\\{clsid}"), "").unwrap_or_else(|| "unnamed".into())
 }
 
-/// The thumbnail handler CLSID registered at `.ext` (or its SystemFileAssociations twin).
-fn ext_handler(ext: &str) -> Option<String> {
-    [format!(".{ext}"), format!("SystemFileAssociations\\.{ext}")]
-        .iter()
-        .find_map(|base| {
-            reg_string(
-                CLASSES_ROOT,
-                &format!("{base}\\ShellEx\\{THUMB_CATEGORY}"),
-                "",
-            )
-        })
-}
-
 fn associations(doc: &mut Doc, settings: &Settings) {
     doc.section(4, "Per-format file associations");
-    let ours = ids::CLSID_THUMBNAIL.braced();
-    let (mut enabled, mut hooked) = (0usize, 0usize);
-    let mut foreign: Vec<(String, String)> = Vec::new();
-    for f in formats::all() {
-        if route::chain_for_ext(f.ext).is_empty() || !settings.type_enabled(f.ext) {
-            continue;
-        }
-        enabled += 1;
-        match ext_handler(f.ext) {
-            Some(c) if c.eq_ignore_ascii_case(&ours) => hooked += 1,
-            Some(c) => foreign.push((f.ext.to_owned(), c)),
-            None => {}
-        }
-    }
+    let routable = formats::all()
+        .iter()
+        .filter(|f| !route::chain_for_ext(f.ext).is_empty())
+        .count();
+    let enabled_exts: Vec<&str> = formats::all()
+        .iter()
+        .filter(|f| !route::chain_for_ext(f.ext).is_empty() && settings.type_enabled(f.ext))
+        .map(|f| f.ext)
+        .collect();
+    let enabled = enabled_exts.len();
+    let registration::Coverage {
+        hooked, foreign, ..
+    } = registration::coverage(enabled_exts);
     doc.line(
         Level::Info,
-        format!("{enabled} of {} file types enabled", formats::all().len()),
+        format!("{enabled} of {routable} file types enabled"),
     );
     if enabled > 0 && hooked == 0 {
         doc.problem(
@@ -414,6 +406,25 @@ fn associations(doc: &mut Doc, settings: &Settings) {
             Level::Warn,
             format!("{} owned by another program, e.g. {}", foreign.len(), eg.join("; ")),
             "Another program's thumbnail handler is registered for these types. Re-run `twctl register` to take them over, or turn the types off in Settings > File types.",
+        );
+    }
+    for (scope, name) in [(Scope::User, "per-user"), (Scope::Machine, "machine-wide")] {
+        let taken = registration::taken_over(&Layout::for_scope(scope));
+        if taken.is_empty() {
+            continue;
+        }
+        let eg: Vec<String> = taken
+            .iter()
+            .take(EXAMPLES)
+            .map(|(path, _)| path.clone())
+            .collect();
+        doc.line(
+            Level::Info,
+            format!(
+                "{} {name} registry value(s) taken over by another program, left alone: {}",
+                taken.len(),
+                eg.join("; ")
+            ),
         );
     }
 }
@@ -458,11 +469,14 @@ fn progid_handlers(doc: &mut Doc, settings: &Settings) {
     }
 }
 
-fn cloud_folders(doc: &mut Doc) {
+fn cloud_folders(doc: &mut Doc, settings: &Settings) {
     doc.section(6, "Cloud sync folders");
     doc.line(
         Level::Info,
-        "Thumbnails in cloud folders: no setting in this build (the cloud provider class is registered separately, see section 3)",
+        format!(
+            "Thumbnails in cloud folders: {} (the cloud provider class is registered separately, see section 3)",
+            if settings.cloud_thumbnails { "on" } else { "off" }
+        ),
     );
     let path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager";
     let mut any = false;
@@ -490,14 +504,38 @@ fn cloud_folders(doc: &mut Doc) {
     }
 }
 
+/// How many values `HKCU\Software\Thumbwright` holds; `None` when the key does not exist.
+fn store_value_count() -> Option<usize> {
+    let key = CURRENT_USER.open(config::PRODUCT_KEY).ok()?;
+    Some(key.values().map_or(0, Iterator::count))
+}
+
 fn settings_summary(doc: &mut Doc, dir: &Path, settings: &Settings) {
     doc.section(7, "Settings summary");
-    let store = if config::is_portable(dir) {
-        format!("portable ({})", config::portable_ini(dir).display())
+    if config::is_portable(dir) {
+        doc.line(
+            Level::Info,
+            format!(
+                "Settings store: portable ({})",
+                config::portable_ini(dir).display()
+            ),
+        );
     } else {
-        format!("installed (HKCU\\{})", config::PRODUCT_KEY)
-    };
-    doc.line(Level::Info, format!("Settings store: {store}"));
+        // The settings window must write the real HKCU key. A packaged process would have its
+        // writes redirected into the package's private hive, and Explorer would never see them.
+        let key = format!("HKCU\\{}", config::PRODUCT_KEY);
+        match store_value_count() {
+            Some(n) if n > 0 => {
+                doc.line(Level::Info, format!("Settings store: {key} has {n} values"))
+            }
+            _ => doc.line(
+                Level::Info,
+                format!(
+                    "Settings store: {key} has 0 values (defaults are in use; nothing saved yet)"
+                ),
+            ),
+        }
+    }
     doc.line(
         if settings.thumbnails_enabled {
             Level::Ok
@@ -523,7 +561,14 @@ fn settings_summary(doc: &mut Doc, dir: &Path, settings: &Settings) {
     );
     doc.line(
         Level::Info,
-        "Embedded previews: used first for RAW and design formats (fixed, no setting)",
+        format!(
+            "Prefer a file's embedded thumbnail: {}",
+            if settings.use_embedded_thumbs {
+                "yes"
+            } else {
+                "no"
+            }
+        ),
     );
     if !settings.disabled_types.is_empty() {
         doc.line(
@@ -533,14 +578,17 @@ fn settings_summary(doc: &mut Doc, dir: &Path, settings: &Settings) {
     }
 }
 
-fn licence_and_preview(doc: &mut Doc) {
+fn licence_and_updates(doc: &mut Doc) {
     doc.section(8, "Licence");
     doc.line(
         Level::Ok,
         "GPL-3.0-or-later free software; no licence key is needed",
     );
-    doc.section(9, "Quick preview state");
-    doc.line(Level::Info, "Quick preview is not part of this build");
+    doc.section(9, "Updates");
+    doc.line(
+        Level::Info,
+        "Updates: manual (Thumbwright makes no network connections)",
+    );
 }
 
 fn self_test_png() -> Vec<u8> {
@@ -783,7 +831,7 @@ fn this_file(doc: &mut Doc, dir: &Path, path: &Path, settings: &Settings) {
         );
     }
     let ours = ids::CLSID_THUMBNAIL.braced();
-    match ext_handler(&ext) {
+    match registration::extension_handler(&ext) {
         Some(c) if c.eq_ignore_ascii_case(&ours) => doc.line(
             Level::Ok,
             "Windows resolves the thumbnail handler to Thumbwright",
@@ -909,9 +957,9 @@ pub fn report(dir: &Path, file: Option<&Path>) -> String {
     com_registration(&mut doc, dir, &settings);
     associations(&mut doc, &settings);
     progid_handlers(&mut doc, &settings);
-    cloud_folders(&mut doc);
+    cloud_folders(&mut doc, &settings);
     settings_summary(&mut doc, dir, &settings);
-    licence_and_preview(&mut doc);
+    licence_and_updates(&mut doc);
     decode_engine(&mut doc, dir);
     capability(&mut doc);
     match file {
@@ -994,5 +1042,26 @@ mod tests {
     #[test]
     fn level_ordering_makes_fail_worst() {
         assert!(Level::Fail > Level::Warn && Level::Warn > Level::Ok && Level::Ok > Level::Info);
+    }
+
+    #[test]
+    fn windows_11_is_named_from_the_build_number() {
+        // The registry's ProductName still says "Windows 10" on Windows 11.
+        assert_eq!(
+            os_label("Windows 10 Pro", "26H2", "26340", ".9750"),
+            "Windows 11 Pro 26H2 (build 26340.9750)"
+        );
+        assert_eq!(
+            os_label("Windows 10 Home", "21H2", "22000", ""),
+            "Windows 11 Home 21H2 (build 22000)"
+        );
+        assert_eq!(
+            os_label("Windows 10 Pro", "22H2", "19045", ".5000"),
+            "Windows 10 Pro 22H2 (build 19045.5000)"
+        );
+        assert_eq!(
+            os_label("Windows Server 2025 Standard", "24H2", "26100", ""),
+            "Windows Server 2025 Standard 24H2 (build 26100)"
+        );
     }
 }

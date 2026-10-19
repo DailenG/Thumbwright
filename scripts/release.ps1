@@ -6,13 +6,13 @@
 
 .DESCRIPTION
     1. cargo xtask licenses --check and cargo build --release --workspace --locked
-    2. Collects thumbwright_shell.dll, tw-worker.exe, twctl.exe, LICENSE and
-       THIRD_PARTY_LICENSES.md into dist\ (cleaned first); a missing binary fails the release
+    2. Collects thumbwright_shell.dll, tw-worker.exe, twctl.exe, thumbwright-settings.exe, LICENSE
+       and THIRD_PARTY_LICENSES.md into dist\ (cleaned first); a missing binary fails the release
     3. Signs those binaries (REQ-SEC-4, issue #1), then verifies every signature
     4. Reads the subject of the certificate that signed the DLL: that is the sparse package's
        Publisher (it must equal the signing certificate subject exactly, issue #19)
-    5. Rebuilds with TW_MSIX_PUBLISHER set so thumbwright-settings.exe embeds the matching
-       <msix> identity element (crates\tw-settings\build.rs), collects it, signs and verifies it
+    5. Checks that thumbwright-settings.exe carries no package identity (a packaged process
+       would have its HKCU writes virtualized away from Explorer)
     6. Builds dist\Thumbwright.msix (packaging\msix\build.ps1 -Publisher <that subject>), signs
        it with the same method, verifies it, and checks its signer subject equals the Publisher
     7. Builds dist\Thumbwright-<version>-x64.msi from the signed payload, Thumbwright.msix
@@ -104,15 +104,10 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $dist = if ($DistDir) { [System.IO.Path]::GetFullPath($DistDir) } else { Join-Path $root 'dist' }
 
-# Identity of the sparse package for the Windows 11 menu (packaging\msix). The name goes to the
-# executable's manifest, to the package and to the MSI; the application id is read from the
-# package manifest template so that the executable and the package cannot disagree.
+# Identity name of the sparse package for the Windows 11 menu (packaging\msix); it goes to the
+# package and to the MSI. The package's Application names thumbwright-settings.exe but that
+# executable carries no identity of its own.
 $msixPackageName = 'Thumbwright.ShellExtension'
-$msixApplicationId = $null
-$template = Get-Content -LiteralPath (Join-Path $root 'packaging\msix\AppxManifest.xml') -Raw
-$idMatch = [regex]::Match($template, '<Application\s+Id="([^"]+)"')
-if (-not $idMatch.Success) { throw 'No <Application Id="..."> in packaging\msix\AppxManifest.xml' }
-$msixApplicationId = $idMatch.Groups[1].Value
 
 # Subject of the certificate that signed a PE file or MSI, exactly as Windows reports it
 # (.NET Framework form: "CN=..., O=..., L=..., S=..., C=..."). CreateFromSignedFile is used
@@ -155,24 +150,16 @@ function Get-MsixSignerSubject {
     return $cms.SignerInfos[0].Certificate.Subject
 }
 
-# The executable must carry the <msix> element that ties it to the package; without a match
-# Windows runs it unpackaged and no error is shown. Reads the manifest straight from the file.
-function Assert-EmbeddedIdentity {
-    param([string]$Exe, [string]$Publisher, [string]$PackageName, [string]$ApplicationId)
+# The settings executable must not carry package identity (an <msix> element in its embedded
+# manifest). A process with identity writes HKCU into the package's private hive, which
+# Explorer never reads. Reads the manifest straight from the file.
+function Assert-NoPackageIdentity {
+    param([string]$Exe)
     $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($Exe))
-    $found = [regex]::Match($text, '<msix\b[^>]*>')
-    if (-not $found.Success) { throw "$Exe has no <msix> element in its embedded manifest." }
-    $xml = $found.Value
-    if (-not $xml.EndsWith('/>')) { $xml += '</msix>' }
-    $element = ([xml]$xml).DocumentElement
-    $expected = @{ publisher = $Publisher; packageName = $PackageName; applicationId = $ApplicationId }
-    foreach ($name in $expected.Keys) {
-        $actual = $element.GetAttribute($name)
-        if ($actual -ne $expected[$name]) {
-            throw "$(Split-Path -Leaf $Exe): embedded msix $name is '$actual', expected '$($expected[$name])'."
-        }
+    if ($text -match '<msix\b') {
+        throw "$(Split-Path -Leaf $Exe) embeds an <msix> package identity element; settings it saves would be virtualized and never reach Explorer."
     }
-    Write-Host "  $(Split-Path -Leaf $Exe) embeds the package identity (publisher, packageName, applicationId)"
+    Write-Host "  $(Split-Path -Leaf $Exe) has no package identity (settings are written to the real HKCU)"
 }
 
 function Get-WorkspaceVersion {
@@ -385,8 +372,7 @@ try {
     Write-Host '== Dependency policy'
     Invoke-Native 'cargo' @('xtask', 'licenses', '--check')
 
-    # The first pass has no package identity (the publisher is not known yet); see below.
-    Remove-Item Env:TW_MSIX_PUBLISHER, Env:TW_MSIX_PACKAGE_NAME, Env:TW_MSIX_APPLICATION_ID -ErrorAction SilentlyContinue
+    # No executable carries package identity (see Assert-NoPackageIdentity).
     Write-Host '== cargo build --release --workspace'
     Invoke-Native 'cargo' (@('build', '--release', '--workspace', '--locked') + $remapArgs)
 } finally {
@@ -403,9 +389,7 @@ if (Test-Path -LiteralPath $dist) {
 }
 New-Item -ItemType Directory -Path $dist | Out-Null
 
-# The settings exe is built, signed and collected after the others: it embeds the package
-# identity, whose publisher is only known once something has been signed (next section).
-$binaries = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe')
+$binaries = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe', 'thumbwright-settings.exe')
 foreach ($name in $binaries) {
     $src = Join-Path $releaseDir $name
     if (-not (Test-Path -LiteralPath $src)) { throw "Release build did not produce $src" }
@@ -430,31 +414,11 @@ if ($SkipSign) {
 }
 Write-Host "Package publisher: $publisher"
 
-# Rebuild so thumbwright-settings.exe embeds the <msix> identity element for this publisher
-# (crates/tw-settings/build.rs). Only that crate's build script re-runs; everything else is up
-# to date.
-Write-Host '== Settings exe with package identity'
-$settingsExe = 'thumbwright-settings.exe'
-$env:TW_MSIX_PUBLISHER = $publisher
-$env:TW_MSIX_PACKAGE_NAME = $msixPackageName
-$env:TW_MSIX_APPLICATION_ID = $msixApplicationId
-Push-Location $root
-try {
-    Invoke-Native 'cargo' (@('build', '--release', '--workspace', '--locked') + $remapArgs)
-} finally {
-    Pop-Location
-    Remove-Item Env:TW_MSIX_PUBLISHER, Env:TW_MSIX_PACKAGE_NAME, Env:TW_MSIX_APPLICATION_ID -ErrorAction SilentlyContinue
-}
-$settingsSrc = Join-Path $releaseDir $settingsExe
-if (-not (Test-Path -LiteralPath $settingsSrc)) { throw "Release build did not produce $settingsSrc" }
-Copy-Item -LiteralPath $settingsSrc -Destination $dist
-$settingsPath = Join-Path $dist $settingsExe
-Assert-NoBuilderPaths @($settingsPath)
-Assert-EmbeddedIdentity $settingsPath $publisher $msixPackageName $msixApplicationId
-if (-not $SkipSign) {
-    Invoke-Sign -Files @($settingsPath) -Method $method -Scope 'Bin' -Tool $tool
-    Test-Signed -Files @($settingsPath) -Tool $tool -AddMissingTimestamp
-}
+# thumbwright-settings.exe must NOT carry package identity: a packaged process has its HKCU
+# writes redirected into the package's private hive, so settings saved from the window would
+# never reach Explorer (docs/ARCHITECTURE.md, "Settings store"). It was collected and signed
+# with the other binaries above; make sure no <msix> element slipped in.
+Assert-NoPackageIdentity (Join-Path $dist 'thumbwright-settings.exe')
 
 Write-Host '== Build sparse package'
 $msix = Join-Path $dist 'Thumbwright.msix'

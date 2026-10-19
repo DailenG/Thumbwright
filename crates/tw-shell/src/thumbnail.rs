@@ -144,12 +144,15 @@ pub(crate) fn write_thumbnail(
             Ok(())
         }
         Err(f) => {
-            // Settings-driven refusals are expected behaviour, not errors: a user who turns
-            // thumbnails off would otherwise generate one ERROR line per file per view.
-            // Everything else (decode failure, read failure) stays an error.
+            // Settings-driven refusals and files with no picture to draw are expected
+            // behaviour, not errors: a user who turns thumbnails off, or a folder of
+            // .xlsx/.zip files without an embedded preview, would otherwise generate one
+            // ERROR line per file per view. Everything else (malformed input, read failure,
+            // budget overruns) stays an error.
             let level = if f.cause == "thumbnails disabled"
                 || f.cause == "type disabled"
                 || f.cause == "cached failure"
+                || f.cause == "unsupported input"
             {
                 "INFO"
             } else {

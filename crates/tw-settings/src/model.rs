@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use tw_core::config::{self, Settings};
+use tw_core::config::{self, MenuPreview, Settings};
 use tw_core::decode::route;
 use tw_core::formats::{self, Format};
 use tw_core::ids;
@@ -107,11 +107,40 @@ pub fn register_user(dir: &Path, layout: &Layout, settings: &Settings) -> Result
     Ok(n)
 }
 
-/// Removes this user's registration, leaving no product keys behind (REQ-REG-4).
-pub fn unregister_user(layout: &Layout) -> Result<(), String> {
+/// Removes this user's registration, leaving no product keys behind (REQ-REG-4). Returns how
+/// many registered values another program had taken over, which are left alone.
+pub fn unregister_user(layout: &Layout) -> Result<usize, String> {
     registration::unregister(layout)
-        .map(|_| ())
+        .map(|report| report.values_left_foreign)
         .map_err(|e| e.to_string())
+}
+
+/// The Maintenance status line of an installed copy: the installer registers every file type
+/// machine-wide, so what matters is how many types actually use Thumbwright and how many
+/// another program handles (the same numbers as `twctl doctor`, section 4).
+pub fn installed_summary(
+    machine_registered: bool,
+    coverage: &registration::Coverage,
+    total: usize,
+) -> String {
+    if !machine_registered {
+        return "Thumbwright is not registered for all users. Run the installer's Repair.".into();
+    }
+    format!(
+        "Active for all users. {} of {total} types use Thumbwright, {} are handled by other apps.",
+        coverage.hooked,
+        coverage.foreign.len()
+    )
+}
+
+/// The single "Show a preview of the file in the menu" checkbox as the stored setting. Ticked
+/// keeps a stored "in the menu itself" choice and otherwise means 1; unticked is 0.
+pub fn menu_preview(show: bool, current: MenuPreview) -> MenuPreview {
+    match (show, current) {
+        (false, _) => MenuPreview::Off,
+        (true, MenuPreview::Off) => MenuPreview::InSubmenu,
+        (true, keep) => keep,
+    }
 }
 
 #[cfg(test)]
@@ -261,5 +290,38 @@ mod tests {
         let err = register_user(&sb.dir, &sb.layout, &Settings::default()).unwrap_err();
         assert!(err.contains("installed copy"), "{err}");
         assert!(registration::status(&sb.layout).is_none());
+    }
+
+    #[test]
+    fn installed_summary_reports_coverage_like_doctor() {
+        let coverage = registration::Coverage {
+            hooked: 271,
+            foreign: vec![("heic".into(), "{X}".into()); 44],
+            progid_overridden: 4,
+        };
+        assert_eq!(
+            installed_summary(true, &coverage, 315),
+            "Active for all users. 271 of 315 types use Thumbwright, 44 are handled by other apps."
+        );
+        assert!(installed_summary(false, &coverage, 315).contains("not registered"));
+    }
+
+    #[test]
+    fn one_preview_checkbox_maps_onto_the_stored_setting() {
+        assert_eq!(
+            menu_preview(false, MenuPreview::InSubmenu),
+            MenuPreview::Off
+        );
+        assert_eq!(menu_preview(false, MenuPreview::Off), MenuPreview::Off);
+        assert_eq!(menu_preview(true, MenuPreview::Off), MenuPreview::InSubmenu);
+        assert_eq!(
+            menu_preview(true, MenuPreview::InSubmenu),
+            MenuPreview::InSubmenu
+        );
+        // A stored "in the menu itself" survives an untouched ticked checkbox.
+        assert_eq!(
+            menu_preview(true, MenuPreview::InContextMenu),
+            MenuPreview::InContextMenu
+        );
     }
 }
