@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use tw_core::config::{self, MenuPreview, Settings};
+use tw_core::config::{self, Settings};
 use tw_core::decode::route;
 use tw_core::formats::{self, Format};
 use tw_core::ids;
@@ -131,16 +131,6 @@ pub fn installed_summary(
         coverage.hooked,
         coverage.foreign.len()
     )
-}
-
-/// The single "Show a preview of the file in the menu" checkbox as the stored setting. Ticked
-/// keeps a stored "in the menu itself" choice and otherwise means 1; unticked is 0.
-pub fn menu_preview(show: bool, current: MenuPreview) -> MenuPreview {
-    match (show, current) {
-        (false, _) => MenuPreview::Off,
-        (true, MenuPreview::Off) => MenuPreview::InSubmenu,
-        (true, keep) => keep,
-    }
 }
 
 #[cfg(test)]
@@ -304,24 +294,5 @@ mod tests {
             "Active for all users. 271 of 315 types use Thumbwright, 44 are handled by other apps."
         );
         assert!(installed_summary(false, &coverage, 315).contains("not registered"));
-    }
-
-    #[test]
-    fn one_preview_checkbox_maps_onto_the_stored_setting() {
-        assert_eq!(
-            menu_preview(false, MenuPreview::InSubmenu),
-            MenuPreview::Off
-        );
-        assert_eq!(menu_preview(false, MenuPreview::Off), MenuPreview::Off);
-        assert_eq!(menu_preview(true, MenuPreview::Off), MenuPreview::InSubmenu);
-        assert_eq!(
-            menu_preview(true, MenuPreview::InSubmenu),
-            MenuPreview::InSubmenu
-        );
-        // A stored "in the menu itself" survives an untouched ticked checkbox.
-        assert_eq!(
-            menu_preview(true, MenuPreview::InContextMenu),
-            MenuPreview::InContextMenu
-        );
     }
 }

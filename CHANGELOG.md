@@ -7,6 +7,43 @@ on-disk formats may still change.
 
 ## [Unreleased]
 
+### Changed
+
+- **Right-click menu, Windows 11:** the packaged entry is now one "Thumbwright" item (it was
+  a submenu that Windows 11 showed empty, or cut off after 16 commands). Clicking it opens
+  Thumbwright's own popup at the cursor (`twctl menu`), in the system's dark or light theme,
+  with a header row (file name, size, preview). The classic menu no longer adds a second
+  "Thumbwright" entry on Windows 11 while the package is registered for the user (folders
+  keep "Build thumbnails for this folder"). `THUMBWRIGHT_CLASSIC_MENU=1` brings the classic
+  menu back for diagnosis.
+- **One menu structure, shorter and clearer,** shared by both menus: Convert to, Resize,
+  Rotate & flip, Make smaller (email sizes, under 1/5/10 MB, remove location & camera info),
+  Copy text from image, Copy, Combine into (2+ files), Organise (rename, sort, move into a new
+  folder), Details, Set as (lock screen, folder icon), Thumbwright Workbench. Items that do not
+  apply to the selection are hidden, not greyed (audio renames only for audio, Combine only
+  for 2+ files, Set as only for one file). Saved menu order and hidden items keep working for
+  the items that kept their id (`convert_into`, `resize`, `rotate`, `copy_text`, `copy`,
+  `image_info`, `settings`). Items that merged into groups (`email`, `compress`, `strip_meta`
+  into `make_smaller`; the combine, rename, sort and folder items into `combine` and
+  `organise`; `lock_screen` and `folder_icon` into `set_as`) start visible again, and their
+  old hidden or ordered entries are ignored.
+- **Every action now shows its result.** A file-producing action opens (or reuses) an
+  Explorer window with the new files selected; a clipboard action shows a short "Copied"
+  confirmation near the cursor; actions over many files or taking longer than a moment show a
+  small progress window with Cancel. Error messages are plain language with the technical
+  detail on a second line (Ctrl+C copies them), and never show command usage text.
+- The settings window is now "Thumbwright Workbench": one instance per session (a second
+  launch brings the first to the front), the product icon, a dark title bar when apps use
+  the dark theme, clearer labels, a single "Show a preview of the file in the menu" check
+  box (both old placement values read as on), and an honest status line on installed copies
+  ("Active for all users. N of 315 types use Thumbwright, M are handled by other apps").
+- **Installer:** a minimal setup wizard (welcome, licence summary, progress, finish with
+  "Open Thumbwright Workbench"), a "Thumbwright Workbench" Start Menu shortcut, and silent
+  presets: `msiexec /i Thumbwright-0.1.2-x64.msi /qn MENU=0` installs thumbnails only;
+  `KIT=photos|paperwork|design|cad|thumbnails|everything` picks a Starter kit. Chocolatey:
+  `--params "/Menu:0 /Kit:photos"`. Silent installs show no UI.
+- New product icon, website and README.
+
 ### Fixed
 
 - **Settings now reach Explorer.** `thumbwright-settings.exe` carried the sparse package's
@@ -19,17 +56,19 @@ on-disk formats may still change.
   stays, and is reported ("taken over by another program, left alone") by `twctl register
   --off`, the Workbench and `twctl doctor`. Journals written by earlier versions undo as
   before.
+- Classic menu: when the shell offered a short command-id range, the whole "Thumbwright"
+  entry vanished; it now takes the first id and shows what fits.
+- Classic menu: the preview row broke dark mode (light preview background, white separator
+  bars, invisible submenu arrows). The preview is now a themed item bitmap.
+- Labels containing `&` ("Rotate & flip") lost the character to a menu mnemonic.
 - `twctl doctor`: names Windows 11 by its build number, no longer says the cloud and
   embedded-preview settings do not exist, and reports how many values the settings store
   holds. A file with no preview to draw (`unsupported input`) is logged as INFO, not ERROR.
 
-### Changed
+### Removed
 
-- The settings window is now "Thumbwright Workbench": one instance per session (a second
-  launch brings the first to the front), the product icon, a dark title bar when apps use
-  the dark theme, clearer labels, a single "Show a preview of the file in the menu" check
-  box, and an honest status line on installed copies ("Active for all users. N of 315
-  types use Thumbwright, M are handled by other apps").
+- "Set as wallpaper" (Windows has "Set as desktop background") and "Pick color" from the
+  file menu. `twctl wallpaper` and `twctl pick-color` remain.
 
 ## [0.1.1] - 2026-10-19
 

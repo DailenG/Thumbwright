@@ -1,8 +1,10 @@
-//! Classic context menu (`IShellExtInit` + `IContextMenu{,2,3}`, REQ-COM-3).
+//! Classic context menu (`IShellExtInit` + `IContextMenu{,2,3}`, REQ-COM-3), and the launcher
+//! for the Windows 11 entry's popup.
 //!
 //! Runs inside Explorer, so it never decodes images (REQ-ISO-4): every verb launches
-//! `twctl.exe` with the selection, and the owner-drawn preview item asks the shell's own
-//! thumbnail cache (which extracts through the isolated surrogate) on a background thread.
+//! `twctl.exe` with the selection, and the preview row asks the shell's own thumbnail cache
+//! (which extracts through the isolated surrogate) on a background thread. The menu tree is
+//! `tw_core::menu`, shared with the popup `twctl menu` shows, so the two never drift apart.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
@@ -12,422 +14,41 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{
-    E_FAIL, E_INVALIDARG, E_NOTIMPL, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM,
-};
-use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, AlphaBlend, BITMAP, BLENDFUNCTION, COLOR_MENU, CreateCompatibleDC,
-    DeleteDC, DeleteObject, FillRect, GetObjectW, GetSysColorBrush, HBITMAP, HGDIOBJ, SelectObject,
-};
+use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG, E_NOTIMPL, LPARAM, LRESULT, SIZE, WPARAM};
+use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP, HGDIOBJ};
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, DVASPECT_CONTENT, FORMATETC,
     IDataObject, TYMED_HGLOBAL,
 };
 use windows::Win32::System::Ole::{CF_HDROP, ReleaseStgMedium};
 use windows::Win32::System::Registry::HKEY;
-use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DragQueryFileW, GCS_HELPTEXTA,
     GCS_HELPTEXTW, GCS_VALIDATEA, GCS_VALIDATEW, GCS_VERBA, GCS_VERBW, GPFIDL_DEFAULT, HDROP,
     IContextMenu, IContextMenu_Impl, IContextMenu2, IContextMenu2_Impl, IContextMenu3,
     IContextMenu3_Impl, IShellExtInit, IShellExtInit_Impl, IShellItemImageFactory,
-    SHCreateItemFromParsingName, SHGetPathFromIDListEx, SIIGBF_BIGGERSIZEOK, SIIGBF_THUMBNAILONLY,
+    SHCreateItemFromParsingName, SHGetPathFromIDListEx, SIIGBF_THUMBNAILONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, HMENU, InsertMenuItemW, MENUITEMINFOW, MFS_DISABLED, MFT_OWNERDRAW,
-    MFT_SEPARATOR, MFT_STRING, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU,
-    WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
+    ASFW_ANY, AllowSetForegroundWindow, CreatePopupMenu, DestroyMenu, HMENU, InsertMenuItemW,
+    MENUITEMINFOW, MFT_SEPARATOR, MFT_STRING, MIIM_BITMAP, MIIM_FTYPE, MIIM_ID, MIIM_STRING,
+    MIIM_SUBMENU, SetMenuItemInfoW, WM_INITMENUPOPUP,
 };
 use windows::core::{HRESULT, PCWSTR, PSTR, PWSTR, Ref, Result, implement};
 
-use tw_core::config::{MenuPreview, Settings};
+use tw_core::config::Settings;
 use tw_core::ids;
 use tw_core::log;
+use tw_core::menu::{self as tree, FOLDER_VERB, Selection, Shown, Verb};
 
 use crate::ModuleRef;
 
 /// `CMINVOKECOMMANDINFOEX` carries valid wide fields when this flag is set.
 const CMIC_MASK_UNICODE: u32 = 0x0000_4000;
 const PREVIEW_EDGE: i32 = 128;
-const PREVIEW_PAD: i32 = 6;
-/// How long drawing the preview may wait for the shell's thumbnail.
-const PREVIEW_WAIT: Duration = Duration::from_millis(1500);
-
-/// One invokable command: `twctl <args...> --notify <files...>`, or `twctl <args...> --notify`
-/// for a verb that acts on no file (the selection only decides where the menu appears).
-#[derive(Clone, Copy)]
-pub(crate) struct Verb {
-    /// Canonical verb name (GetCommandString / string invocation).
-    pub(crate) name: &'static str,
-    pub(crate) label: &'static str,
-    pub(crate) args: &'static [&'static str],
-    /// Whether the selected files are passed on; `twctl` rejects files for commands that take none.
-    pub(crate) files: bool,
-}
-
-const fn v(name: &'static str, label: &'static str, args: &'static [&'static str]) -> Verb {
-    Verb {
-        name,
-        label,
-        args,
-        files: true,
-    }
-}
-
-/// A verb whose `twctl` command takes no file arguments.
-const fn v0(name: &'static str, label: &'static str, args: &'static [&'static str]) -> Verb {
-    Verb {
-        name,
-        label,
-        args,
-        files: false,
-    }
-}
-
-pub(crate) enum Node {
-    Separator,
-    /// `id` is the visibility key (settings `HiddenMenuItems`), `single` = one file only.
-    Leaf {
-        id: &'static str,
-        single: bool,
-        verb: Verb,
-    },
-    Sub {
-        id: &'static str,
-        label: &'static str,
-        single: bool,
-        items: &'static [Verb],
-    },
-}
-
-/// Submenu in the default order of FUNCTIONAL_SPEC.md 6.2, limited to the verbs this
-/// product implements (`twctl` back ends).
-pub(crate) const TREE: &[Node] = &[
-    Node::Sub {
-        id: "convert_into",
-        label: "Convert into",
-        single: false,
-        items: &[
-            v("tw.convert.png", "PNG", &["convert-to", "png"]),
-            v("tw.convert.jpg", "JPG", &["convert-to", "jpg"]),
-            v(
-                "tw.convert.webp",
-                "WebP (lossless)",
-                &["convert-to", "webp"],
-            ),
-            v("tw.convert.avif", "AVIF", &["convert-to", "avif"]),
-            v(
-                "tw.convert.jxl",
-                "JPEG XL (lossless)",
-                &["convert-to", "jxl"],
-            ),
-            v("tw.convert.bmp", "BMP", &["convert-to", "bmp"]),
-            v("tw.convert.gif", "GIF", &["convert-to", "gif"]),
-            v("tw.convert.tiff", "TIFF", &["convert-to", "tiff"]),
-            v("tw.convert.ico", "Icon (.ico)", &["convert-to", "ico"]),
-        ],
-    },
-    Node::Sub {
-        id: "resize",
-        label: "Resize",
-        single: false,
-        items: &[
-            v(
-                "tw.resize.1080",
-                "Fit 1920 x 1080",
-                &["resize", "--to", "1920x1080"],
-            ),
-            v(
-                "tw.resize.720",
-                "Fit 1280 x 720",
-                &["resize", "--to", "1280x720"],
-            ),
-            v(
-                "tw.resize.600",
-                "Fit 800 x 600",
-                &["resize", "--to", "800x600"],
-            ),
-            v("tw.resize.50", "Scale to 50%", &["resize", "--to", "50%"]),
-            v("tw.resize.25", "Scale to 25%", &["resize", "--to", "25%"]),
-        ],
-    },
-    Node::Sub {
-        id: "rotate",
-        label: "Rotate / flip",
-        single: false,
-        items: &[
-            v(
-                "tw.rotate.right",
-                "Rotate right 90\u{b0}",
-                &["rotate", "--by", "right"],
-            ),
-            v(
-                "tw.rotate.left",
-                "Rotate left 90\u{b0}",
-                &["rotate", "--by", "left"],
-            ),
-            v(
-                "tw.rotate.180",
-                "Rotate 180\u{b0}",
-                &["rotate", "--by", "180"],
-            ),
-            v("tw.flip.h", "Flip horizontal", &["rotate", "--by", "fliph"]),
-            v("tw.flip.v", "Flip vertical", &["rotate", "--by", "flipv"]),
-        ],
-    },
-    Node::Separator,
-    Node::Sub {
-        id: "email",
-        label: "Shrink for email",
-        single: false,
-        items: &[
-            v(
-                "tw.email.small",
-                "Small (640 px)",
-                &["email", "--edge", "640"],
-            ),
-            v(
-                "tw.email.medium",
-                "Medium (1024 px)",
-                &["email", "--edge", "1024"],
-            ),
-            v(
-                "tw.email.large",
-                "Large (1600 px)",
-                &["email", "--edge", "1600"],
-            ),
-        ],
-    },
-    Node::Sub {
-        id: "compress",
-        label: "Compress to size",
-        single: false,
-        items: &[
-            v(
-                "tw.compress.1",
-                "Under 1 MB",
-                &["compress", "--max-size", "1MB"],
-            ),
-            v(
-                "tw.compress.5",
-                "Under 5 MB",
-                &["compress", "--max-size", "5MB"],
-            ),
-            v(
-                "tw.compress.10",
-                "Under 10 MB",
-                &["compress", "--max-size", "10MB"],
-            ),
-        ],
-    },
-    Node::Leaf {
-        id: "strip_meta",
-        single: false,
-        verb: v("tw.strip", "Strip metadata (EXIF/GPS)", &["strip"]),
-    },
-    Node::Separator,
-    Node::Leaf {
-        id: "copy",
-        single: true,
-        verb: v("tw.clip", "Copy to clipboard", &["clip"]),
-    },
-    Node::Leaf {
-        id: "copy_text",
-        single: true,
-        verb: v("tw.ocr", "Copy text (OCR)", &["ocr", "--copy", "--window"]),
-    },
-    Node::Leaf {
-        id: "copy_data_uri",
-        single: true,
-        verb: v("tw.datauri", "Copy as data URI", &["data-uri"]),
-    },
-    Node::Separator,
-    Node::Leaf {
-        id: "combine_pdf",
-        single: false,
-        verb: v("tw.pdf", "Combine into PDF", &["pdf", "--auto"]),
-    },
-    Node::Leaf {
-        id: "combine_pdf_searchable",
-        single: false,
-        verb: v(
-            "tw.pdf.ocr",
-            "Combine into searchable PDF (OCR)",
-            &["pdf", "--auto", "--searchable"],
-        ),
-    },
-    Node::Leaf {
-        id: "combine_cbz",
-        single: false,
-        verb: v("tw.cbz", "Combine into CBZ (comic)", &["cbz", "--auto"]),
-    },
-    Node::Separator,
-    Node::Sub {
-        id: "rename",
-        label: "Rename",
-        single: false,
-        items: &[
-            v(
-                "tw.rename.date",
-                "By date taken",
-                &["rename", "--by", "date"],
-            ),
-            v(
-                "tw.rename.camera",
-                "By camera + date",
-                &["rename", "--by", "camera-date"],
-            ),
-            v(
-                "tw.rename.artist",
-                "By artist - title (audio)",
-                &["rename", "--by", "artist-title"],
-            ),
-            v(
-                "tw.rename.track",
-                "By track - title (audio)",
-                &["rename", "--by", "track-title"],
-            ),
-            v(
-                "tw.rename.pattern",
-                "Rename with pattern\u{2026}",
-                &["rename", "--by", "pattern", "--ask"],
-            ),
-        ],
-    },
-    Node::Leaf {
-        id: "files_to_folder",
-        single: false,
-        verb: v("tw.tofolder", "Files to folder", &["to-folder"]),
-    },
-    Node::Sub {
-        id: "sort",
-        label: "Sort into folders",
-        single: false,
-        items: &[
-            v("tw.sort.size", "By image size", &["sort", "--by", "size"]),
-            v("tw.sort.date", "By date taken", &["sort", "--by", "date"]),
-            v(
-                "tw.sort.tag",
-                "By audio tag\u{2026}",
-                &["sort", "--by", "tag", "--ask"],
-            ),
-        ],
-    },
-    Node::Separator,
-    Node::Leaf {
-        id: "image_info",
-        single: true,
-        verb: v("tw.info", "Image info", &["info", "--gui"]),
-    },
-    Node::Leaf {
-        id: "pick_color",
-        single: true,
-        verb: v0(
-            "tw.pickcolor",
-            "Pick color (eyedropper)\u{2026}",
-            &["pick-color"],
-        ),
-    },
-    Node::Separator,
-    Node::Sub {
-        id: "wallpaper",
-        label: "Set as wallpaper",
-        single: true,
-        items: &[
-            v(
-                "tw.wall.stretch",
-                "Stretched",
-                &["wallpaper", "--style", "stretch"],
-            ),
-            v("tw.wall.tile", "Tiled", &["wallpaper", "--style", "tile"]),
-            v(
-                "tw.wall.center",
-                "Centered",
-                &["wallpaper", "--style", "center"],
-            ),
-            v("tw.wall.fill", "Filled", &["wallpaper", "--style", "fill"]),
-            v("tw.wall.fit", "Fitted", &["wallpaper", "--style", "fit"]),
-            v("tw.wall.span", "Spanned", &["wallpaper", "--style", "span"]),
-        ],
-    },
-    Node::Leaf {
-        id: "lock_screen",
-        single: true,
-        verb: v("tw.lockscreen", "Set as lock screen", &["lock-screen"]),
-    },
-    Node::Leaf {
-        id: "folder_icon",
-        single: true,
-        verb: v("tw.foldericon", "Set as folder icon", &["folder-icon"]),
-    },
-    Node::Separator,
-    // Always present (spec 6.3): `build` never hides it.
-    Node::Leaf {
-        id: SETTINGS_ID,
-        single: false,
-        verb: v0("tw.settings", "Settings", &["settings"]),
-    },
-];
-
-static SEPARATOR: Node = Node::Separator;
-
-impl Node {
-    /// The settings id of an item; separators have none.
-    fn item_id(&self) -> Option<&'static str> {
-        match self {
-            Node::Separator => None,
-            Node::Leaf { id, .. } | Node::Sub { id, .. } => Some(id),
-        }
-    }
-}
-
-/// The tree nodes in display order for the saved `MenuOrder`. With no saved order that is
-/// `TREE` itself. Otherwise each item keeps the separator-delimited group it has in `TREE`
-/// and a separator goes wherever consecutive items belong to different groups, so the
-/// default order renders exactly as the default tree.
-pub(crate) fn display_nodes(order: &[String]) -> Vec<&'static Node> {
-    if order.is_empty() {
-        return TREE.iter().collect();
-    }
-    let mut group = 0;
-    let mut items: Vec<(usize, &'static Node)> = Vec::new();
-    for node in TREE {
-        match node {
-            Node::Separator => group += 1,
-            _ => items.push((group, node)),
-        }
-    }
-    let mut out = Vec::with_capacity(items.len() * 2);
-    let mut prev = None;
-    for id in tw_core::config::ordered_menu_ids(order) {
-        if let Some(&(group, node)) = items.iter().find(|(_, n)| n.item_id() == Some(id)) {
-            if prev.is_some_and(|p| p != group) {
-                out.push(&SEPARATOR);
-            }
-            out.push(node);
-            prev = Some(group);
-        }
-    }
-    out
-}
-
-/// The folder-menu entry: prebuilds the Explorer thumbnail cache for the folder.
-const FOLDER_VERB: Verb = v("tw.prebuild", "Build thumbnails here", &["prebuild"]);
-
-/// Item id that is always shown regardless of the hidden-items setting.
-pub(crate) const SETTINGS_ID: &str = "settings";
-
-/// Every verb in the tree, in a stable order (for string-verb lookup and tests).
-fn all_verbs() -> impl Iterator<Item = Verb> {
-    TREE.iter()
-        .flat_map(|n| match n {
-            Node::Separator => Vec::new(),
-            Node::Leaf { verb, .. } => vec![*verb],
-            Node::Sub { items, .. } => items.to_vec(),
-        })
-        .chain(std::iter::once(FOLDER_VERB))
-}
+/// How long opening the submenu may wait for the shell's thumbnail.
+const PREVIEW_WAIT: Duration = Duration::from_millis(300);
 
 /// Hand-off between the preview fetch thread and the menu object. Both sides touch it
 /// only under the lock, and whichever side runs second frees the bitmap, so no
@@ -454,9 +75,10 @@ struct Preview {
 #[implement(IShellExtInit, IContextMenu, IContextMenu2, IContextMenu3)]
 pub(crate) struct ContextMenu {
     files: RefCell<Vec<PathBuf>>,
-    /// Verbs in command-offset order; `None` for non-command slots (preview).
-    commands: RefCell<Vec<Option<Verb>>>,
-    preview_id: Cell<Option<u32>>,
+    /// Verbs in command-offset order; `None` for non-command slots (the root).
+    commands: RefCell<Vec<Option<&'static Verb>>>,
+    /// The submenu whose first row is the preview header, until the bitmap is attached.
+    preview_menu: Cell<Option<HMENU>>,
     preview: RefCell<Option<Preview>>,
     _module: ModuleRef,
 }
@@ -466,7 +88,7 @@ impl ContextMenu {
         Self {
             files: RefCell::new(Vec::new()),
             commands: RefCell::new(Vec::new()),
-            preview_id: Cell::new(None),
+            preview_menu: Cell::new(None),
             preview: RefCell::new(None),
             _module: ModuleRef::new(),
         }
@@ -479,7 +101,7 @@ impl Drop for Preview {
             // SAFETY: bitmap received from the fetch thread and owned by this preview.
             let _ = unsafe { DeleteObject(HGDIOBJ(b.0)) };
         }
-        // A bitmap fetched but never drawn is ours to free; one fetched later is freed by
+        // A bitmap fetched but never shown is ours to free; one fetched later is freed by
         // the fetch thread, which sees `abandoned`.
         let queued = {
             let mut slot = lock(&self.shared);
@@ -605,7 +227,7 @@ pub(crate) fn menu_applies(files: &[PathBuf], settings: &Settings) -> bool {
 }
 
 /// A selection made only of folders (the `Directory` handler), or the folder background
-/// (the shell passes the folder itself): the menu then offers only "Build thumbnails here".
+/// (the shell passes the folder itself): the menu then offers only "Build thumbnails".
 fn folder_selection(files: &[PathBuf]) -> bool {
     !files.is_empty() && files.iter().all(|f| f.is_dir())
 }
@@ -617,12 +239,12 @@ fn make_hresult_success(code: u32) -> HRESULT {
 struct Builder<'a> {
     id_first: u32,
     id_last: u32,
-    commands: &'a mut Vec<Option<Verb>>,
+    commands: &'a mut Vec<Option<&'static Verb>>,
 }
 
 impl Builder<'_> {
     /// Allocates the next command id, or `None` when the shell's id range is exhausted.
-    fn next_id(&mut self, verb: Option<Verb>) -> Option<u32> {
+    fn next_id(&mut self, verb: Option<&'static Verb>) -> Option<u32> {
         let id = self.id_first.checked_add(self.commands.len() as u32)?;
         (id <= self.id_last).then(|| {
             self.commands.push(verb);
@@ -649,14 +271,17 @@ unsafe fn add_string(
     menu: HMENU,
     pos: u32,
     label: &str,
-    id: u32,
+    id: Option<u32>,
     sub: Option<HMENU>,
 ) -> Result<()> {
-    let mut text = wide(label);
+    let mut text = wide(&tree::menu_text(label));
     let mut info = item(MFT_STRING);
-    info.fMask |= MIIM_STRING | MIIM_ID;
-    info.wID = id;
+    info.fMask |= MIIM_STRING;
     info.dwTypeData = PWSTR(text.as_mut_ptr());
+    if let Some(id) = id {
+        info.fMask |= MIIM_ID;
+        info.wID = id;
+    }
     if let Some(s) = sub {
         info.fMask |= MIIM_SUBMENU;
         info.hSubMenu = s;
@@ -670,13 +295,75 @@ unsafe fn add_separator(menu: HMENU, pos: u32) -> Result<()> {
     unsafe { insert(menu, pos, &item(MFT_SEPARATOR)) }
 }
 
-unsafe fn add_preview(menu: HMENU, pos: u32, id: u32) -> Result<()> {
-    let mut info = item(MFT_OWNERDRAW);
-    info.fMask |= MIIM_ID | MIIM_STATE;
-    info.wID = id;
-    info.fState = MFS_DISABLED;
-    // SAFETY: valid menu.
+/// The first row of the submenu: the file's name and size, with no command (a click does
+/// nothing). A plain themed item, so the menu keeps its dark theme. It is deliberately not
+/// disabled: a themed menu draws a disabled row's bitmap greyed out, and the preview should
+/// keep its colours. The preview bitmap is attached to it later.
+unsafe fn add_header(menu: HMENU, pos: u32, text: &str) -> Result<()> {
+    let mut text = wide(&tree::menu_text(text));
+    let mut info = item(MFT_STRING);
+    info.fMask |= MIIM_STRING;
+    info.dwTypeData = PWSTR(text.as_mut_ptr());
+    // SAFETY: `text` outlives the call (the menu copies the string).
     unsafe { insert(menu, pos, &info) }
+}
+
+/// Inserts `entries` into `menu` from position `*pos`, taking a command id per verb. Returns
+/// `false` once the shell's id range is used up: what fit stays, so a short range gives a
+/// shorter menu, never an empty one. A separator is only written once an item follows it.
+///
+/// # Safety
+/// `menu` must be a valid popup menu this thread may modify.
+unsafe fn fill(
+    b: &mut Builder,
+    menu: HMENU,
+    entries: &[Shown],
+    pos: &mut u32,
+    mut separator_due: bool,
+) -> Result<bool> {
+    for entry in entries {
+        match entry {
+            Shown::Separator => separator_due = separator_due || *pos > 0,
+            Shown::Verb(verb) => {
+                let Some(cmd) = b.next_id(Some(*verb)) else {
+                    return Ok(false);
+                };
+                // SAFETY: `menu` is valid; the label is copied by the menu.
+                unsafe {
+                    if separator_due {
+                        add_separator(menu, *pos)?;
+                        *pos += 1;
+                        separator_due = false;
+                    }
+                    add_string(menu, *pos, verb.label, Some(cmd), None)?;
+                }
+                *pos += 1;
+            }
+            Shown::Menu { label, items } => {
+                // SAFETY: a menu created here is owned by `menu` once inserted, or destroyed.
+                unsafe {
+                    let child = CreatePopupMenu()?;
+                    let mut child_pos = 0;
+                    let complete = fill(b, child, items, &mut child_pos, false)?;
+                    if child_pos == 0 {
+                        let _ = DestroyMenu(child);
+                    } else {
+                        if separator_due {
+                            add_separator(menu, *pos)?;
+                            *pos += 1;
+                            separator_due = false;
+                        }
+                        add_string(menu, *pos, label, None, Some(child))?;
+                        *pos += 1;
+                    }
+                    if !complete {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 impl ContextMenu_Impl {
@@ -689,93 +376,46 @@ impl ContextMenu_Impl {
         if !menu_applies(&files, &settings) {
             return Ok(0);
         }
+        // Windows 11 already lists the packaged "Thumbwright" entry (and copies it into this
+        // classic menu): a second root here would be its twin.
+        if tree::classic_root_suppressed_now() {
+            return Ok(0);
+        }
         let mut commands = self.commands.borrow_mut();
         commands.clear();
+        self.preview_menu.set(None);
         let mut b = Builder {
             id_first,
             id_last,
             commands: &mut commands,
         };
-        let single = files.len() == 1;
-        let hidden =
-            |id: &str| id != SETTINGS_ID && settings.hidden_menu_items.iter().any(|h| h == id);
-        let want_preview = single && settings.menu_preview != MenuPreview::Off;
+        // The root takes the first id, so a short id range still gets a menu: whatever else
+        // does not fit is left out instead of the whole menu.
+        let Some(root_id) = b.next_id(None) else {
+            return Ok(0);
+        };
+        let entries = tree::shown(&settings, &Selection::of(&files));
+        let fetch_preview = files.len() == 1 && settings.menu_preview;
 
         // SAFETY: menu handles created here are owned by the parent menu once inserted.
         unsafe {
             let sub = CreatePopupMenu()?;
             let mut pos = 0u32;
-            let mut top_pos = index;
-            if want_preview && let Some(id) = b.next_id(None) {
-                self.preview_id.set(Some(id));
-                if settings.menu_preview == MenuPreview::InContextMenu {
-                    add_preview(hmenu, top_pos, id)?;
-                    top_pos += 1;
-                } else {
-                    add_preview(sub, pos, id)?;
-                    pos += 1;
-                    add_separator(sub, pos)?;
-                    pos += 1;
-                }
+            // File name and size, always; the thumbnail joins it when the shell has one.
+            add_header(sub, pos, &tree::header_text(&files))?;
+            pos += 1;
+            if fetch_preview {
+                self.preview_menu.set(Some(sub));
                 self.start_preview_fetch(&files[0]);
             }
-            let mut last_was_sep = pos == 0 || want_preview;
-            for node in display_nodes(&settings.menu_order) {
-                match node {
-                    Node::Separator => {
-                        if !last_was_sep {
-                            add_separator(sub, pos)?;
-                            pos += 1;
-                            last_was_sep = true;
-                        }
-                    }
-                    Node::Leaf {
-                        id,
-                        single: needs_one,
-                        verb,
-                    } => {
-                        if hidden(id) || (*needs_one && !single) {
-                            continue;
-                        }
-                        let Some(cmd) = b.next_id(Some(*verb)) else {
-                            break;
-                        };
-                        add_string(sub, pos, verb.label, cmd, None)?;
-                        pos += 1;
-                        last_was_sep = false;
-                    }
-                    Node::Sub {
-                        id,
-                        label,
-                        single: needs_one,
-                        items,
-                    } => {
-                        if hidden(id) || (*needs_one && !single) {
-                            continue;
-                        }
-                        let child = CreatePopupMenu()?;
-                        for (i, verb) in items.iter().enumerate() {
-                            let Some(cmd) = b.next_id(Some(*verb)) else {
-                                break;
-                            };
-                            add_string(child, i as u32, verb.label, cmd, None)?;
-                        }
-                        let Some(cmd) = b.next_id(None) else { break };
-                        add_string(sub, pos, label, cmd, Some(child))?;
-                        pos += 1;
-                        last_was_sep = false;
-                    }
-                }
-            }
-            let Some(root_id) = b.next_id(None) else {
-                return Ok(b.commands.len() as u32);
-            };
-            add_string(hmenu, top_pos, ids::PRODUCT_NAME, root_id, Some(sub))?;
+            fill(&mut b, sub, &entries, &mut pos, true)?;
+            add_string(hmenu, index, ids::PRODUCT_NAME, Some(root_id), Some(sub))?;
         }
         Ok(commands.len() as u32)
     }
 
-    /// The folder menu: one entry that prebuilds the Explorer thumbnail cache.
+    /// The folder menu: one entry that prebuilds the Explorer thumbnail cache. The packaged
+    /// entry covers files only, so this one stays on Windows 11.
     fn build_folder(
         &self,
         hmenu: HMENU,
@@ -795,11 +435,11 @@ impl ContextMenu_Impl {
             id_last,
             commands: &mut commands,
         };
-        let Some(id) = b.next_id(Some(FOLDER_VERB)) else {
+        let Some(id) = b.next_id(Some(&FOLDER_VERB)) else {
             return Ok(0);
         };
         // SAFETY: `hmenu` is the shell's menu; the label is copied by the menu.
-        unsafe { add_string(hmenu, index, FOLDER_VERB.label, id, None)? };
+        unsafe { add_string(hmenu, index, FOLDER_VERB.label, Some(id), None)? };
         Ok(commands.len() as u32)
     }
 
@@ -813,6 +453,7 @@ impl ContextMenu_Impl {
                 // SAFETY: STA for shell item APIs on this thread; balanced uninit.
                 unsafe {
                     let inited = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+                    // No BIGGERSIZEOK: the bitmap is used as is, so it must fit the edge.
                     let bmp = SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(
                         PCWSTR(path.as_ptr()),
                         None,
@@ -823,7 +464,7 @@ impl ContextMenu_Impl {
                                 cx: PREVIEW_EDGE,
                                 cy: PREVIEW_EDGE,
                             },
-                            SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK,
+                            SIIGBF_THUMBNAILONLY,
                         )
                     });
                     let mut slot = lock(&theirs);
@@ -853,6 +494,7 @@ impl ContextMenu_Impl {
         });
     }
 
+    /// The fetched thumbnail, waiting up to `PREVIEW_WAIT` for the fetch thread.
     fn preview_bitmap(&self) -> Option<HBITMAP> {
         let mut slot = self.preview.borrow_mut();
         let p = slot.as_mut()?;
@@ -868,75 +510,32 @@ impl ContextMenu_Impl {
         p.bitmap
     }
 
-    fn handle_msg(&self, msg: u32, lparam: LPARAM) -> Result<bool> {
-        let Some(preview_id) = self.preview_id.get() else {
+    /// The shell is about to show `menu`: when it is the submenu, put the thumbnail on its
+    /// header row. The bitmap is premultiplied 32-bpp (what the shell's thumbnail cache
+    /// hands out), which a themed menu item draws with its alpha, dark mode included. The
+    /// menu does not own it; the preview frees it with the menu object.
+    fn handle_msg(&self, msg: u32, wparam: WPARAM) -> Result<bool> {
+        if msg != WM_INITMENUPOPUP {
+            return Ok(false);
+        }
+        let Some(sub) = self.preview_menu.get() else {
             return Ok(false);
         };
-        match msg {
-            WM_MEASUREITEM => {
-                // SAFETY: for WM_MEASUREITEM, lparam points to a MEASUREITEMSTRUCT.
-                let mi = unsafe { &mut *(lparam.0 as *mut MEASUREITEMSTRUCT) };
-                if mi.itemID != preview_id {
-                    return Ok(false);
-                }
-                mi.itemWidth = (PREVIEW_EDGE + 2 * PREVIEW_PAD) as u32;
-                mi.itemHeight = (PREVIEW_EDGE + 2 * PREVIEW_PAD) as u32;
-                Ok(true)
-            }
-            WM_DRAWITEM => {
-                // SAFETY: for WM_DRAWITEM, lparam points to a DRAWITEMSTRUCT.
-                let di = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
-                if di.itemID != preview_id {
-                    return Ok(false);
-                }
-                // SAFETY: drawing into the DC the menu supplied, within its item rect.
-                unsafe { draw_preview(di, self.preview_bitmap()) };
-                Ok(true)
-            }
-            WM_INITMENUPOPUP => Ok(false),
-            _ => Ok(false),
+        if wparam.0 != sub.0 as usize {
+            return Ok(false);
         }
-    }
-}
-
-unsafe fn draw_preview(di: &DRAWITEMSTRUCT, bitmap: Option<HBITMAP>) {
-    // SAFETY: GDI calls on the menu's DC; objects selected are restored and freed.
-    unsafe {
-        FillRect(di.hDC, &di.rcItem, GetSysColorBrush(COLOR_MENU));
-        let Some(bmp) = bitmap else { return };
-        let mut bm = BITMAP::default();
-        if GetObjectW(
-            HGDIOBJ(bmp.0),
-            size_of::<BITMAP>() as i32,
-            Some((&raw mut bm).cast()),
-        ) == 0
-        {
-            return;
+        self.preview_menu.set(None);
+        if let Some(bitmap) = self.preview_bitmap() {
+            let info = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_BITMAP,
+                hbmpItem: bitmap,
+                ..Default::default()
+            };
+            // SAFETY: `sub` is the live submenu the shell is initialising; row 0 is the header.
+            let _ = unsafe { SetMenuItemInfoW(sub, 0, true, &info) };
         }
-        let (bw, bh) = (bm.bmWidth, bm.bmHeight.abs());
-        if bw <= 0 || bh <= 0 {
-            return;
-        }
-        let r: RECT = di.rcItem;
-        let avail_w = (r.right - r.left - 2 * PREVIEW_PAD).max(1);
-        let avail_h = (r.bottom - r.top - 2 * PREVIEW_PAD).max(1);
-        let scale = (avail_w as f32 / bw as f32)
-            .min(avail_h as f32 / bh as f32)
-            .min(1.0);
-        let (dw, dh) = ((bw as f32 * scale) as i32, (bh as f32 * scale) as i32);
-        let x = r.left + (r.right - r.left - dw) / 2;
-        let y = r.top + (r.bottom - r.top - dh) / 2;
-        let mem = CreateCompatibleDC(Some(di.hDC));
-        let old = SelectObject(mem, HGDIOBJ(bmp.0));
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        let _ = AlphaBlend(di.hDC, x, y, dw, dh, mem, 0, 0, bw, bh, blend);
-        SelectObject(mem, old);
-        let _ = DeleteDC(mem);
+        Ok(false)
     }
 }
 
@@ -984,14 +583,14 @@ impl IContextMenu_Impl for ContextMenu_Impl {
         }
         // SAFETY: the shell passes a valid CMINVOKECOMMANDINFO (or the EX variant when
         // cbSize says so).
-        let info = unsafe { &*pici };
-        // SAFETY: as above.
         let verb = match unsafe { resolve_verb(pici) } {
             VerbRef::Ordinal(offset) => self.commands.borrow().get(offset).copied().flatten(),
-            VerbRef::Name(name) => all_verbs().find(|v| v.name.eq_ignore_ascii_case(&name)),
+            VerbRef::Name(name) => tree::all_verbs()
+                .into_iter()
+                .find(|v| v.name.eq_ignore_ascii_case(&name)),
         };
         let verb = verb.ok_or(E_INVALIDARG)?;
-        launch(&verb, &self.files.borrow(), info.hwnd)
+        launch(verb, &self.files.borrow())
     }
 
     fn GetCommandString(
@@ -1034,8 +633,8 @@ impl IContextMenu_Impl for ContextMenu_Impl {
 }
 
 impl IContextMenu2_Impl for ContextMenu_Impl {
-    fn HandleMenuMsg(&self, msg: u32, _wparam: WPARAM, lparam: LPARAM) -> Result<()> {
-        self.handle_msg(msg, lparam).map(|_| ())
+    fn HandleMenuMsg(&self, msg: u32, wparam: WPARAM, _lparam: LPARAM) -> Result<()> {
+        self.handle_msg(msg, wparam).map(|_| ())
     }
 }
 
@@ -1043,11 +642,11 @@ impl IContextMenu3_Impl for ContextMenu_Impl {
     fn HandleMenuMsg2(
         &self,
         msg: u32,
-        _wparam: WPARAM,
-        lparam: LPARAM,
+        wparam: WPARAM,
+        _lparam: LPARAM,
         result: *mut LRESULT,
     ) -> Result<()> {
-        let handled = self.handle_msg(msg, lparam)?;
+        let handled = self.handle_msg(msg, wparam)?;
         if !result.is_null() {
             // SAFETY: optional out-pointer, checked non-null.
             unsafe { *result = LRESULT(handled as isize) };
@@ -1060,72 +659,86 @@ impl IContextMenu3_Impl for ContextMenu_Impl {
 /// selections go through a temporary list file.
 const CMDLINE_BUDGET: usize = 30_000;
 
-pub(crate) fn launch(verb: &Verb, files: &[PathBuf], _hwnd: HWND) -> Result<()> {
-    let started = Instant::now();
+/// Starts `twctl` with `args`: NUL for its three standard handles and no other inherited
+/// handle (audit U-4).
+fn spawn_twctl(args: &[OsString]) -> Result<tw_core::spawn::Child> {
     let exe = crate::install_dir().join(ids::CTL_EXE_NAME);
-    let files = if verb.files { files } else { &[] };
-    let mut args: Vec<OsString> = verb.args.iter().map(OsString::from).collect();
-    args.push("--notify".into());
-    let total: usize = files.iter().map(|f| f.as_os_str().len() + 3).sum();
-    if total > CMDLINE_BUDGET {
-        let list = std::env::temp_dir().join(format!(
-            "tw-list-{}-{}.txt",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let body: String = files.iter().map(|f| format!("{}\n", f.display())).collect();
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&list)
-            .map_err(|_| E_FAIL)?;
-        std::io::Write::write_all(&mut f, body.as_bytes()).map_err(|_| E_FAIL)?;
-        drop(f);
-        args.push("--files-from".into());
-        args.push(list.into_os_string());
-    } else {
-        args.extend(files.iter().map(|f| f.as_os_str().to_owned()));
-    }
-    // Audit U-4: twctl gets NUL for its three standard handles and no other inherited handle.
-    let child = tw_core::spawn::spawn(
+    tw_core::spawn::spawn(
         &exe,
-        &args,
+        args,
         tw_core::spawn::Stdio::Null,
         tw_core::spawn::Stdio::Null,
     )
-    .map_err(|_| E_FAIL)?;
+    .map_err(|_| E_FAIL.into())
+}
+
+fn trace_launch(verb: &str, files: &[PathBuf], child: &tw_core::spawn::Child, started: Instant) {
     log::verbose(Settings::load(&crate::install_dir()).verbose_log, || {
         let ext = files
             .first()
             .and_then(|f| f.extension())
             .map(|e| e.to_string_lossy().to_ascii_lowercase());
         format!(
-            "InvokeCommand: ok class=menu verb={} files={} ext={} twctl_pid={} ms={}",
-            verb.name,
+            "InvokeCommand: ok class=menu verb={verb} files={} ext={} twctl_pid={} ms={}",
             files.len(),
             ext.as_deref().unwrap_or("?"),
             child.id(),
             started.elapsed().as_millis()
         )
     });
+}
+
+/// Runs one verb on `files`: `twctl <args...> --notify <files...>`.
+pub(crate) fn launch(verb: &Verb, files: &[PathBuf]) -> Result<()> {
+    let started = Instant::now();
+    let files = if verb.files { files } else { &[] };
+    let total: usize = files.iter().map(|f| f.as_os_str().len() + 3).sum();
+    let args = if total > CMDLINE_BUDGET {
+        let list = tree::write_list(files).map_err(|_| E_FAIL)?;
+        let mut args = verb.argv(&[]);
+        args.push("--files-from".into());
+        args.push(list.into_os_string());
+        args
+    } else {
+        verb.argv(files)
+    };
+    let child = spawn_twctl(&args)?;
+    trace_launch(verb.name, files, &child, started);
+    Ok(())
+}
+
+/// Opens Thumbwright's own popup menu for `files` at screen position `at` (the Windows 11
+/// entry's action): `twctl menu --at x,y --notify --files-from <list>`. The selection goes
+/// through a list file whatever its size. Explorer owns the foreground when this runs, so
+/// the new process is allowed to take it, or its popup would open behind the window.
+pub(crate) fn launch_popup(files: &[PathBuf], at: (i32, i32)) -> Result<()> {
+    let started = Instant::now();
+    let list = tree::write_list(files).map_err(|_| E_FAIL)?;
+    let args: Vec<OsString> = [
+        "menu".into(),
+        "--at".into(),
+        format!("{},{}", at.0, at.1).into(),
+        "--notify".into(),
+        "--files-from".into(),
+        list.clone().into_os_string(),
+    ]
+    .into();
+    // SAFETY: no pointers; failure only means the popup may open without focus.
+    let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    let child = match spawn_twctl(&args) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&list);
+            return Err(e);
+        }
+    };
+    trace_launch("menu", files, &child, started);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn verb_names_are_unique() {
-        let names: Vec<_> = all_verbs().map(|v| v.name).collect();
-        let mut sorted = names.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len(), names.len());
-    }
 
     #[test]
     fn folder_selection_needs_only_existing_directories() {
@@ -1136,23 +749,6 @@ mod tests {
             dir,
             PathBuf::from(r"C:\no\such\file.png")
         ]));
-    }
-
-    #[test]
-    fn settings_is_last_and_present_exactly_once() {
-        let ids: Vec<&str> = TREE
-            .iter()
-            .filter_map(|n| match n {
-                Node::Leaf { id, .. } | Node::Sub { id, .. } => Some(*id),
-                Node::Separator => None,
-            })
-            .collect();
-        assert_eq!(ids.last(), Some(&SETTINGS_ID));
-        assert_eq!(ids.iter().filter(|i| **i == SETTINGS_ID).count(), 1);
-        let mut sorted = ids.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len(), ids.len(), "item ids are unique");
     }
 
     #[test]
@@ -1173,51 +769,6 @@ mod tests {
             ..Settings::default()
         };
         assert!(!menu_applies(&png, &off));
-    }
-
-    /// Item ids with `None` for separators, the shape of a menu.
-    fn shape(nodes: &[&Node]) -> Vec<Option<&'static str>> {
-        nodes.iter().map(|n| n.item_id()).collect()
-    }
-
-    #[test]
-    fn every_tree_item_is_known_to_the_settings_app() {
-        for id in TREE.iter().filter_map(Node::item_id) {
-            assert!(
-                tw_core::config::MENU_ITEMS.iter().any(|i| i.id == id),
-                "{id} is missing from config::MENU_ITEMS (settings app, MenuOrder)"
-            );
-        }
-    }
-
-    #[test]
-    fn default_order_renders_the_default_tree() {
-        let tree: Vec<&Node> = TREE.iter().collect();
-        assert_eq!(shape(&display_nodes(&[])), shape(&tree));
-        let default: Vec<String> = tw_core::config::MENU_ITEMS
-            .iter()
-            .map(|i| i.id.to_string())
-            .collect();
-        assert_eq!(shape(&display_nodes(&default)), shape(&tree));
-    }
-
-    #[test]
-    fn custom_order_moves_items_and_regroups_separators() {
-        let order = ["wallpaper".to_string(), "resize".to_string()];
-        let shown = shape(&display_nodes(&order));
-        // wallpaper and resize sit in different default groups; the rest follow in default order.
-        assert_eq!(&shown[..3], [Some("wallpaper"), None, Some("resize")]);
-        assert!(!shown[3..].contains(&Some("wallpaper")) && !shown[3..].contains(&Some("resize")));
-        let ids = shown.iter().flatten().count();
-        assert_eq!(
-            ids,
-            TREE.iter().filter_map(Node::item_id).count(),
-            "no item lost"
-        );
-        assert!(
-            shown.windows(2).all(|w| w[0].is_some() || w[1].is_some()),
-            "no doubled separators"
-        );
     }
 
     fn verb_of(ex: &CMINVOKECOMMANDINFOEX) -> VerbRef {
@@ -1258,5 +809,42 @@ mod tests {
         // UNICODE set but lpVerbW is not a string: fall back to the ANSI verb.
         ex.fMask = CMIC_MASK_UNICODE;
         assert_eq!(verb_of(&ex), VerbRef::Name("rotate-cw".into()));
+    }
+
+    /// Item ids and the number of menu rows `fill` produced for a PNG, for an id range of
+    /// `range` commands.
+    fn filled(range: u32) -> (Vec<Option<&'static Verb>>, u32) {
+        let entries = tree::shown(
+            &Settings::default(),
+            &Selection::of(&[PathBuf::from("a.png")]),
+        );
+        let mut commands = Vec::new();
+        let mut b = Builder {
+            id_first: 1,
+            id_last: range,
+            commands: &mut commands,
+        };
+        // SAFETY: a fresh menu owned by this test.
+        let rows = unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            let mut pos = 0;
+            fill(&mut b, menu, &entries, &mut pos, false).unwrap();
+            let _ = DestroyMenu(menu);
+            pos
+        };
+        (commands, rows)
+    }
+
+    #[test]
+    fn fill_stops_at_the_end_of_the_id_range_and_keeps_what_fit() {
+        let (all, all_rows) = filled(0x7FFF);
+        assert!(all.len() > 30 && all_rows > 10, "{} commands", all.len());
+        for range in [1, 2, 5, 12] {
+            let (commands, rows) = filled(range);
+            assert_eq!(commands.len() as u32, range, "uses exactly the range");
+            assert!(rows > 0, "range {range} still shows something");
+        }
+        let (none, rows) = filled(0);
+        assert!(none.is_empty() && rows == 0);
     }
 }

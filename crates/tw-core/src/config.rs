@@ -23,23 +23,6 @@ pub const STARTER_KITS: [&str; 6] = [
 ];
 const INI_SECTION: &str = "Settings";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MenuPreview {
-    Off,
-    InSubmenu,
-    InContextMenu,
-}
-
-impl MenuPreview {
-    fn code(self) -> u32 {
-        match self {
-            Self::Off => 0,
-            Self::InSubmenu => 1,
-            Self::InContextMenu => 2,
-        }
-    }
-}
-
 /// One right-click menu entry that has a place in the item order and, unless it is
 /// `settings` (always present, FUNCTIONAL_SPEC.md 6.3), a visibility key.
 #[derive(Debug, PartialEq, Eq)]
@@ -61,30 +44,17 @@ const fn item(id: &'static str, label: &'static str) -> MenuItem {
 /// Every reorderable top-level menu entry, in the default order. The shell menu tree
 /// (`tw-shell/src/menu.rs`) is checked against this list by a test.
 pub const MENU_ITEMS: &[MenuItem] = &[
-    item("convert_into", "Convert into"),
+    item("convert_into", "Convert to"),
     item("resize", "Resize"),
-    item("rotate", "Rotate / flip"),
-    item("email", "Shrink for email"),
-    item("compress", "Compress to size"),
-    item("strip_meta", "Strip metadata (EXIF/GPS)"),
-    item("copy", "Copy to clipboard"),
-    item("copy_text", "Copy text (OCR)"),
-    item("copy_data_uri", "Copy as data URI"),
-    item("combine_pdf", "Combine into PDF"),
-    item(
-        "combine_pdf_searchable",
-        "Combine into searchable PDF (OCR)",
-    ),
-    item("combine_cbz", "Combine into CBZ (comic)"),
-    item("rename", "Rename"),
-    item("files_to_folder", "Files to folder"),
-    item("sort", "Sort into folders"),
-    item("image_info", "Image info"),
-    item("pick_color", "Pick color (eyedropper)"),
-    item("wallpaper", "Set as wallpaper"),
-    item("lock_screen", "Set as lock screen"),
-    item("folder_icon", "Set as folder icon"),
-    item("settings", "Settings"),
+    item("rotate", "Rotate & flip"),
+    item("make_smaller", "Make smaller"),
+    item("copy_text", "Copy text from image"),
+    item("copy", "Copy"),
+    item("combine", "Combine into"),
+    item("organise", "Organise"),
+    item("image_info", "Details"),
+    item("set_as", "Set as"),
+    item("settings", "Thumbwright Workbench"),
 ];
 
 /// Menu item ids in display order: the known ids of `order` first (duplicates and unknown
@@ -128,7 +98,8 @@ pub struct Settings {
     pub menu_all_file_types: bool,
     /// Offer "Build thumbnails here" on the folder menu.
     pub menu_build_here: bool,
-    pub menu_preview: MenuPreview,
+    /// Show a preview of the file at the top of the menu.
+    pub menu_preview: bool,
     /// Menu item ids in the user's order; empty means the built-in order.
     pub menu_order: Vec<String>,
     /// Extensions (lower-case, no dot) the user turned off in "File types".
@@ -157,7 +128,7 @@ impl Default for Settings {
             menu_enabled: true,
             menu_all_file_types: false,
             menu_build_here: true,
-            menu_preview: MenuPreview::InSubmenu,
+            menu_preview: true,
             menu_order: Vec::new(),
             disabled_types: Vec::new(),
             hidden_menu_items: Vec::new(),
@@ -251,13 +222,8 @@ impl Settings {
             "MenuEnabled" => self.menu_enabled = parse_bool(v).unwrap_or(true),
             "MenuAllFileTypes" => self.menu_all_file_types = parse_bool(v).unwrap_or(false),
             "MenuBuildHere" => self.menu_build_here = parse_bool(v).unwrap_or(true),
-            "MenuPreview" => {
-                self.menu_preview = match v {
-                    "0" => MenuPreview::Off,
-                    "2" => MenuPreview::InContextMenu,
-                    _ => MenuPreview::InSubmenu,
-                }
-            }
+            // Older builds stored 1 (in the submenu) and 2 (in the menu itself): both are "on".
+            "MenuPreview" => self.menu_preview = v.trim() != "0",
             "MenuOrder" => self.menu_order = parse_list(v),
             "DisabledTypes" => self.disabled_types = parse_list(v),
             "HiddenMenuItems" => {
@@ -303,7 +269,7 @@ impl Settings {
             ("MenuAllFileTypes", Stored::flag(self.menu_all_file_types)),
             ("MenuBuildHere", Stored::flag(self.menu_build_here)),
             ("PdfMargin", Stored::flag(self.pdf_margin)),
-            ("MenuPreview", Stored::Number(self.menu_preview.code())),
+            ("MenuPreview", Stored::flag(self.menu_preview)),
             ("MenuOrder", Stored::list(&self.menu_order)),
             ("DisabledTypes", Stored::list(&self.disabled_types)),
             ("HiddenMenuItems", Stored::list(&self.hidden_menu_items)),
@@ -516,7 +482,7 @@ mod tests {
             !s.cloud_thumbnails,
             "cloud folders are off by default (spec 4.3)"
         );
-        assert_eq!(s.menu_preview, MenuPreview::InSubmenu);
+        assert!(s.menu_preview);
         assert!(s.keep_metadata, "Keep metadata defaults on");
         assert!(!Settings::from_ini("[Settings]\nKeepMetadata=0\n").keep_metadata);
         assert!(Settings::from_ini("[Settings]\nKeepMetadata=junk\n").keep_metadata);
@@ -533,7 +499,7 @@ mod tests {
         assert_eq!(s.max_thumb_px, 512);
         assert_eq!(s.disabled_types, ["png", "svg"]);
         assert!(!s.type_enabled("png") && s.type_enabled("jpg"));
-        assert_eq!(s.menu_preview, MenuPreview::Off);
+        assert!(!s.menu_preview);
         assert_eq!(s.max_file_mb, 4096);
     }
 
@@ -574,10 +540,10 @@ mod tests {
             menu_all_file_types: true,
             menu_build_here: false,
             pdf_margin: true,
-            menu_preview: MenuPreview::InContextMenu,
-            menu_order: vec!["wallpaper".into(), "resize".into()],
+            menu_preview: false,
+            menu_order: vec!["set_as".into(), "resize".into()],
             disabled_types: vec!["png".into(), "svg".into()],
-            hidden_menu_items: vec!["email".into()],
+            hidden_menu_items: vec!["make_smaller".into()],
             verbose_log: true,
             video_frame_percent: 75,
         }
@@ -678,11 +644,11 @@ mod tests {
 
     #[test]
     fn menu_order_lists_unknown_duplicate_and_missing_ids_sanely() {
-        let order: Vec<String> = ["wallpaper", "bogus", "resize", "wallpaper"]
+        let order: Vec<String> = ["set_as", "bogus", "resize", "set_as"]
             .map(String::from)
             .into();
         let ids = ordered_menu_ids(&order);
-        assert_eq!(&ids[..2], ["wallpaper", "resize"]);
+        assert_eq!(&ids[..2], ["set_as", "resize"]);
         assert_eq!(ids.len(), MENU_ITEMS.len());
         assert_eq!(
             &ids[2..4],
@@ -703,8 +669,29 @@ mod tests {
             );
             assert_eq!(item.hideable, item.id != "settings");
         }
-        let s = Settings::from_ini("[Settings]\nHiddenMenuItems=settings,email,future_item\n");
-        assert_eq!(s.hidden_menu_items, ["email", "future_item"]);
+        let s =
+            Settings::from_ini("[Settings]\nHiddenMenuItems=settings,make_smaller,future_item\n");
+        assert_eq!(s.hidden_menu_items, ["make_smaller", "future_item"]);
+    }
+
+    #[test]
+    fn the_menu_preview_is_on_or_off_and_old_location_codes_mean_on() {
+        let preview =
+            |v: &str| Settings::from_ini(&format!("[Settings]\nMenuPreview={v}\n")).menu_preview;
+        assert!(!preview("0"));
+        // 1 (in the submenu) and 2 (in the menu itself) were the two "on" places.
+        assert!(preview("1") && preview("2"));
+        assert!(
+            Settings::from_ini("[Settings]\n").menu_preview,
+            "on by default"
+        );
+        // Saving writes the plain flag.
+        let off = Settings {
+            menu_preview: false,
+            ..Settings::default()
+        };
+        assert!(off.to_ini("").contains("MenuPreview=0"));
+        assert!(Settings::default().to_ini("").contains("MenuPreview=1"));
     }
 
     #[test]

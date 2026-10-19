@@ -25,7 +25,8 @@ use windows::Win32::UI::Shell::{
     WTSAT_ARGB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuStringW, GetSubMenu, MF_BYPOSITION,
+    CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemInfoW, GetMenuStringW, GetSubMenu,
+    MENUITEMINFOW, MF_BYPOSITION, MFT_OWNERDRAW, MIIM_BITMAP, MIIM_FTYPE, WM_INITMENUPOPUP,
 };
 use windows::core::{GUID, HRESULT, HSTRING, Interface, PSTR};
 
@@ -65,6 +66,11 @@ static INSTALL: LazyLock<PathBuf> = LazyLock::new(install_dir);
 
 /// Loaded once per test process, like the surrogate does.
 static DLL: LazyLock<usize> = LazyLock::new(|| {
+    // On a Windows 11 PC with the package registered the classic menu deliberately adds
+    // nothing (the packaged entry is the menu); these tests exercise the classic one.
+    // SAFETY: set before the first menu object exists; Windows environment access is
+    // serialised by the OS.
+    unsafe { std::env::set_var(tw_core::menu::FORCE_CLASSIC_ENV, "1") };
     let path = INSTALL.join(tw_core::ids::SHELL_DLL_NAME);
     // SAFETY: loading our own DLL by absolute path.
     let module: HMODULE = unsafe { LoadLibraryW(&HSTRING::from(path.as_os_str())).unwrap() };
@@ -420,6 +426,28 @@ fn label(menu: windows::Win32::UI::WindowsAndMessaging::HMENU, pos: i32) -> Stri
     String::from_utf16_lossy(&buf[..n as usize])
 }
 
+/// The classic menu's text of every row of `menu` ("" for separators).
+fn rows(menu: windows::Win32::UI::WindowsAndMessaging::HMENU) -> Vec<String> {
+    // SAFETY: counting rows of a menu the caller owns.
+    let n = unsafe { GetMenuItemCount(Some(menu)) };
+    (0..n).map(|i| label(menu, i)).collect()
+}
+
+fn item_info(
+    menu: windows::Win32::UI::WindowsAndMessaging::HMENU,
+    pos: u32,
+    mask: windows::Win32::UI::WindowsAndMessaging::MENU_ITEM_MASK,
+) -> MENUITEMINFOW {
+    let mut info = MENUITEMINFOW {
+        cbSize: size_of::<MENUITEMINFOW>() as u32,
+        fMask: mask,
+        ..Default::default()
+    };
+    // SAFETY: reading one row of a menu the caller owns.
+    unsafe { GetMenuItemInfoW(menu, pos, true, &mut info) }.unwrap();
+    info
+}
+
 #[test]
 fn context_menu_tree_for_single_png() {
     let s = Scratch::new("menu");
@@ -434,12 +462,20 @@ fn context_menu_tree_for_single_png() {
         assert_eq!(GetMenuItemCount(Some(hmenu)), 1);
         assert_eq!(label(hmenu, 0), tw_core::ids::PRODUCT_NAME);
         let sub = GetSubMenu(hmenu, 0);
-        let labels: Vec<String> = (0..GetMenuItemCount(Some(sub)))
-            .map(|i| label(sub, i))
-            .collect();
-        assert_eq!(labels[0], "", "owner-drawn preview first (spec 6.2)");
-        // Spec 6.2 order (separators and the preview are the empty labels).
-        let named: Vec<&str> = labels
+        let labels = rows(sub);
+        assert!(
+            labels[0].starts_with("pic.png  ") && labels[0].ends_with(" bytes"),
+            "file name and size header first: {:?}",
+            labels[0]
+        );
+        // Every row is a plain themed item: an owner-drawn one switches the whole menu to
+        // the non-themed look (light preview row in dark mode).
+        for i in 0..labels.len() as u32 {
+            let info = item_info(sub, i, MIIM_FTYPE);
+            assert_eq!(info.fType.0 & MFT_OWNERDRAW.0, 0, "row {i} is owner-drawn");
+        }
+        // UX-REVIEW 3.4 order; separators are the empty labels, '&' is doubled for the menu.
+        let named: Vec<&str> = labels[1..]
             .iter()
             .map(String::as_str)
             .filter(|l| !l.is_empty())
@@ -447,36 +483,45 @@ fn context_menu_tree_for_single_png() {
         assert_eq!(
             named,
             [
-                "Convert into",
+                "Convert to",
                 "Resize",
-                "Rotate / flip",
-                "Shrink for email",
-                "Compress to size",
-                "Strip metadata (EXIF/GPS)",
-                "Copy to clipboard",
-                "Copy text (OCR)",
-                "Copy as data URI",
-                "Combine into PDF",
-                "Combine into searchable PDF (OCR)",
-                "Combine into CBZ (comic)",
-                "Rename",
-                "Files to folder",
-                "Sort into folders",
-                "Image info",
-                "Pick color (eyedropper)\u{2026}",
-                "Set as wallpaper",
-                "Set as lock screen",
-                "Set as folder icon",
-                "Settings",
+                "Rotate && flip",
+                "Make smaller",
+                "Copy text from image",
+                "Copy",
+                "Organise",
+                "Details\u{2026}",
+                "Set as",
+                "Thumbwright Workbench\u{2026}",
             ]
+        );
+        assert!(
+            !labels
+                .iter()
+                .any(|l| l.contains("Combine") || l.contains("allpaper")),
+            "Combine needs 2+ files and wallpaper is gone: {labels:?}"
         );
         let conv = GetSubMenu(
             sub,
-            labels.iter().position(|l| l == "Convert into").unwrap() as i32,
+            labels.iter().position(|l| l == "Convert to").unwrap() as i32,
         );
-        assert_eq!(label(conv, 0), "PNG");
+        assert_eq!(
+            rows(conv),
+            [
+                "JPEG",
+                "PNG",
+                "WebP \u{b7} lossless",
+                "AVIF",
+                "JPEG XL \u{b7} lossless",
+                "More formats"
+            ]
+        );
+        assert_eq!(
+            rows(GetSubMenu(conv, 5)),
+            ["BMP", "GIF", "TIFF", "Icon (.ico)"]
+        );
 
-        // Command offset 1 is the first convert target (offset 0 is the preview).
+        // Command offset 1 is the first convert target (offset 0 is the root, which has one).
         let mut buf = [0u16; 64];
         menu.GetCommandString(
             1,
@@ -487,9 +532,103 @@ fn context_menu_tree_for_single_png() {
         )
         .unwrap();
         let verb = String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap()]);
-        assert_eq!(verb, "tw.convert.png");
+        assert_eq!(verb, "tw.convert.jpg");
         assert!(menu.cast::<IContextMenu2>().is_ok() && menu.cast::<IContextMenu3>().is_ok());
         let _ = DestroyMenu(hmenu);
+    }
+}
+
+/// Opening the submenu puts the file's thumbnail on the header row as a plain item bitmap.
+#[test]
+fn opening_the_submenu_attaches_the_preview_bitmap() {
+    let s = Scratch::new("menu-preview");
+    let path = s.file(
+        "pic.png",
+        &png(&RgbaImage::from_pixel(64, 64, Rgba([200, 30, 30, 255]))),
+    );
+    let (menu, hmenu, _) = menu_for(&path);
+    // SAFETY: inspecting and messaging a menu we own.
+    unsafe {
+        let sub = GetSubMenu(hmenu, 0);
+        assert!(item_info(sub, 0, MIIM_BITMAP).hbmpItem.is_invalid());
+        menu.cast::<IContextMenu2>()
+            .unwrap()
+            .HandleMenuMsg(
+                WM_INITMENUPOPUP,
+                windows::Win32::Foundation::WPARAM(sub.0 as usize),
+                windows::Win32::Foundation::LPARAM(0),
+            )
+            .unwrap();
+        let bitmap = item_info(sub, 0, MIIM_BITMAP).hbmpItem;
+        assert!(!bitmap.is_invalid(), "the header row carries the thumbnail");
+        let mut bm = windows::Win32::Graphics::Gdi::BITMAP::default();
+        GetObjectW(
+            HGDIOBJ(bitmap.0),
+            size_of::<windows::Win32::Graphics::Gdi::BITMAP>() as i32,
+            Some((&raw mut bm).cast()),
+        );
+        assert_eq!(
+            bm.bmBitsPixel, 32,
+            "premultiplied 32-bpp, drawn with its alpha"
+        );
+        assert!(
+            bm.bmWidth <= 128 && bm.bmHeight.abs() <= 128,
+            "{}x{}",
+            bm.bmWidth,
+            bm.bmHeight
+        );
+        // Another menu's init does nothing; opening again keeps the bitmap.
+        menu.cast::<IContextMenu2>()
+            .unwrap()
+            .HandleMenuMsg(
+                WM_INITMENUPOPUP,
+                windows::Win32::Foundation::WPARAM(hmenu.0 as usize),
+                windows::Win32::Foundation::LPARAM(0),
+            )
+            .unwrap();
+        drop(menu);
+        let _ = DestroyMenu(hmenu);
+    }
+}
+
+/// The shell hands a short id range to the menu; the root used to take the last id and the
+/// whole menu vanished when none was left. Now the root comes first and what fits follows.
+#[test]
+fn a_short_id_range_still_shows_the_thumbwright_menu() {
+    let s = Scratch::new("menu-short");
+    let path = s.file(
+        "pic.png",
+        &png(&RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255]))),
+    );
+    for last in [1u32, 2, 5, 12] {
+        // SAFETY: shell item -> data object -> IShellExtInit, then QueryContextMenu into a
+        // fresh popup menu owned here.
+        unsafe {
+            let menu: IContextMenu = factory(&CLSID_MENU).unwrap().CreateInstance(None).unwrap();
+            let item: IShellItem =
+                SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).unwrap();
+            let data: IDataObject = item.BindToHandler(None, &BHID_DataObject).unwrap();
+            menu.cast::<IShellExtInit>()
+                .unwrap()
+                .Initialize(None, &data, None)
+                .unwrap();
+            let hmenu = CreatePopupMenu().unwrap();
+            let hr = menu.QueryContextMenu(hmenu, 0, 1, last, CMF_NORMAL);
+            assert!(hr.is_ok(), "{hr:?}");
+            let used = hr.0 & 0xFFFF;
+            assert_eq!(
+                used as u32, last,
+                "range 1..={last} is used up, not exceeded"
+            );
+            assert_eq!(
+                label(hmenu, 0),
+                tw_core::ids::PRODUCT_NAME,
+                "range 1..={last}"
+            );
+            let sub = GetSubMenu(hmenu, 0);
+            assert!(GetMenuItemCount(Some(sub)) >= 1, "range 1..={last}");
+            let _ = DestroyMenu(hmenu);
+        }
     }
 }
 
@@ -531,14 +670,14 @@ fn undrawn_menu_previews_do_not_leak_gdi_bitmaps() {
 }
 
 #[test]
-fn folder_menu_offers_only_build_thumbnails_here() {
+fn folder_menu_offers_only_build_thumbnails() {
     let s = Scratch::new("menu-folder");
     let (menu, hmenu, count) = menu_for(&s.0);
     // SAFETY: inspecting a menu we own.
     unsafe {
         assert_eq!(count, 1);
         assert_eq!(GetMenuItemCount(Some(hmenu)), 1);
-        assert_eq!(label(hmenu, 0), "Build thumbnails here");
+        assert_eq!(label(hmenu, 0), "Build thumbnails for this folder\u{2026}");
         let mut buf = [0u16; 64];
         menu.GetCommandString(
             0,
@@ -573,7 +712,7 @@ fn folder_background_menu_is_built_from_the_folder_pidl() {
         let hmenu = CreatePopupMenu().unwrap();
         let hr = menu.QueryContextMenu(hmenu, 0, 1, 0x7FFF, CMF_NORMAL);
         assert_eq!(hr.0 & 0xFFFF, 1);
-        assert_eq!(label(hmenu, 0), "Build thumbnails here");
+        assert_eq!(label(hmenu, 0), "Build thumbnails for this folder\u{2026}");
         let _ = DestroyMenu(hmenu);
     }
 }

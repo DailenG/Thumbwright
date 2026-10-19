@@ -8,6 +8,7 @@ pub mod formats;
 pub mod ids;
 pub mod limits;
 pub mod log;
+pub mod menu;
 #[cfg(windows)]
 pub mod pipeline;
 pub mod protocol;

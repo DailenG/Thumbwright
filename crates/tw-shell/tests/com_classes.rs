@@ -24,8 +24,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
-    COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, IClassFactory, IStream, STGM_READ,
-    STGM_READWRITE,
+    COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, IClassFactory, IDataObject, IStream,
+    STGM_READ, STGM_READWRITE,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Ole::{IObjectWithSite, IOleWindow};
@@ -33,10 +33,11 @@ use windows::Win32::UI::Shell::PropertiesSystem::{
     IInitializeWithFile, IInitializeWithStream, IPropertyStore,
 };
 use windows::Win32::UI::Shell::{
-    ECF_HASSUBCOMMANDS, ECF_ISSEPARATOR, ECS_ENABLED, ECS_HIDDEN, IExplorerCommand,
-    IInitializeWithItem, IPreviewHandler, IShellItem, IShellItemArray, IThumbnailProvider,
-    SHCreateItemFromParsingName, SHCreateMemStream, SHCreateShellItemArrayFromShellItem,
-    SHCreateStreamOnFileEx, WTS_ALPHATYPE, WTSAT_ARGB,
+    BHID_DataObject, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, ECF_DEFAULT, ECF_HASSUBCOMMANDS,
+    ECS_ENABLED, ECS_HIDDEN, IContextMenu, IExplorerCommand, IInitializeWithItem, IPreviewHandler,
+    IShellExtInit, IShellItem, IShellItemArray, IThumbnailProvider, SHCreateItemFromParsingName,
+    SHCreateMemStream, SHCreateShellItemArrayFromShellItem, SHCreateStreamOnFileEx, WTS_ALPHATYPE,
+    WTSAT_ARGB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, IsWindow, MSG, PM_REMOVE, PeekMessageW,
@@ -80,7 +81,12 @@ fn install_dir() -> PathBuf {
     std::fs::create_dir_all(&home).unwrap();
     // SAFETY: runs inside the `INSTALL` initialiser, before the DLL is loaded or any
     // thread of this process reads the environment through a test fixture.
-    unsafe { std::env::set_var("LOCALAPPDATA", &home) };
+    unsafe {
+        std::env::set_var("LOCALAPPDATA", &home);
+        // On a Windows 11 PC with the package registered the classic menu adds nothing; the
+        // classic-menu launch test below needs it.
+        std::env::set_var(tw_core::menu::FORCE_CLASSIC_ENV, "1");
+    }
     dir
 }
 
@@ -673,26 +679,24 @@ fn title(cmd: &IExplorerCommand, items: &IShellItemArray) -> String {
     lpwstr_to_string(unsafe { cmd.GetTitle(items).unwrap() })
 }
 
-fn children(cmd: &IExplorerCommand) -> Vec<IExplorerCommand> {
-    // SAFETY: plain COM calls on the enumerator.
-    unsafe {
-        let e = cmd.EnumSubCommands().unwrap();
-        let mut out = Vec::new();
-        loop {
-            let mut slot = [None];
-            let mut fetched = 0u32;
-            let hr = e.Next(&mut slot, Some(&mut fetched));
-            if fetched == 0 {
-                assert_eq!(hr, windows::Win32::Foundation::S_FALSE);
-                return out;
-            }
-            out.extend(slot[0].take());
-        }
-    }
+/// The `tw-list-*.txt` files the packaged entry wrote for this test process, oldest first.
+fn popup_lists() -> Vec<PathBuf> {
+    let prefix = format!("tw-list-{}-", std::process::id());
+    let mut lists: Vec<PathBuf> = std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    lists.sort();
+    lists
 }
 
 #[test]
-fn explorer_command_enumerates_the_menu_tree_for_a_png() {
+fn explorer_command_is_one_leaf_titled_thumbwright() {
     let _settings = Settings::set("");
     let s = Scratch::new("xcmd");
     let png = s.file("pic.png", &red_png(8, 8));
@@ -701,7 +705,18 @@ fn explorer_command_enumerates_the_menu_tree_for_a_png() {
     // SAFETY: plain COM calls.
     unsafe {
         assert_eq!(title(&root, &items), ids::PRODUCT_NAME);
-        assert_eq!(root.GetFlags().unwrap() as i32 & ECF_HASSUBCOMMANDS.0, 1);
+        // A leaf: no subcommands for Windows to drop or copy into the classic menu cut off.
+        assert_eq!(
+            root.GetFlags().unwrap() as i32,
+            ECF_DEFAULT.0,
+            "default flags: not a submenu, not a separator"
+        );
+        assert_eq!(root.GetFlags().unwrap() as i32 & ECF_HASSUBCOMMANDS.0, 0);
+        assert_eq!(
+            root.EnumSubCommands().err().map(|e| e.code()),
+            Some(E_NOTIMPL),
+            "no subcommands"
+        );
         assert_eq!(root.GetState(&items, false).unwrap(), ECS_ENABLED.0 as u32);
         assert_eq!(
             root.GetCanonicalName().unwrap(),
@@ -716,139 +731,60 @@ fn explorer_command_enumerates_the_menu_tree_for_a_png() {
             "{icon}"
         );
     }
-
-    let subs = children(&root);
-    // SAFETY: plain COM calls.
-    let shown: Vec<_> = subs
-        .iter()
-        .filter(|c| unsafe { c.GetState(&items, false) }.unwrap() == ECS_ENABLED.0 as u32)
-        .collect();
-    // Only the top entry has an icon.
-    // SAFETY: plain COM call.
-    assert_eq!(
-        unsafe { shown[0].GetIcon(&items) }.err().map(|e| e.code()),
-        Some(E_NOTIMPL)
-    );
-    let titles: Vec<String> = shown
-        .iter()
-        .map(|c| {
-            // SAFETY: plain COM call.
-            if unsafe { c.GetFlags() }.unwrap() as i32 & ECF_ISSEPARATOR.0 != 0 {
-                "-".to_owned()
-            } else {
-                title(c, &items)
-            }
-        })
-        .collect();
-    assert_eq!(
-        titles,
-        [
-            "Convert into",
-            "Resize",
-            "Rotate / flip",
-            "-",
-            "Shrink for email",
-            "Compress to size",
-            "Strip metadata (EXIF/GPS)",
-            "-",
-            "Copy to clipboard",
-            "Copy text (OCR)",
-            "Copy as data URI",
-            "-",
-            "Combine into PDF",
-            "Combine into searchable PDF (OCR)",
-            "Combine into CBZ (comic)",
-            "-",
-            "Rename",
-            "Files to folder",
-            "Sort into folders",
-            "-",
-            "Image info",
-            "Pick color (eyedropper)\u{2026}",
-            "-",
-            "Set as wallpaper",
-            "Set as lock screen",
-            "Set as folder icon",
-            "-",
-            "Settings",
-        ]
-    );
-
-    // A submenu enumerates its verbs in order and its leaves are not themselves menus.
-    let convert = shown[0];
-    let formats: Vec<String> = children(convert).iter().map(|c| title(c, &items)).collect();
-    assert_eq!(
-        formats,
-        [
-            "PNG",
-            "JPG",
-            "WebP (lossless)",
-            "AVIF",
-            "JPEG XL (lossless)",
-            "BMP",
-            "GIF",
-            "TIFF",
-            "Icon (.ico)"
-        ]
-    );
-    // SAFETY: plain COM calls.
-    unsafe {
-        let png_cmd = &children(convert)[0];
-        assert_eq!(png_cmd.GetFlags().unwrap() as i32 & ECF_HASSUBCOMMANDS.0, 0);
-        assert_eq!(
-            png_cmd.EnumSubCommands().err().map(|e| e.code()),
-            Some(E_NOTIMPL)
-        );
-        // Invoke launches `twctl.exe` from the install directory (a stand-in here).
-        png_cmd.Invoke(&items, None).unwrap();
-        assert_eq!(
-            convert.Invoke(&items, None).err().map(|e| e.code()),
-            Some(E_NOTIMPL),
-            "a submenu is not invokable"
-        );
-    }
 }
 
 #[test]
-fn explorer_command_follows_menu_order_and_hidden_items() {
-    let _settings =
-        Settings::set("MenuOrder=wallpaper,resize\nHiddenMenuItems=email,settings,copy");
-    let s = Scratch::new("xcmd-order");
+fn explorer_command_state_follows_the_menu_settings() {
+    let s = Scratch::new("xcmd-state");
     let png = s.file("pic.png", &red_png(8, 8));
     let items = items_for(&png);
     let root: IExplorerCommand = create(ids::CLSID_EXPLORER_COMMAND);
-    let titles: Vec<String> = children(&root)
-        .iter()
-        // SAFETY: plain COM calls.
-        .filter(|c| unsafe { c.GetState(&items, false) }.unwrap() == ECS_ENABLED.0 as u32)
-        .map(|c| {
-            // SAFETY: plain COM call.
-            if unsafe { c.GetFlags() }.unwrap() as i32 & ECF_ISSEPARATOR.0 != 0 {
-                "-".to_owned()
-            } else {
-                title(c, &items)
-            }
-        })
-        .collect();
+    let state = |body: &str| {
+        let _settings = Settings::set(body);
+        // SAFETY: plain COM call.
+        unsafe { root.GetState(&items, false) }.unwrap()
+    };
+    assert_eq!(state(""), ECS_ENABLED.0 as u32);
+    assert_eq!(state("MenuEnabled=0"), ECS_HIDDEN.0 as u32);
+}
+
+#[test]
+fn invoking_the_entry_hands_the_selection_to_the_popup_through_a_list_file() {
+    let _settings = Settings::set("VerboseLog=1");
+    let s = Scratch::new("xcmd-invoke");
+    let png = s.file("pic.png", &red_png(8, 8));
+    let items = items_for(&png);
+    let root: IExplorerCommand = create(ids::CLSID_EXPLORER_COMMAND);
+    let before = popup_lists().len();
+    let log_before = log_len();
+    // SAFETY: plain COM call; launches the stand-in `twctl.exe` (the worker).
+    unsafe { root.Invoke(&items, None).unwrap() };
+    let lists = popup_lists();
+    assert_eq!(lists.len(), before + 1, "one list file per invocation");
+    let list = lists.last().unwrap();
+    let body = std::fs::read_to_string(list).unwrap();
     assert_eq!(
-        &titles[..3],
-        ["Set as wallpaper", "-", "Resize"],
-        "{titles:?}"
+        Path::new(body.trim_end()).file_name(),
+        png.file_name(),
+        "the list names the selected file: {body:?}"
     );
-    assert!(
-        !titles
-            .iter()
-            .any(|t| t == "Shrink for email" || t == "Copy to clipboard")
-    );
-    assert_eq!(
-        titles.last().map(String::as_str),
-        Some("Settings"),
-        "Settings never hides"
-    );
-    assert!(
-        titles.windows(2).all(|w| !(w[0] == "-" && w[1] == "-")) && titles[0] != "-",
-        "{titles:?}"
-    );
+    let _ = std::fs::remove_file(list);
+    let log = log_since(log_before);
+    let lines = trace_lines(&log);
+    assert_eq!(lines.len(), 1, "{log}");
+    for part in [
+        "class=menu",
+        "verb=menu",
+        "files=1",
+        "ext=png",
+        "twctl_pid=",
+    ] {
+        assert!(
+            lines[0].contains(part),
+            "{part:?} missing from {}",
+            lines[0]
+        );
+    }
 }
 
 #[test]
@@ -1056,23 +992,49 @@ fn verbose_log_records_cloud_property_and_preview_successes() {
     }
 }
 
+/// Starts the classic menu's command `name` on one PNG, as Explorer does for a click.
+fn invoke_classic(png: &Path, name: &str) {
+    // SAFETY: shell item -> data object -> IShellExtInit, then InvokeCommand with a Unicode
+    // verb name that outlives the call; launches the stand-in `twctl.exe`.
+    unsafe {
+        let menu: IContextMenu = create(ids::CLSID_CONTEXT_MENU);
+        let item: IShellItem =
+            SHCreateItemFromParsingName(&HSTRING::from(png.as_os_str()), None).unwrap();
+        let data: IDataObject = item.BindToHandler(None, &BHID_DataObject).unwrap();
+        menu.cast::<IShellExtInit>()
+            .unwrap()
+            .Initialize(None, &data, None)
+            .unwrap();
+        let verb = HSTRING::from(name);
+        let info = CMINVOKECOMMANDINFOEX {
+            cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            fMask: 0x4000, // CMIC_MASK_UNICODE
+            lpVerbW: PCWSTR(verb.as_ptr()),
+            ..Default::default()
+        };
+        menu.InvokeCommand(std::ptr::from_ref(&info).cast::<CMINVOKECOMMANDINFO>())
+            .unwrap();
+    }
+}
+
 #[test]
 fn verbose_log_records_a_menu_verb_launch() {
     let s = Scratch::new("verbose-menu");
     let png = s.file("pic.png", &red_png(8, 8));
-    let items = items_for(&png);
-    let root: IExplorerCommand = create(ids::CLSID_EXPLORER_COMMAND);
-    let convert = &children(&root)[0];
-    let png_cmd = &children(convert)[0];
     {
         let _on = Settings::set("VerboseLog=1");
         let before = log_len();
-        // SAFETY: plain COM call; launches the stand-in `twctl.exe`.
-        unsafe { png_cmd.Invoke(&items, None).unwrap() };
+        invoke_classic(&png, "tw.convert.jpg");
         let log = log_since(before);
         let lines = trace_lines(&log);
         assert_eq!(lines.len(), 1, "{log}");
-        for part in ["class=menu", "files=1", "ext=png", "twctl_pid=", "verb="] {
+        for part in [
+            "class=menu",
+            "files=1",
+            "ext=png",
+            "twctl_pid=",
+            "verb=tw.convert.jpg",
+        ] {
             assert!(
                 lines[0].contains(part),
                 "{part:?} missing from {}",
@@ -1082,39 +1044,27 @@ fn verbose_log_records_a_menu_verb_launch() {
     }
     let _off = Settings::set("VerboseLog=0");
     let before = log_len();
-    // SAFETY: as above.
-    unsafe { png_cmd.Invoke(&items, None).unwrap() };
+    invoke_classic(&png, "tw.convert.jpg");
     assert!(trace_lines(&log_since(before)).is_empty());
 }
 
-/// The menu passed the selection to `twctl settings` and `twctl pick-color`, which take no
-/// file and refused with "takes exactly 0 file argument(s)". The launch trace records how many
-/// files went on the command line.
+/// The menu passed the selection to `twctl settings`, which takes no file and refused with
+/// "takes exactly 0 file argument(s)". The launch trace records how many files went on the
+/// command line.
 #[test]
 fn file_less_verbs_launch_without_the_selection() {
     let s = Scratch::new("verbose-fileless");
     let png = s.file("pic.png", &red_png(8, 8));
-    let items = items_for(&png);
-    let root: IExplorerCommand = create(ids::CLSID_EXPLORER_COMMAND);
-    let top = children(&root);
-    let find = |label: &str| {
-        top.iter()
-            .find(|c| title(c, &items).starts_with(label))
-            .unwrap_or_else(|| panic!("no {label:?} item"))
-            .clone()
-    };
     let _on = Settings::set("VerboseLog=1");
-    for (label, files) in [("Settings", 0), ("Pick color", 0), ("Image info", 1)] {
-        let cmd = find(label);
+    for (verb, files) in [("tw.settings", 0), ("tw.info", 1)] {
         let before = log_len();
-        // SAFETY: plain COM call; launches the stand-in `twctl.exe`.
-        unsafe { cmd.Invoke(&items, None).unwrap() };
+        invoke_classic(&png, verb);
         let log = log_since(before);
         let lines = trace_lines(&log);
-        assert_eq!(lines.len(), 1, "{label}");
+        assert_eq!(lines.len(), 1, "{verb}");
         assert!(
             lines[0].contains(&format!("files={files} ")),
-            "{label}: {}",
+            "{verb}: {}",
             lines[0]
         );
     }

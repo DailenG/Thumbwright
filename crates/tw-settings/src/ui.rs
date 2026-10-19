@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::path::PathBuf;
 
-use tw_core::config::{self, MENU_ITEMS, MenuPreview, Settings};
+use tw_core::config::{self, MENU_ITEMS, Settings};
 use tw_core::registration::{self, Layout, Scope};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HANDLE, HWND,
@@ -641,7 +641,7 @@ impl App {
         set_checked(self.c.menu_here, s.menu_build_here);
         set_text(self.c.max_file, &s.max_file_mb.to_string());
         set_text(self.c.max_thumb, &s.max_thumb_px.to_string());
-        set_checked(self.c.preview, s.menu_preview != MenuPreview::Off);
+        set_checked(self.c.preview, s.menu_preview);
         self.types = model::registrable()
             .into_iter()
             .map(|f| TypeRow {
@@ -764,7 +764,7 @@ impl App {
             16,
             u64::from(tw_core::limits::DEFAULT_MAX_THUMB_EDGE),
         )? as u32;
-        s.menu_preview = model::menu_preview(is_checked(self.c.preview), self.base.menu_preview);
+        s.menu_preview = is_checked(self.c.preview);
         // Entries for extensions or menu items this window does not list are not ours to drop.
         let listed_type = |e: &str| self.types.iter().any(|t| t.ext == e);
         s.disabled_types = self
@@ -1410,9 +1410,9 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         menu_enabled: false,
         menu_all_file_types: true,
         menu_build_here: false,
-        menu_preview: MenuPreview::InContextMenu,
+        menu_preview: false,
         // A saved order lists every item (the window writes the full order).
-        menu_order: config::ordered_menu_ids(&["wallpaper".into(), "resize".into()])
+        menu_order: config::ordered_menu_ids(&["set_as".into(), "resize".into()])
             .into_iter()
             .map(String::from)
             .collect(),
@@ -1448,7 +1448,7 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         &format!("controls do not read back their settings:\n{read:?}\n{settings:?}"),
     )?;
 
-    // A user ticking .png back on, and unticking the first menu row (wallpaper).
+    // A user ticking .png back on, and unticking the first menu row (set_as).
     let png = all
         .iter()
         .position(|f| f.ext == "png")
@@ -1463,7 +1463,7 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         "type toggle",
     )?;
     check(
-        after.hidden_menu_items.contains(&"wallpaper".to_string()),
+        after.hidden_menu_items.contains(&"set_as".to_string()),
         "menu visibility toggle",
     )?;
     check(
@@ -1495,23 +1495,20 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         "Clear all must only affect the filtered rows",
     )?;
 
-    // The one preview checkbox: unticked is Off; ticked keeps a stored "in the menu itself".
+    // The one preview checkbox maps straight onto the on/off setting.
     with_app(|a| set_checked(a.c.preview, false));
     let off = with_app(|a| a.collect())
         .ok_or("window state busy")?
         .map_err(|(_, e)| e)?;
     check(
-        off.menu_preview == MenuPreview::Off,
-        "unticked preview checkbox must store Off",
+        !off.menu_preview,
+        "unticked preview checkbox must store off",
     )?;
     with_app(|a| set_checked(a.c.preview, true));
     let on = with_app(|a| a.collect())
         .ok_or("window state busy")?
         .map_err(|(_, e)| e)?;
-    check(
-        on.menu_preview == MenuPreview::InContextMenu,
-        "ticked preview checkbox must keep the stored mode",
-    )?;
+    check(on.menu_preview, "ticked preview checkbox must store on")?;
 
     // Bad numbers are refused with the page that holds them.
     with_app(|a| set_text(a.c.jpeg, "0"));
