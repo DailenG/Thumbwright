@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="850" height="1100" viewBox="0 0 850 1100" font-family="Segoe UI, sans-serif">
+<rect width="850" height="1100" fill="#ffffff"/>
+<rect x="70" y="80" width="14" height="70" fill="#e8a33d"/>
+<text x="100" y="124" font-size="46" font-weight="700" fill="#1b2430">Harbour Project</text>
+<text x="100" y="156" font-size="22" fill="#5a6573">Quarterly report, Q3</text>
+<g fill="#c9d0d8"><rect x="70" y="210" width="710" height="10" rx="5"/><rect x="70" y="238" width="680" height="10" rx="5"/><rect x="70" y="266" width="700" height="10" rx="5"/><rect x="70" y="294" width="520" height="10" rx="5"/></g>
+<text x="70" y="372" font-size="26" font-weight="600" fill="#1b2430">Visitors per month</text>
+<g transform="translate(70 400)"><line x1="0" y1="330" x2="710" y2="330" stroke="#9aa3ad" stroke-width="2"/>
+<g fill="#e8a33d"><rect x="20" y="210" width="70" height="120"/><rect x="130" y="170" width="70" height="160"/><rect x="240" y="120" width="70" height="210"/><rect x="350" y="150" width="70" height="180"/><rect x="460" y="80" width="70" height="250"/><rect x="570" y="40" width="70" height="290"/></g></g>
+<g fill="#c9d0d8"><rect x="70" y="790" width="710" height="10" rx="5"/><rect x="70" y="818" width="690" height="10" rx="5"/><rect x="70" y="846" width="705" height="10" rx="5"/><rect x="70" y="874" width="400" height="10" rx="5"/>
+<rect x="70" y="930" width="710" height="10" rx="5"/><rect x="70" y="958" width="660" height="10" rx="5"/><rect x="70" y="986" width="690" height="10" rx="5"/></g>
+</svg>
