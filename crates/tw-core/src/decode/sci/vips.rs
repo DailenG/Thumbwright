@@ -14,10 +14,11 @@ const FMT_UCHAR: u32 = 0;
 const FMT_USHORT: u32 = 2;
 const CODING_NONE: u32 = 0;
 
-/// VIPS `Type` values whose samples are display RGB/gray (or untyped multiband). Lab, XYZ,
-/// CMYK, Fourier and the other colour spaces need conversion and are not decoded.
+/// `VipsInterpretation` values whose samples are display RGB/gray (or untyped multiband):
+/// MULTIBAND 0, B_W 1, RGB 17, sRGB 22, RGB16 25, GREY16 26. Lab (13), XYZ (12), CMYK (15),
+/// Fourier (24) and the other colour spaces need conversion and are not decoded.
 fn displayable_type(ty: u32) -> bool {
-    matches!(ty, 0 | 1 | 15 | 20 | 21)
+    matches!(ty, 0 | 1 | 17 | 22 | 25 | 26)
 }
 
 pub fn decode(data: &[u8]) -> Result<DynamicImage> {
@@ -93,7 +94,7 @@ mod tests {
     #[test]
     fn rgb_uchar_both_byte_orders() {
         for order in [Order::Little, Order::Big] {
-            let mut f = header(order, 2, 1, 3, FMT_UCHAR, 0, 15);
+            let mut f = header(order, 2, 1, 3, FMT_UCHAR, 0, 22);
             f.extend_from_slice(&[255, 0, 0, 0, 0, 200]);
             let img = decode(&f).unwrap().to_rgb8();
             assert_eq!((img.width(), img.height()), (2, 1));
@@ -118,11 +119,14 @@ mod tests {
             decode(&MAGIC_LSB.to_le_bytes()),
             Err(DecodeError::Malformed(_))
         ));
-        let huge = header(Order::Little, 65_535, 65_535, 4, FMT_UCHAR, 0, 15);
+        let huge = header(Order::Little, 65_535, 65_535, 4, FMT_UCHAR, 0, 22);
         assert_eq!(decode(&huge), Err(DecodeError::TooLarge));
-        let lying = header(Order::Little, 4096, 4096, 3, FMT_UCHAR, 0, 15);
+        let lying = header(Order::Little, 4096, 4096, 3, FMT_UCHAR, 0, 22);
         assert!(matches!(decode(&lying), Err(DecodeError::Malformed(_))));
-        let lab = header(Order::Little, 1, 1, 3, FMT_UCHAR, 0, 7);
+        let lab = header(Order::Little, 1, 1, 3, FMT_UCHAR, 0, 13);
         assert!(matches!(decode(&lab), Err(DecodeError::Malformed(_))));
+        // CMYK is interpretation 15, not a display space.
+        let cmyk = header(Order::Little, 1, 1, 4, FMT_UCHAR, 0, 15);
+        assert!(matches!(decode(&cmyk), Err(DecodeError::Malformed(_))));
     }
 }
