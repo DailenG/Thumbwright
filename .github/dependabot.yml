@@ -1,0 +1,22 @@
+version: 2
+
+# Weekly update PRs for the crates in Cargo.lock and for the pinned action SHAs in the workflows.
+# A cargo update PR must also keep `cargo xtask licenses --check` green (THIRD_PARTY_LICENSES.md is
+# generated from Cargo.lock); CI runs it on the PR.
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

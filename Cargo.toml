@@ -12,6 +12,10 @@ publish = false
 [workspace.dependencies]
 tw-core = { path = "crates/tw-core" }
 
+# Known advisory exception (audit H-3): `paste` 1.0.15 (RUSTSEC-2024-0436, unmaintained, no
+# vulnerability) is a compile-time proc-macro pulled in by lofty, pulp (exr, image) and rav1e
+# (ravif). It cannot be dropped without replacing all three; see .cargo/audit.toml and SECURITY.md.
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

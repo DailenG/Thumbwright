@@ -15,20 +15,28 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Third-party actions are pinned to a full commit SHA (a tag can be moved); the version in the
+# trailing comment is what Dependabot (.github/dependabot.yml) bumps. The runner image is pinned
+# to a named Windows Server release instead of `windows-latest`, so a new image never changes the
+# toolchain under a green build unannounced; move it deliberately.
 jobs:
   check:
-    runs-on: windows-latest
+    runs-on: windows-2025
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # rust-toolchain.toml pins the channel, components and target; rustup installs it on first use.
       - name: Toolchain
         run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Format
         run: cargo fmt --all -- --check
       - name: Dependency policy (permissive licenses, no native code)
-        run: cargo xtask licenses --check
+        run: cargo --locked xtask licenses --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --workspace --locked
+        # --no-fail-fast: one failing test binary must not hide the failures in the others.
+        run: cargo test --workspace --locked --no-fail-fast
