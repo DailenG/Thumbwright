@@ -126,7 +126,11 @@ fn svg_thumbnail(get_class_object: GetClassObject) {
 fn dll_prespawns_a_worker_and_drains_it_before_unload() {
     let dir = stage();
     let dll = dir.join(tw_core::ids::SHELL_DLL_NAME);
-    assert_eq!(worker_children(), 0);
+    // An exited process (the `--version` warm-up in `stage`) stays in the process table
+    // while anyone, antivirus included, still holds a handle to it.
+    wait_for("no worker children before the test", || {
+        worker_children() == 0
+    });
     // SAFETY: loading our own DLL by absolute path and calling its documented exports.
     let (get_class_object, can_unload): (GetClassObject, CanUnloadNow) = unsafe {
         let module: HMODULE = LoadLibraryW(&HSTRING::from(dll.as_os_str())).unwrap();
@@ -145,9 +149,9 @@ fn dll_prespawns_a_worker_and_drains_it_before_unload() {
     // SAFETY: the export takes no arguments.
     let hr = unsafe { can_unload() };
     assert_eq!(hr, S_OK, "no object is alive, so the DLL may unload");
-    assert_eq!(
-        worker_children(),
-        0,
-        "idle worker outlived the unload check"
-    );
+    // The DLL ends the idle worker; an ended process can linger in the table as above, but
+    // one the DLL failed to end would idle forever and time this out.
+    wait_for("idle worker ended by the unload check", || {
+        worker_children() == 0
+    });
 }
