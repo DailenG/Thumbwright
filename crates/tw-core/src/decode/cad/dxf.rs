@@ -31,19 +31,19 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
         return Err(DecodeError::Unsupported);
     }
     let window = &data[..data.len().min(WINDOW)];
-    let mut from = 0;
-    while let Some(rel) = find(&window[from..], NAME) {
-        let at = from + rel;
-        from = at + NAME.len();
-        if let Some(bytes) = section_bytes(window, at)? {
-            return decode_preview(&bytes);
+    // One pass over the lines: a section starts at a line that is exactly the name, directly
+    // after a `2` group-code line. (Searching for each occurrence of the name and then
+    // walking back and forward to its line boundaries was quadratic on a file without
+    // newlines.)
+    let mut pos = 0;
+    let mut previous: &[u8] = &[];
+    while let Some(line) = next_line(window, &mut pos) {
+        if line == NAME && previous == b"2" {
+            return decode_preview(&section_bytes(window, pos)?);
         }
+        previous = line;
     }
     Err(DecodeError::Unsupported)
-}
-
-fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Splits off the next line (without `\r\n`), advancing `pos`.
@@ -57,31 +57,9 @@ fn next_line<'a>(data: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
     Some(rest[..len].trim_ascii())
 }
 
-/// The image bytes of the section whose name token sits at `at`, `None` when this
-/// occurrence is not a section name (`2` group, whole line).
-fn section_bytes(window: &[u8], at: usize) -> Result<Option<Vec<u8>>> {
-    let line_start = window[..at]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map_or(0, |i| i + 1);
-    let mut pos = line_start;
-    let Some(name) = next_line(window, &mut pos) else {
-        return Ok(None);
-    };
-    if name != NAME {
-        return Ok(None);
-    }
-    // The group code line before the name must be `2`.
-    let before = &window[..line_start];
-    let prev_end = before.len().saturating_sub(1);
-    let prev_start = before[..prev_end]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map_or(0, |i| i + 1);
-    if before[prev_start..].trim_ascii() != b"2" {
-        return Ok(None);
-    }
-
+/// The image bytes of the section whose name line has just been read (`pos` is the start of
+/// the next line).
+fn section_bytes(window: &[u8], mut pos: usize) -> Result<Vec<u8>> {
     let mut declared: Option<usize> = None;
     let mut bytes: Vec<u8> = Vec::new();
     while let (Some(code), Some(value)) = (next_line(window, &mut pos), next_line(window, &mut pos))
@@ -122,7 +100,7 @@ fn section_bytes(window: &[u8], at: usize) -> Result<Option<Vec<u8>>> {
     if bytes.is_empty() {
         return Err(DecodeError::Unsupported);
     }
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 fn hex(c: u8) -> Option<u8> {
@@ -240,7 +218,7 @@ mod tests {
         );
         // Truncated mid-section and truncated mid-name.
         let full = dxf(&dib, dib.len(), "\n");
-        let cut = find(&full, NAME).unwrap();
+        let cut = full.windows(NAME.len()).position(|w| w == NAME).unwrap();
         assert!(decode(&full[..cut + 20]).is_err());
         assert_eq!(decode(&full[..cut + 5]), Err(DecodeError::Unsupported));
         // DIB declaring 65535 x 65535.
@@ -248,5 +226,22 @@ mod tests {
         d[4..8].copy_from_slice(&65535u32.to_le_bytes());
         d[8..12].copy_from_slice(&65535u32.to_le_bytes());
         assert_eq!(decode(&dxf(&d, d.len(), "\n")), Err(DecodeError::TooLarge));
+    }
+
+    /// DB-02: each occurrence of the name on a newline-free file walked back and forward over
+    /// the whole line (O(n^2)).
+    #[test]
+    fn repeated_name_without_newlines_is_linear() {
+        let hostile = NAME.repeat(8_000);
+        let start = std::time::Instant::now();
+        assert_eq!(decode(&hostile), Err(DecodeError::Unsupported));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "dxf took {:?}",
+            start.elapsed()
+        );
+        // Same with line breaks but no `2` group before any of them.
+        let lines = [NAME, b"\n"].concat().repeat(8_000);
+        assert_eq!(decode(&lines), Err(DecodeError::Unsupported));
     }
 }
