@@ -266,19 +266,30 @@ fn fb2(data: &[u8]) -> Result<DynamicImage> {
     let mut pos = body_start.unwrap_or(0);
     let mut first_image: Option<(usize, usize)> = None;
     let mut cover: Option<(usize, usize)> = None;
+    // First `>` at or after the last `<binary` probed. Every probe either reuses it or
+    // scans forward to a new one, so the scans never overlap: a run of `<binary ` with no
+    // `>` costs one pass over the file, not 4 KiB per occurrence.
+    let mut next_gt: Option<usize> = None;
     while let Some(at) = find(data, b"<binary", pos) {
         pos = at + 7;
         let Some(&next) = data.get(pos) else { break };
         if !(next.is_ascii_whitespace() || next == b'>' || next == b'/') {
             continue;
         }
-        let Some(gt) = data
-            .get(at..data.len().min(at + FB2_TAG_MAX))
-            .and_then(|w| w.iter().position(|&b| b == b'>'))
-            .map(|i| at + i)
-        else {
-            continue;
+        let gt = match next_gt {
+            Some(g) if g >= at => g,
+            _ => match memchr::memchr(b'>', &data[at..]) {
+                Some(i) => {
+                    next_gt = Some(at + i);
+                    at + i
+                }
+                // No `>` anywhere after this: no later start tag can end either.
+                None => break,
+            },
         };
+        if gt - at >= FB2_TAG_MAX {
+            continue;
+        }
         if data[gt - 1] == b'/' {
             continue;
         }
@@ -1192,5 +1203,35 @@ mod tests {
         let mut t = Vec::new();
         tar_file(&mut t, "001.png", &png_header_only(65535, 65535));
         assert_eq!(extract(&finish_tar(t), "cbt"), Err(DecodeError::TooLarge));
+    }
+
+    /// DA-6: each `<binary ` without a `>` in the next 4096 bytes cost a 4 KiB scan.
+    #[test]
+    fn fb2_unterminated_binary_tags_cost_one_pass() {
+        let mut doc = b"<?xml version=\"1.0\"?><FictionBook><description/>".to_vec();
+        doc.extend(b"<binary ".repeat(512 * 1024));
+        let start = std::time::Instant::now();
+        assert!(matches!(
+            extract(&doc, "fb2"),
+            Err(DecodeError::Unsupported)
+        ));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "fb2 took {:?}",
+            start.elapsed()
+        );
+        // A terminated tag after the run is still found: the cached `>` is reused, not
+        // trusted past the 4096-byte tag limit.
+        let mut doc = b"<?xml version=\"1.0\"?><FictionBook><description/>".to_vec();
+        doc.extend(b"<binary ".repeat(1024));
+        doc.extend(vec![b'x'; 5000]);
+        doc.extend(
+            format!(
+                "<binary id=\"x\" content-type=\"image/png\">{}</binary>",
+                base64(&png(3, 2, [9, 9, 9, 255]))
+            )
+            .as_bytes(),
+        );
+        assert_eq!(extract(&doc, "fb2").unwrap().dimensions(), (3, 2));
     }
 }
