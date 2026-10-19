@@ -8,20 +8,28 @@ Clean-room Windows Explorer thumbnail provider and context-menu toolkit, written
 - `thumbwright-settings.exe`: settings window (General, File types, Menu, Limits, Preview, Maintenance). Saves to `Thumbwright.ini` (portable) or `HKCU\Software\Thumbwright` (installed); toggling a file type updates the per-user registration through the journaled engine. `--self-test` creates, drives and destroys the window without showing it.
 - `packaging/msix/`: sparse MSIX package that declares the Windows 11 menu verb. `build.ps1 -Publisher "CN=<signing certificate subject>"` builds it unsigned with `makeappx`; `scripts/release.ps1` signs it with the release identity and the MSI registers it for all users (`packaging/wix/README.md`).
 
-Formats: 315 of the 363 formats in the spec matrix have a thumbnail route (`twctl formats --json`, entries with `thumbnail: true`; the 48 others are listed with the reason in `docs/history/REVIEW_HANDOFF.md` section 5). They cover camera RAW, JPEG XL, JPEG 2000, HEIC/AVIF (OS codecs), video frames (Media Foundation, offset set by `VideoFramePercent`), PDF, legacy Office and OLE previews, ebooks, archives, Android packages, design and CAD previews, meshes, and the scientific and legacy bitmap long tail. Types without a route are never registered, so Windows' own handlers stay in charge. Measurements of the thumbnail path and the decisions behind pre-spawned workers: `docs/performance.md`.
+Formats: 315 of the 363 formats in the spec matrix have a thumbnail route (`twctl formats --json`, entries with `thumbnail: true`; the 48 others and the verification state are tracked in `docs/ARCHITECTURE.md`, "Format coverage"). They cover camera RAW, JPEG XL, JPEG 2000, HEIC/AVIF (OS codecs), video frames (Media Foundation, offset set by `VideoFramePercent`), PDF, legacy Office and OLE previews, ebooks, archives, Android packages, design and CAD previews, meshes, and the scientific and legacy bitmap long tail. Types without a route are never registered, so Windows' own handlers stay in charge. Measurements of the thumbnail path and the decisions behind pre-spawned workers: `docs/performance.md`.
 
-Requirements: `FUNCTIONAL_SPEC.md`. Architecture, invariants I1-I8, verification state and known gaps: `docs/history/REVIEW_HANDOFF.md` (sections 3-5); security review and its fixes: `docs/history/REVIEW_FINDINGS.md`. Open work is tracked as GitHub issues.
+Requirements: `FUNCTIONAL_SPEC.md`. Architecture and invariants I1-I8: `docs/ARCHITECTURE.md`. Review records (the original reviewer brief, verification state and the security review with its fixes) are archived in `docs/history/`. Open work is tracked as GitHub issues.
+
+## Requirements
+
+- Windows 10 version 2004 (build 19041) or later, or Windows 11, x64. The sparse MSIX that carries the Windows 11 menu declares 10.0.19041.0 as its minimum.
+- Tested on Windows 11 build 26340 only. Windows 10 behaviour (classic menu only, no modern menu) has not been exercised.
+- HEIC, HEIF, AVCI and AVIF thumbnails come from the OS codecs, so they need the Microsoft Store HEIF, HEVC and AV1 codec extensions; without them those types show no thumbnail. JPEG XL, camera RAW, JPEG 2000 and the other pure-Rust formats need nothing extra.
+- Video frames need Media Foundation (part of Windows, absent from some "N" editions without the Media Feature Pack); some codecs inside video files need the matching Store extension.
+- `twctl doctor` reports which of these OS codecs are present on the machine.
 
 ## Build
 
-Requires Windows x64 and the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it). Linking needs the MSVC CRT/SDK libraries: either Visual Studio Build Tools ("Desktop development with C++"), or the original build room's self-contained setup (rust-lld + xwin under a gitignored `.toolchain/`, wired up by `scripts/devenv.ps1`). The CRT is linked statically (`.cargo/config.toml`), so the binaries need no VC++ redistributable. No crate may compile C/C++ (no C compiler is assumed).
+Requires Windows x64 and the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it). Linking needs the MSVC CRT/SDK libraries: either Visual Studio Build Tools ("Desktop development with C++"), or a self-contained local setup (rust-lld + xwin under a gitignored `.toolchain/`, wired up by `scripts/devenv.ps1`; optional, and not needed with Visual Studio). The CRT is linked statically (`.cargo/config.toml`), so the binaries need no VC++ redistributable. No crate may compile C/C++ (no C compiler is assumed).
 
 ```
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo xtask licenses --check        # dependency audit (permissive licenses, no native code); regenerates THIRD_PARTY_LICENSES.md without --check
-cargo build --release --workspace   # thin LTO; slow (11-28 min on the build-room machine)
+cargo build --release --workspace   # thin LTO; slow (11-28 min on the maintainer's machine)
 ```
 
 The DLL, `tw-worker.exe`, `twctl.exe` and `thumbwright-settings.exe` must sit in one directory.
@@ -88,7 +96,7 @@ All components append to `%LOCALAPPDATA%\Thumbwright.log`. Failures are always l
 
 ## Clean-room rules
 
-This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, official Microsoft documentation and permissively licensed crate sources. Do not consult the reference product's binaries or source. The reference product is deliberately not named in this repository. See `docs/history/REVIEW_HANDOFF.md` section 1.
+This is an independent implementation built only from `FUNCTIONAL_SPEC.md`, official Microsoft documentation and permissively licensed crate sources. Do not consult the reference product's binaries or source. The reference product is deliberately not named in this repository.
 
 ## License
 

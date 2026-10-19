@@ -1,4 +1,4 @@
-# Dot-source to point the current PowerShell session at the build-room toolchain:
+# Dot-source to point the current PowerShell session at the optional local .toolchain:
 #   . .\scripts\devenv.ps1
 # Locates rustup/cargo under .toolchain and, when .toolchain\xwin exists, links with
 # rust-lld against its CRT/SDK import libraries (no Visual Studio needed). Machines with

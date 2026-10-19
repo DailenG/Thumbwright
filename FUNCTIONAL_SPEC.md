@@ -1,9 +1,9 @@
 # FUNCTIONAL SPECIFICATION: Crash-Isolated Explorer Thumbnail Extension and Image Toolkit
 
 ```
-Document:     FS-REF-CR-001
+Document:     FS-CR-001
 Category:     Clean-room functional specification (informational + normative)
-Reference:    the reference product (x64; identity recorded privately); observed as a black box
+Reference:    a third-party reference product (x64; identity recorded privately); observed as a black box
 Date:         2026-10-16
 Host:         Windows 11 Pro Insider (build 26340), x64
 Status:       Final
@@ -20,7 +20,7 @@ Evidence tags used throughout:
 | Tag | Meaning |
 |---|---|
 | **[OBS]** | Directly observed on the test host (registry diff, process trace, COM probe, CLI output, UI Automation dump). |
-| **[DOC]** | Stated in user documentation shipped inside the release archive (`README.md`, `PORTABLE.txt`) or in the public package-manager metadata and release notes. Not independently verified. |
+| **[DOC]** | Stated in user documentation shipped inside the release archive (its README and portable-use notes) or in public package-manager metadata. Not independently verified. |
 | **[INF]** | Engineering inference from [OBS] facts. |
 
 ## Table of Contents
@@ -54,12 +54,7 @@ Baseline snapshots (`reg export`) taken before any product code ran: `HKLM\SOFTW
 
 ### 1.2 Package acquisition
 
-| Source | Package | Version | Notes |
-|---|---|---|---|
-| Chocolatey | (predecessor package) | (version) | Predecessor product, not the target. |
-| Chocolatey | (target package) | (version) | Stale relative to upstream. |
-| winget | (vendor package id) | (version) | Selected. Inno Setup, machine scope, `elevatesSelf`. Hash verified by winget. |
-| GitHub release asset | `<product>-Portable-<version>.zip` | (version) | SHA-256 (recorded privately), matching the published value. |
+The reference product was obtained from public package managers and the vendor's public release channel; package identifiers, versions and hashes (verified against the published values) are recorded privately.
 
 The machine-scope installer requires UAC consent, and the consent prompt went unanswered in the unattended session, so the installer never ran (no install log was produced). Analysis therefore used the vendor's documented no-administrator path: the portable build plus `refctl register`, which performs the same per-user thumbnail and classic-menu registration. Three installer-only surfaces (preview pane handler, Details-pane property handler, Windows 11 modern menu) are specified from [DOC] and from the product's own diagnostic output, which enumerates their registration slots.
 
@@ -96,20 +91,16 @@ Portable release layout (file names only):
 ```
 <root>\
   refapp.exe          GUI app (settings, dialogs, tray, Quick preview, screenshot/hotkey daemon)
-  refctl.exe                  CLI + MCP server
-  refshell.dll          Shell DLL (all COM classes)
-  ref_dlghook.dll          Helper DLL (Quick preview inside Open/Save dialogs [DOC]; never seen loaded in tests)
-  magick.exe                Decoder child host (bundled ImageMagick)
-  CORE_RL_*.dll             Decoder child runtime libraries (heif, jpeg-xl, openjpeg, raw, tiff, webp, ...)
-  modules\coders\IM_MOD_RL_*.dll   ~110 per-format coder modules
-  modules\filters\FILTER_RL_analyze_.dll
-  policy.xml                Hardened decoder security policy (Section 11.2)
-  colors.xml configure.xml delegates.xml english.xml locale.xml log.xml mime.xml thresholds.xml type*.xml
-  msvcp140.dll vcruntime140*.dll vcomp140.dll   VC++ runtime (app-local)
-  RefProduct.ini          PORTABLE MODE MARKER + settings store
-  upload-hosts.conf         Created on first use (Section 10.3)
-  RefProduct-update.txt   Created by the update checker (Section 10.4)
-  README.md PORTABLE.txt License.txt NOTICE.txt LICENSE-DejaVu.txt app.ico logo.png banner.png
+  refctl.exe          CLI + MCP server
+  refshell.dll        Shell DLL (all COM classes)
+  (helper DLL)        Quick preview inside Open/Save dialogs [DOC]; never seen loaded in tests
+  (external decoder)  Command-line decoder host with its runtime libraries and per-format modules
+  (decoder policy)    Hardened decoder security policy (Section 11.2)
+  (VC++ runtime)      App-local
+  RefProduct.ini      PORTABLE MODE MARKER + settings store
+  upload-hosts.conf   Created on first use (Section 10.3)
+  (update state)      Created by the update checker (Section 10.4)
+  (documentation, licence and notice files, branding assets)
 ```
 
 A conforming implementation SHALL provide equivalent roles:
@@ -157,7 +148,7 @@ flowchart LR
   TC -->|COM activation via DcomLaunch svchost| SUR["DllHost.exe /Processid:{AB8902B4-...}<br/>(OS thumbnail surrogate)"]
   SUR -->|loads| DLL[Shell DLL: thumbnail class]
   DLL -->|tier 1-3 in-proc, budgeted| DLL
-  DLL -->|tier 4: spawn, stdin/stdout pipes| MAG["magick.exe (decoder child)<br/>-limit memory/map/time"]
+  DLL -->|tier 4: spawn, stdin/stdout pipes| MAG["external decoder (decoder child)<br/>memory/map/time limits"]
   EXP -->|in-proc| CM[Shell DLL: context menu class]
   CM -->|routes heavy verbs| APP[refapp.exe / refctl.exe]
   CLOUD[Cloud sync engine] -->|CLSCTX_LOCAL_SERVER| CSUR["DllHost.exe /Processid:{product AppID}<br/>(COM default surrogate)"]
@@ -168,10 +159,10 @@ Observed facts:
 
 1. A forced extraction caused `svchost.exe` (DcomLaunch) to start `DllHost.exe /Processid:{AB8902B4-09CA-4BB6-B78D-A8F59079A8D5}`, and the Shell DLL was mapped into it within about 80 ms.
 2. The thumbnail class registration carries no `DisableProcessIsolation` value, so Windows' default out-of-process isolation applies.
-3. Every long-tail decode created a `magick.exe` child whose parent was that surrogate `DllHost.exe`, not Explorer.
+3. Every long-tail decode created an external-decoder child process whose parent was that surrogate `DllHost.exe`, not Explorer.
 4. Activating the cloud class with `CLSCTX_LOCAL_SERVER` started `DllHost.exe /Processid:{<product AppID>}` (empty `DllSurrogate`), which mapped the Shell DLL.
 5. The context-menu class loads in-process into the calling process (Explorer, or the probe's PowerShell host in testing).
-6. Heavy menu verbs are routed out of the shell process. The CLI help names `clip-pixels`, `wallpaper-prepare` and `folder-icon` as the back ends for the "routed" menu verbs, so a decode crash on those paths cannot take down Explorer [OBS help text].
+6. Heavy menu verbs are routed out of the shell process. The CLI exposes dedicated back-end verbs for the clipboard, wallpaper and folder-icon menu verbs, so a decode crash on those paths cannot take down Explorer [OBS help text].
 
 Requirements:
 
@@ -191,32 +182,24 @@ Ordered fallback: the first tier that succeeds wins [DOC, consistent with OBS pr
 | 1 | Memory-safe native decoders | in-proc (surrogate) | PNG, JPEG, GIF, BMP, TGA, WebP, QOI, ICO, DDS, EXR, embedded previews (PSD, RAW, Blender, 3MF, Office, ebooks), audio cover art |
 | 2 | OS codecs: WIC and Media Foundation | in-proc (surrogate) | HEIC/HEIF/AVCI (WIC HEIF + HEVC extension), JPEG XR family (WIC), most video (MF) |
 | 3 | Product-owned helper processes | short-lived child | AVIF decode, FLV (VP6/Sorenson), VP9 profile 2/3, 10-bit H.264, MPEG-1/2 [DOC] |
-| 4 | Sandboxed external decoder | `magick.exe` child | XCF, PCX, SGI, DPX, FITS, MIFF, PDB, legacy long tail |
+| 4 | Sandboxed external decoder | external-decoder child | XCF, PCX, SGI, DPX, FITS, MIFF, PDB, legacy long tail |
 | 5 | Headerless fallback | in-proc | Headerless Targa sniff [DOC] |
 
-Observed tier-4 invocation (thumbnail path), byte-exact:
+Observed tier-4 invocation (thumbnail path): the external command-line decoder is launched with limits equivalent to a 512 MiB memory limit, a 1 GiB memory-map limit and a 120 s elapsed-time limit, strips metadata, applies a shrink-only resize to `<N>`x`<N>`, and writes a PNG to stdout.
 
-```
-magick.exe -limit memory 512MiB -limit map 1GiB -limit time 120 - -strip -resize <N>x<N>> PNG:-
-```
-
-- Input arrives on **stdin** and output is a PNG on **stdout** (`PNG:-`). The file path is never passed in the normal case.
+- Input arrives on **stdin** and output is a PNG on **stdout**. The file path is never passed in the normal case.
 - **Seekable retry:** when stdin decoding fails for a container that needs random access (observed with `.cr2`), the file is copied to `%TEMP%\refctl-coder-<pid>-<seq>.<ext>` and the child is re-run with that path [OBS].
-- `<N>` equals the requested thumbnail edge (96 and 256 observed for Explorer views, 256 for the CLI default), and `>` means shrink only.
+- `<N>` equals the requested thumbnail edge (96 and 256 observed for Explorer views, 256 for the CLI default); the resize only ever shrinks.
 - Batch thumbnailing ran up to 5 decoder children concurrently [OBS].
 
-Observed tier-4 invocation (conversion path):
-
-```
-magick.exe -limit memory 512MiB -limit map 1GiB -limit time 600 png:- <FMT>:<dest>.<pid>-<seq>.reftmp
-```
+Observed tier-4 invocation (conversion path): the same decoder with a 512 MiB memory limit, a 1 GiB memory-map limit and a 600 s elapsed-time limit; it reads a PNG from stdin and writes the target raster format to a temporary sibling file named `<dest>.<pid>-<seq>.reftmp`.
 
 - Conversion always feeds the child an already-decoded PNG from the parent, so the child only ever reads a trusted, product-produced PNG [OBS].
 - Output goes to a temporary sibling file that is renamed onto the destination on success (atomic replace) [OBS].
 
 **REQ-DEC-1** The external decoder MUST receive input via an anonymous pipe and return PNG via pipe. File-path input is permitted only as a seekable-retry fallback using a uniquely named temp copy, which MUST be deleted afterwards.
 
-**REQ-DEC-2** Every decoder child MUST be launched with explicit memory, map and elapsed-time limits no higher than those in Section 3.5, and under a policy file that denies dangerous coders (Section 11.2).
+**REQ-DEC-2** Every decoder child MUST be launched with explicit memory, map and elapsed-time limits no higher than those in Section 3.5, and under a restrictive decoder policy that denies dangerous coders (Section 11.2).
 
 **REQ-DEC-3** Writes MUST be atomic (temp sibling, then rename). A failed conversion MUST leave no partial destination file.
 
@@ -224,14 +207,14 @@ magick.exe -limit memory 512MiB -limit map 1GiB -limit time 600 png:- <FMT>:<des
 
 | Budget | Value | Evidence |
 |---|---|---|
-| Decoder child memory | 512 MiB | [OBS] command line, policy ceiling |
-| Decoder child memory-map | 1 GiB | [OBS] command line, policy ceiling |
-| Decoder child elapsed time, thumbnail | 120 s | [OBS] `-limit time 120` |
-| Decoder child elapsed time, conversion | 600 s | [OBS] `-limit time 600` (policy ceiling 600) |
+| Decoder child memory | 512 MiB | [OBS] invocation limit, policy ceiling |
+| Decoder child memory-map | 1 GiB | [OBS] invocation limit, policy ceiling |
+| Decoder child elapsed time, thumbnail | 120 s | [OBS] invocation limit |
+| Decoder child elapsed time, conversion | 600 s | [OBS] invocation limit (policy ceiling 600) |
 | Decoder child pixel area | 512 MP | [OBS] policy ceiling |
 | Decoder child disk spill | 2 GiB | [OBS] policy ceiling |
 | Decoder child image-list length | 256 frames | [OBS] policy ceiling |
-| Decoder child CPU budget | about 20 s, with a parent watchdog that kills the child | [DOC] (policy file annotation) |
+| Decoder child CPU budget | about 20 s, with a parent watchdog that kills the child | [DOC] |
 | In-process vector render budget | about 10 s | [OBS] a heavy-filter SVG failed after 10.4 s (cache path) and 11.6 s (CLI), without crashing the host |
 | Recursive-reference guard | Rejected after about 3 s | [OBS] a 10^9-element nested `<use>` SVG failed in 3.0-3.7 s, then fell through to tier 4, which refuses SVG |
 | Repeat-failure fast path | about 40 ms | [OBS] a second request for a just-failed file at a new size returned in 40 ms |
@@ -275,9 +258,9 @@ magick.exe -limit memory 512MiB -limit map 1GiB -limit time 600 png:- <FMT>:<des
 - **REQ-REG-1** Thumbnail handlers MUST be registered at both `.<ext>\shellex` and `SystemFileAssociations\.<ext>\shellex`, so the handler is found regardless of which ProgID owns the extension.
 - **REQ-REG-2** Registration MUST NOT set or change an extension's default value (ProgID) or any `OpenWithProgids` entry.
 - **REQ-REG-3** Only formats enabled in the File types setting are registered; toggling a type MUST add or remove exactly its two keys and then broadcast `SHCNE_ASSOCCHANGED`.
-- **REQ-REG-4** Unregistration MUST remove every key it created, including the `.<ext>` and `SystemFileAssociations` parent keys it created, and MUST leave pre-existing keys intact. Observed deviation in the reference: `register --off` removed 2,054 of the 2,055 keys that `register` had added (all class, AppID, handler and created `.<ext>` keys). The one left behind was the empty `HKCU\Software\Classes\SystemFileAssociations` parent, which did not exist before registration. The new implementation MUST NOT repeat this (see Section 13).
+- **REQ-REG-4** Unregistration MUST remove every key it created, including the `.<ext>` and `SystemFileAssociations` parent keys it created, and MUST leave pre-existing keys intact. Observed deviation in the reference: `register --off` removed 2,054 of the 2,055 keys that `register` had added (all class, AppID, handler and created `.<ext>` keys). The one left behind was the empty `HKCU\Software\Classes\SystemFileAssociations` parent, which did not exist before registration. The new implementation MUST NOT repeat this.
 - **REQ-REG-5** The per-user path MUST NOT require elevation and MUST NOT touch HKLM.
-- **REQ-REG-6** A portable copy MUST refuse per-user registration when it detects it is not portable (observed message: per-user registration from an installed copy would "survive uninstall and block thumbnails"), and MUST offer an `--off` path [OBS].
+- **REQ-REG-6** A portable copy MUST refuse per-user registration when it detects it is not portable (observed: the CLI refuses with a message explaining that a per-user registration from an installed copy would survive uninstall and block thumbnails), and MUST offer an `--off` path [OBS].
 - **REQ-REG-7** Precedence caveat: a ProgID-level `ShellEx\{E357FCCD...}` or `ShellEx\{BB2E617C...}` (IExtractImage) handler on the extension's ProgID wins over extension-level registration. The diagnostic tool MUST detect and report such foreign handlers [OBS: doctor reported `.ico -> icofile` handlers].
 
 ### 4.2 Machine-wide registration (installer path) [DOC]
@@ -288,16 +271,15 @@ The installer registers the Shell DLL via `regsvr32` (`DllRegisterServer`) under
 - **Property handler:** `...\PropertySystem\PropertyHandlers\.<ext>`.
 - **Approved Shell Extensions** entries for all five classes. The diagnostic tool checks for these [OBS doctor output].
 - **Windows 11 modern menu:** a sparse MSIX package signed with a self-signed certificate that the installer trusts.
-- **Business/personal choice:** made at install time; it cannot be changed later in Settings.
 
-Since 3.7.1 the installer no longer writes to the Run key, creates scheduled tasks via `schtasks.exe`, or restarts Explorer.
+The installer MUST NOT write to the Run key, create scheduled tasks or restart Explorer.
 
 - **REQ-REG-8** The installer MUST be per-machine and elevated. It MUST register all five handler classes and add them to `Shell Extensions\Approved`. Its uninstaller MUST remove all of it.
 - **REQ-REG-9** The new implementation's modern-menu package MUST use a freshly issued signing identity and fresh GUIDs.
 
 ### 4.3 Cloud-folder thumbnails [OBS + DOC]
 
-A separate class (Section 3.2) is registered for cloud sync roots (OneDrive, Synology Drive and similar), where Windows asks only the sync root's registered thumbnail provider. It is OFF by default. Doctor output: "Thumbnails in cloud folders: off (Settings -> General turns it on)", with per-provider link state (for example, OneDrive "not linked"). When enabled, the product links its cloud class to the sync root [INF]. It MUST honour REQ-ISO-5.
+A separate class (Section 3.2) is registered for cloud sync roots (OneDrive and similar), where Windows asks only the sync root's registered thumbnail provider. It is OFF by default. The diagnostic tool reports that state, names the setting that turns it on, and reports per-provider link state (for example, OneDrive "not linked"). When enabled, the product links its cloud class to the sync root [INF]. It MUST honour REQ-ISO-5.
 
 ---
 
@@ -774,41 +756,17 @@ Thumbnail source semantics:
 
 Additional item, type-dependent: "Save video frame" (video inputs; visibility toggle observed, label not captured).
 
-### 6.3 Menu item visibility keys [OBS]
+### 6.3 Menu item visibility [OBS]
 
-All 23 items default to visible (`=1`). Settings is always present.
+All 23 items default to visible, and each has its own persisted visibility flag. Settings is always present. The reference product's persisted key names are intentionally not reproduced; an implementation chooses its own (Section 13).
 
-| Item | Observed persisted key | Default |
-|---|---|---|
-| Convert into > | `menu_convert_into` | 1 |
-| Convert… (dialog) | `menu_convert_dialog` | 1 |
-| Resize > | `menu_resize` | 1 |
-| Rotate / flip > | `menu_rotate` | 1 |
-| Shrink for email > | `menu_email` | 1 |
-| Compress to size > | `menu_compress` | 1 |
-| Strip metadata | `menu_strip_meta` | 1 |
-| Copy to clipboard | `menu_copy` | 1 |
-| Copy text (OCR) | `menu_copy_text` | 1 |
-| Copy as data URI | `menu_copy_data_uri` | 1 |
-| Upload (copy link) | `menu_upload` | 1 |
-| Combine into PDF | `menu_combine_pdf` | 1 |
-| Combine into searchable PDF | `menu_combine_pdf_searchable` | 1 |
-| Combine into CBZ | `menu_combine_cbz` | 1 |
-| Rename > | `menu_rename` | 1 |
-| Files to folder | `menu_files_to_folder` | 1 |
-| Sort into folders > | `menu_sort` | 1 |
-| Image info | `menu_image_info` | 1 |
-| Pick color | `menu_pick_color` | 1 |
-| Set as wallpaper > | `menu_wallpaper` | 1 |
-| Set as lock screen | `menu_lock_screen` | 1 |
-| Set as folder icon | `menu_set_folder_icon` | 1 |
-| Save video frame | `menu_save_video_frame` | 1 |
+Items: Convert into >, Convert… (dialog), Resize >, Rotate / flip >, Shrink for email >, Compress to size >, Strip metadata, Copy to clipboard, Copy text (OCR), Copy as data URI, Upload (copy link), Combine into PDF, Combine into searchable PDF, Combine into CBZ, Rename >, Files to folder, Sort into folders >, Image info, Pick color, Set as wallpaper >, Set as lock screen, Set as folder icon, Save video frame.
 
 ### 6.4 Verb behaviours [OBS via CLI equivalents]
 
 | Verb | Output naming / behaviour |
 |---|---|
-| Convert | `<stem>.<newext>` alongside the source. Native encoders: PNG, JPEG, WebP (lossless default; lossy when a WebP quality is given), BMP, TIFF, ICO, QOI, TGA. Decoder-child encoders: AVIF, JXL, PSD, PCX. Formats with no writer fail with `no writer for .<ext>` (observed: HEIC, XCF). The dialog offers about 29 targets [DOC], resize, quality, output folder and an optional watermark [DOC]. |
+| Convert | `<stem>.<newext>` alongside the source. Native encoders: PNG, JPEG, WebP (lossless default; lossy when a WebP quality is given), BMP, TIFF, ICO, QOI, TGA. Decoder-child encoders: AVIF, JXL, PSD, PCX. Formats with no writer fail with an error naming the extension (observed: HEIC, XCF). The dialog offers about 29 targets [DOC], resize, quality, output folder and an optional watermark [DOC]. |
 | Rotate / flip | Lossless for JPEG [DOC]. Writes `<stem> (edited).<ext>`; the original is preserved [OBS]. |
 | Compress to size | JPEG quality-and-scale search to a byte target. Writes `<stem> (compressed).jpg`. If the target cannot be met, it fails and writes nothing [OBS help]. |
 | Shrink for email | Long-edge resize to 640 / 1024 / 1600 px. |
@@ -831,6 +789,8 @@ All 23 items default to visible (`=1`). Settings is always present.
 
 ## 7. Command-Line Interface [OBS]
 
+> **Scope of this section.** This section documents the command-line surface of the SPECIFIED product, as observed on the reference product, and is retained only as observed input to the specification. It is NOT the reference for the implemented tool. The implemented CLI is `twctl`: run `twctl --help` (and `twctl <command> --help`) for its actual commands. Some commands below are not implemented in `twctl`, and `twctl` has commands not listed here.
+
 Executable: `refctl.exe`. Exit status: `0` on success, `1` on any failure, including a usage error. Errors go to stderr as `refctl: <message>`. Single-file commands accept exactly their declared arguments; an extra filename is an error and nothing is written. An `<out>` equal to any input is refused.
 
 | Command | Synopsis |
@@ -842,8 +802,8 @@ Executable: `refctl.exe`. Exit status: `0` on success, `1` on any failure, inclu
 | `rotate` | `<in> --by right\|left\|180\|fliph\|flipv` |
 | `compress` | `<in> --max-size 1MB\|500KB\|N` |
 | `strip` | `<in>` |
-| `clip-pixels` | `<in>`; binary stdout for the clipboard verb. |
-| `wallpaper-prepare` | `<in> <out-dir>` |
+| (clipboard back end) | `<in>`; binary stdout for the clipboard verb. The verb name is implementation-defined. |
+| (wallpaper back end) | `<in> <out-dir>`. The verb name is implementation-defined. |
 | `folder-icon` | `<in>` |
 | `ocr` | `<in>`; text to stdout. |
 | `pdf` | `<out.pdf> <in...> [--strict] [--json] [--searchable]` |
@@ -855,7 +815,7 @@ Executable: `refctl.exe`. Exit status: `0` on success, `1` on any failure, inclu
 | `upload` | `<file> [--copy]`; delegates the network work to the GUI app (the CLI contains no network code). Does not ask for confirmation. |
 | `upload-hosts` | `[--open]` |
 | `upload-history` | `[--json]` |
-| `devmode` | `[on\|off\|status]`; developer flag stored in the HKCU product key, value `DevMachine`. |
+| (developer flag) | A hidden developer-mode toggle with `on`, `off` and `status` arguments; not required. |
 | `--mcp` | MCP server over stdio JSON-RPC. Exposes the toolbox plus `view` (decode any format to a PNG content block) and `compress` [DOC]. |
 | `--version`, `-V` | Prints `refctl <ver>`. |
 
@@ -868,7 +828,7 @@ Executable: `refctl.exe`. Exit status: `0` on success, `1` on any failure, inclu
 5. **ProgID-level thumbnail handlers:** foreign handlers that take precedence.
 6. **Cloud sync folders:** setting state and per-provider link state.
 7. **Settings summary:** thumbnails enabled, max file size, max thumbnail size, embedded previews preferred.
-8. **Licence.**
+8. **Licensing state** (if the implementation has any).
 9. **Quick preview state.**
 10. **Decode engine:** a 64x64 self-test, and Media Foundation presence.
 11. **Format capability:** counts by source; OS codec probes for MF, WIC JPEG XR, and WIC HEIF plus the HEVC extension.
@@ -884,137 +844,130 @@ Executable: `refctl.exe`. Exit status: `0` on success, `1` on any failure, inclu
 | Mode | Detection | Store |
 |---|---|---|
 | Portable | A settings `.ini` exists next to the GUI exe. Deleting it switches the copy to installed behaviour (`register` then refuses). | `<exe dir>\RefProduct.ini`, sections `[Settings]` and `[MenuItems]` |
-| Installed | No `.ini` present | `HKCU\Software\RefProduct` (values with the same names; README states this location, and `devmode` reads `DevMachine` there) |
+| Installed | No `.ini` present | `HKCU\Software\RefProduct` (values with the same names) |
 
 Values that equal their default are not always written (Max file size, Max thumbnail size, video frame %, build-here and save-folder were absent after Save). Readers MUST apply defaults for missing values.
 
-### 8.2 Settings (UI page, label, observed key, type, default)
+### 8.2 Settings (UI page, label, type, default)
 
-Defaults below are the values persisted after first-run plus Save with no edits [OBS].
+Defaults below are the values persisted after first-run plus Save with no edits [OBS]. The reference product's persisted key names are intentionally not reproduced; an implementation chooses its own (Section 13).
 
 **General**
 
-| Label | Key | Type | Default |
-|---|---|---|---|
-| Enable thumbnails | `EnableThumbs` | bool | 1 |
-| Prefer embedded (EXIF) thumbnails | `UseEmbedded` | bool | 1 |
-| Max file size (MB) | (not serialized at default) | int | 4096 |
-| Max thumbnail size (px) | (not serialized at default) | int | 1024 |
-| JPEG quality (0-100) | `JPEG` | int | 90 |
-| PNG compression (0-9) | `PNG` | int | 9 |
-| Language | `Lang` | string, empty = system | "" (36 UI languages + System default) |
-| Thumbnails in cloud folders | (not observed; doctor reports it) | bool | 0 |
-| Turn off Explorer thumbnails | action button (portable unregister) | n/a | n/a |
+| Label | Type | Default |
+|---|---|---|
+| Enable thumbnails | bool | 1 |
+| Prefer embedded (EXIF) thumbnails | bool | 1 |
+| Max file size (MB) | int | 4096 |
+| Max thumbnail size (px) | int | 1024 |
+| JPEG quality (0-100) | int | 90 |
+| PNG compression (0-9) | int | 9 |
+| Language | string, empty = system | "" (a list of translated UI languages plus System default) |
+| Thumbnails in cloud folders | bool | 0 |
+| Turn off Explorer thumbnails | action button (portable unregister) | n/a |
 
 **Appearance**
 
-| Label | Key | Type | Default |
-|---|---|---|---|
-| Use a coloured icon badge | `FormatBadgeStyle` | bool | 1 |
-| Checkerboard behind transparent thumbnails | `ThumbChecker` | bool | 0 (real alpha) |
-| Use a video's cover art instead of a frame | `VideoCoverArt` | bool | 0 |
-| Video frame at (% in) | (not serialized at default) | int 0-100 | 30 |
-| In the corner of a thumbnail | `CornerMark` | enum 0 = Windows' file-type icon, 1 = format mark, 2 = nothing | 0 |
-| Format mark size | `BadgeSize` | enum Small / Medium / Large | 0 |
-| Theme | (not serialized at default) | enum Follow Windows / Light / Dark | Follow Windows |
+| Label | Type | Default |
+|---|---|---|
+| Use a coloured icon badge | bool | 1 |
+| Checkerboard behind transparent thumbnails | bool | 0 (real alpha) |
+| Use a video's cover art instead of a frame | bool | 0 |
+| Video frame at (% in) | int 0-100 | 30 |
+| In the corner of a thumbnail | enum 0 = Windows' file-type icon, 1 = format mark, 2 = nothing | 0 |
+| Format mark size | enum Small / Medium / Large | 0 |
+| Theme | enum Follow Windows / Light / Dark | Follow Windows |
 
 **File types:** a list view of all 363 formats with Select all, Clear all, Defaults and a filter box. All are enabled by default [OBS doctor: 363 of 363]. Persisting this list drives REQ-REG-3.
 
 **Ebook/comic**
 
-| Label | Key | Default |
-|---|---|---|
-| Sort archive pages naturally | `ContainerSort` | 1 |
-| Prefer a "cover" image | `ContainerPreferCover` | 1 |
-| Skip scanlation filler (credits/logos) | `ContainerSkipScanlation` | 1 |
-| Contact-sheet thumbnails for ZIP/RAR/7z | `ArchiveCollage` | 1 |
-| Add a margin to combined PDFs | `PdfLayout` | 0 |
+| Label | Default |
+|---|---|
+| Sort archive pages naturally | 1 |
+| Prefer a "cover" image | 1 |
+| Skip scanlation filler (credits/logos) | 1 |
+| Contact-sheet thumbnails for ZIP/RAR/7z | 1 |
+| Add a margin to combined PDFs | 0 |
 
 **Right-click menu**
 
-| Label | Key | Default |
-|---|---|---|
-| Enable the right-click menu | `EnableMenu` | 1 |
-| Show menu on all file types | `MenuAllFileTypes` | 0 |
-| Show quick actions in the menu | `MenuQuickVerbs` | 0 |
-| Checkerboard behind transparent previews | `PreviewChecker` | 1 |
-| Add "Build thumbnails here" to the folder menu | (not serialized at default) | 1 |
-| Keep original date on saved files | `PreserveFileDate` | 0 |
-| Keep EXIF and other metadata when converting | `KeepMetadata` | 1 |
-| Menu preview: Off / In submenu / In right-click menu | `MenuPreview` | 1 (In submenu) |
-| Item order (Edit menu items… dialog) | `MenuOrder` | "" (built-in order) |
-| Per-item visibility | `[MenuItems] menu_*` | all 1 (Section 6.3) |
+| Label | Default |
+|---|---|
+| Enable the right-click menu | 1 |
+| Show menu on all file types | 0 |
+| Show quick actions in the menu | 0 |
+| Checkerboard behind transparent previews | 1 |
+| Add "Build thumbnails here" to the folder menu | 1 |
+| Keep original date on saved files | 0 |
+| Keep EXIF and other metadata when converting | 1 |
+| Menu preview: Off / In submenu / In right-click menu | 1 (In submenu) |
+| Item order (Edit menu items… dialog) | "" (built-in order) |
+| Per-item visibility | all 1 (Section 6.3) |
 
 **Screenshots**
 
-| Label | Key | Default / domain |
-|---|---|---|
-| Enable screenshot hotkey | `ScreenshotEnabled` | 0 |
-| Capture hotkey | `ScreenshotHotkey` | 556 = `0x022C` = (HOTKEYF_CONTROL << 8) \| VK_SNAPSHOT, i.e. Ctrl+PrtScn |
-| Enable quick-save screenshot / Quick-save hotkey | `ScreenshotQuickHotkey` | 0 (disabled; UI default selection Ctrl+Shift+S) |
-| Start with (tool) | `ShotDefaultTool` | 0 = Arrow; domain: Arrow, Rectangle, Ellipse, Line, Pen, Text, Number, Highlighter, Pixelate, Invert, Blur |
-| Delay before capture | `ShotDelaySec` | 0; domain: Off, 1, 2, 3, 5 s |
-| Blur strength (px) | `ShotBlurStrength` | 12 |
-| Hotkey service state | `DaemonStopped` | 0 ("Restart hotkey service" button) |
+| Label | Default / domain |
+|---|---|
+| Enable screenshot hotkey | 0 |
+| Capture hotkey | Ctrl+PrtScn, stored as a Win32 hotkey word (`0x022C` = (HOTKEYF_CONTROL << 8) \| VK_SNAPSHOT) |
+| Enable quick-save screenshot / Quick-save hotkey | 0 (disabled; UI default selection Ctrl+Shift+S) |
+| Start with (tool) | Arrow; domain: Arrow, Rectangle, Ellipse, Line, Pen, Text, Number, Highlighter, Pixelate, Invert, Blur |
+| Delay before capture | 0; domain: Off, 1, 2, 3, 5 s |
+| Blur strength (px) | 12 |
+| Hotkey service state | 0 (a button restarts the hotkey service) |
 
-Hotkey domain, shared with Quick action: (none), Ctrl+PrtScn, PrtScn, Ctrl+Shift+S, Ctrl+Shift+A, Ctrl+Shift+4, Ctrl+Alt+S, F9, Ctrl+F12. The first-run window offers "Use PrtScn on its own", which suppresses the Snipping Tool's PrtScn binding.
+Hotkey domain, shared with Quick action: (none), Ctrl+PrtScn, PrtScn, Ctrl+Shift+S, Ctrl+Shift+A, Ctrl+Shift+4, Ctrl+Alt+S, F9, Ctrl+F12. The first-run window offers an option to claim the bare PrtScn key, which suppresses the Snipping Tool's PrtScn binding.
 
 **Screenshot files**
 
-| Label | Key | Default |
-|---|---|---|
-| Save to a set folder on Ctrl+S | `ShotUseSaveDir` | 0 |
-| Folder | (not serialized at default) | user Desktop |
-| Screenshot file name | `ShotFileName` | `Screenshot {yyyy}-{MM}-{dd} {HH}.{mm}.{ss}` |
-| Save screenshots as | `ShotSaveFormat` | 0 = PNG; domain: PNG, JPEG, WebP |
-| Screenshot JPEG quality | `ShotSaveQuality` | 90 |
+| Label | Default |
+|---|---|
+| Save to a set folder on Ctrl+S | 0 |
+| Folder | user Desktop |
+| Screenshot file name | `Screenshot {yyyy}-{MM}-{dd} {HH}.{mm}.{ss}` |
+| Save screenshots as | PNG; domain: PNG, JPEG, WebP |
+| Screenshot JPEG quality | 90 |
 
 **Quick action** (one global custom hotkey)
 
-| Label | Key | Default |
-|---|---|---|
-| Enable custom action | (checkbox) | 0 |
-| Custom action | `CustomAction` | Pick a colour (eyedropper). Domain: Pick a colour (eyedropper); Take a screenshot; Convert image(s)…; Rotate image(s) right 90°; Move file(s) into a new folder; Strip image metadata; Open Settings; Upload image(s) (copy link); Copy text (OCR); Copy text on screen (OCR); Quick preview the selected file |
-| Its hotkey | `CustomActionHotkey` | 0 = none |
+| Label | Default |
+|---|---|
+| Enable custom action | 0 |
+| Custom action | Pick a colour (eyedropper). Domain: Pick a colour (eyedropper); Take a screenshot; Convert image(s)…; Rotate image(s) right 90°; Move file(s) into a new folder; Strip image metadata; Open Settings; Upload image(s) (copy link); Copy text (OCR); Copy text on screen (OCR); Quick preview the selected file |
+| Its hotkey | none |
 
 **Advanced**
 
-| Label | Key | Default |
-|---|---|---|
-| Hide tray icon | `ScreenshotHideTray` | 0 |
-| Double-click tray icon | `TrayDoubleClick` | 0 = Take a screenshot; domain: Take a screenshot / Open Settings / Do nothing |
-| Verbose logging | `Debug` | 0 |
-| Automatically check for updates | `UpdateAutoCheck` | 1 |
+| Label | Default |
+|---|---|
+| Hide tray icon | 0 |
+| Double-click tray icon | Take a screenshot; domain: Take a screenshot / Open Settings / Do nothing |
+| Verbose logging | 0 |
+| Automatically check for updates | 1 |
 
 Action buttons: Open diagnostics log; Rebuild thumbnail cache; Repair file associations (re-registers every enabled format, then clears the thumbnail cache); Check for problems (runs the doctor); Check for updates.
 
 **Quick preview**
 
-| Label | Key | Default |
-|---|---|---|
-| Enable Quick preview (press Space) | `PreviewEnabled` | 1 (set by first-run defaults) |
-| Hold Space to peek (closes on release) | `PreviewHoldPeek` | 1 |
-| Close when the preview loses focus | `PreviewCloseOnFocusLoss` | 0 |
-| Open in front | `PreviewOpenFront` | 1 |
-| Allow uploading from the preview | `PreviewUpload` | 0 |
-| Never Quick-preview these extensions | `PreviewBlockedExts` | "" |
-| Preview text and code files | `PreviewText` | 1 |
-| Preview Markdown files | `PreviewMarkdown` | 1 |
-| Render local HTML files (WebView2, scripts off, no network) | `PreviewHtml` | 1 |
-| Live-load .url shortcuts | `PreviewUrlLive` | 0 |
-
-**Data & Backup:** Settings Sync (sign-in; the credential is held in the Windows per-user credential store, not the ini [DOC]), Reset Settings, Import Settings, Export Settings.
-
-**Licence:** state text, key entry plus Redeem, Check now, Buy, Move licence. Personal use is free. A business copy gets a 7-day evaluation plus 3 days of grace, then thumbnails, previews and the menu stop until a key is entered; the online check tolerates about a week offline [DOC]. A conforming implementation MAY omit licensing.
-
-**Internal bookkeeping (not user-facing)** [OBS]:
-
-| Key | Meaning |
+| Label | Default |
 |---|---|
-| `FirstRunShown` | bool |
-| `InstallReported` | bool; an install report was sent [INF] |
-| `NavDotsSeen` | bitmask of visited settings pages; 4095 = 12 bits = 12 pages |
-| `SignInNudge` | JSON `{ask_count, cadence, consecutive_declines, converted[], installed_at(ms epoch), last_ask_at, pending_ask, session_count, stopped, v}` |
+| Enable Quick preview (press Space) | 1 (set by first-run defaults) |
+| Hold Space to peek (closes on release) | 1 |
+| Close when the preview loses focus | 0 |
+| Open in front | 1 |
+| Allow uploading from the preview | 0 |
+| Never Quick-preview these extensions | "" |
+| Preview text and code files | 1 |
+| Preview Markdown files | 1 |
+| Render local HTML files (WebView2, scripts off, no network) | 1 |
+| Live-load .url shortcuts | 0 |
+
+**Data & Backup:** Reset Settings, Import Settings, Export Settings.
+
+**Licensing:** the reference product has a licensing page. A conforming implementation MAY omit licensing.
+
+**Internal bookkeeping (not user-facing)** [OBS]: the product persists a few non-user-facing values (a first-run-shown flag, a bitmask of visited settings pages). A conforming implementation needs none of them.
 
 ### 8.3 First-run behaviour [OBS]
 
@@ -1023,9 +976,9 @@ The first GUI launch shows a Welcome window with:
 - Show thumbnails in Explorer
 - Turn on Quick preview
 - Turn on the screenshot hotkey
-- Use PrtScn on its own
+- Claim the bare PrtScn key
 
-Dismissing it persisted `PreviewEnabled=1` and `ScreenshotEnabled=0`, then opened Settings. A background `refapp.exe --screenshot-daemon` process (the hotkey and Space-key service) was started as a child of the GUI. The portable build does not add itself to logon startup [DOC].
+Dismissing it persisted Quick preview enabled and the screenshot hotkey disabled, then opened Settings. A background daemon process of the GUI executable (the hotkey and Space-key service) was started as a child of the GUI. The portable build does not add itself to logon startup [DOC].
 
 ---
 
@@ -1049,7 +1002,7 @@ Dismissing it persisted `PreviewEnabled=1` and `ScreenshotEnabled=0`, then opene
 | Path | Purpose | Lifetime |
 |---|---|---|
 | `%LOCALAPPDATA%\RefProduct.log` | Shared diagnostics log | Persistent |
-| `%TEMP%\RefProduct-magick\` | Decoder-child temp area | Persistent dir; contents transient |
+| `%TEMP%\RefProduct-decoder\` | Decoder-child temp area | Persistent dir; contents transient |
 | `%TEMP%\refctl-coder-<pid>-<seq>.<ext>` | Seekable-retry copy | Transient |
 | `<dest>.<pid>-<seq>.reftmp` | Atomic-write staging file | Transient |
 
@@ -1068,16 +1021,14 @@ Dismissing it persisted `PreviewEnabled=1` and `ScreenshotEnabled=0`, then opene
 - Only `https://` URLs are allowed.
 - `text` means the response body is the link; `json` means the first `https` link found in the body is used.
 - Hosts are tried top to bottom.
-- `#` starts a comment. While every line is commented out, built-in defaults apply. The shipped defaults list four keyless public hosts, one of them with a 72-hour expiry.
+- `#` starts a comment. While every line is commented out, built-in defaults apply. The shipped defaults list a small set of keyless public hosts, one of them with a limited-lifetime link.
 
 ### 10.4 Network activity
 
 | Trigger | Observation |
 |---|---|
-| GUI start with `UpdateAutoCheck=1` | Outbound TLS (port 443) connection to a CDN-fronted address within seconds of launch [OBS]; results recorded in `RefProduct-update.txt` |
-| First run | `InstallReported=1` persisted, consistent with a one-time install ping [INF] |
+| GUI start with the automatic update check on | Outbound TLS (port 443) connection to a CDN-fronted address within seconds of launch [OBS]; results recorded in the update-state file |
 | Upload verbs | HTTPS POST to configured hosts; the CLI delegates to the GUI binary |
-| Settings sync, licence check | HTTPS to the vendor (opt-in / business only) [DOC] |
 | Thumbnailing, menu, CLI decode | No network activity observed |
 
 - **REQ-NET-1** The shell DLL and the decoder children MUST NOT perform network I/O.
@@ -1103,17 +1054,17 @@ No Explorer, surrogate, or `WerFault.exe` crash was observed in any case.
 ### 11.2 Decoder-child policy (MUST-level equivalents)
 
 1. Resource ceilings as in Section 3.5.
-2. Deny all PostScript, PDF, XPS and AI coders; deny SVG/MSVG/RSVG in the child (vector goes to the in-proc memory-safe renderer); deny MSL, MVG and script coders; deny URL, HTTP(S), FTP, FILE, EPHEMERAL, INLINE, DATA, CLIPBOARD and SCREENSHOT pseudo-coders; deny text and font coders.
+2. Deny document, page-description and script-capable coders (PostScript, PDF, XPS and AI, MSL, MVG and similar); deny SVG-family coders in the child (vector goes to the in-proc memory-safe renderer); deny pseudo-coders that read URLs, files by indirection, inline data, the clipboard or the screen; deny text and font coders.
 3. Deny **all** delegates (no Ghostscript, ffmpeg or other external programs).
 4. Deny `@file` indirection. Deny loading of network modules.
-5. Pass only `-strip` and a shrink-only resize. Output only PNG to stdout (thumbnail path), or exactly one explicitly named raster coder (convert path).
+5. Pass only a metadata-strip option and a shrink-only resize. Output only PNG to stdout (thumbnail path), or exactly one explicitly named raster coder (convert path).
 
 ### 11.3 Other requirements
 
-- **REQ-SEC-1** Archive and container parsers MUST cap per-entry decompressed size and total expansion. (Cf. reference release notes: a crafted zstd entry previously requested gigabytes.)
+- **REQ-SEC-1** Archive and container parsers MUST cap per-entry decompressed size and total expansion. (The reference product's public release notes record a past defect where a crafted compressed archive entry requested gigabytes.)
 - **REQ-SEC-2** The HTML preview MUST run with scripts disabled and no network. `.url` live-load MUST default OFF.
 - **REQ-SEC-3** Upload MUST require explicit confirmation from the menu (Cancel as default). The CLI MAY skip confirmation [DOC].
-- **REQ-SEC-4** All shipped binaries SHOULD be Authenticode-signed. Per-user registration MUST store an absolute DLL path, and unregistration MUST be run before the portable folder is moved [OBS PORTABLE.txt].
+- **REQ-SEC-4** All shipped binaries SHOULD be Authenticode-signed. Per-user registration MUST store an absolute DLL path, and unregistration MUST be run before the portable folder is moved [DOC].
 
 ---
 
@@ -1142,28 +1093,11 @@ No Explorer, surrogate, or `WerFault.exe` crash was observed in any case.
 The author attests that while producing this document:
 
 1. No disassembler, decompiler or debugger was attached to, or run over, any reference-product binary. No `strings` dump, PE-resource extraction or static analysis was performed on any `.exe` or `.dll`.
-2. The reference product's online source repository was neither cloned nor read. The only vendor text consulted was user documentation shipped inside the release archive (`README.md`, `PORTABLE.txt`, `policy.xml` attribute values), and package-manager metadata and release notes. Each such fact is tagged [DOC].
+2. The reference product's source code, wherever published, was neither cloned nor read. The only vendor text consulted was user documentation shipped inside the release archive (its README and portable-use notes), decoder policy-file annotations, and public package-manager metadata. Each such fact is tagged [DOC].
 3. All [OBS] facts come from OS-facing observation: registry exports and diffs, COM activation and `QueryInterface` results, Windows thumbnail-cache return codes, process creation and command lines, module maps, UI Automation and Win32 control queries of the running settings window, CLI `--help` and outputs, and files the product created.
-4. This document contains no reference-product source code, no internal function or type names, no decompiled control flow, and none of the reference product's CLSIDs, AppIDs, installer product code or signing identifiers. GUIDs printed here are Microsoft-defined (`IThumbnailProvider` handler key, thumbnail-surrogate AppID, interface IIDs). Names that do appear (executable and file names, CLI verbs, persisted settings keys, menu labels) are externally visible on-disk or on-screen artefacts, recorded for interoperability and conformance testing only.
+4. This document contains no reference-product source code, no internal function or type names, no decompiled control flow, and none of the reference product's CLSIDs, AppIDs, installer product code or signing identifiers. GUIDs printed here are Microsoft-defined (`IThumbnailProvider` handler key, thumbnail-surrogate AppID, interface IIDs). Names that do appear (executable and file names, CLI verbs, menu labels) are externally visible on-disk or on-screen artefacts, recorded for interoperability and conformance testing only.
 5. Normative requirements describe behaviour. A new implementation MUST choose its own GUIDs, signing identity, package identity, file names and storage keys.
 
-### 13.2 Teardown record
+### 13.2 Teardown attestation
 
-| Step | Action | Result |
-|---|---|---|
-| 1 | Stopped the GUI app and its `--screenshot-daemon` child | Both terminated; no `refapp.exe`, `refctl.exe` or `magick.exe` processes remain |
-| 2 | Ran `refctl register --off` (vendor per-user unregistration) | `Explorer thumbnails turned OFF for this user`; `--status` reports OFF |
-| 3 | Deleted `%LOCALAPPDATA%\RefProduct.log`, `%TEMP%\RefProduct-magick\` and any `%TEMP%\refctl*` files | Gone |
-| 4 | Removed residue the product's unregistration did not clean: the empty `HKCU\Software\Classes\SystemFileAssociations` parent; the OS-written `Shell Extensions\Cached` value for the product's thumbnail class; two OS-written `MuiCache` friendly-name values for the GUI exe | Removed; re-query returns 0 hits |
-| 5 | Full `HKCU\Software` and `HKLM\SOFTWARE\Classes` re-export, diffed against the pre-install baseline | HKCU: 0 keys removed; 14 keys added, all unrelated OS session or app-model bookkeeping; 0 product keys. HKLM\SOFTWARE\Classes: 0 added, 0 removed, 0 text matches for the product name. Services, scheduled tasks and HKLM vendor roots unchanged throughout. |
-| 6 | Deleted the working directory: winget-downloaded installer (never executed), portable archive and extracted binaries, registry snapshots, probe scripts, sample and output files | Only `FUNCTIONAL_SPEC.md` remains in `C:\CleanRoom\01_Spec_Room` (verified by directory listing) |
-
-The machine-scope installer was never executed: its UAC prompt was never approved and no install log was produced. Nothing was ever written under `%ProgramFiles%` or HKLM, so there was no machine-wide uninstall to perform. Chocolatey was not used for installation (its `RefProduct` package is stale), so there is no Chocolatey package to uninstall.
-
-### 13.3 Residual items outside product control
-
-| Item | Status |
-|---|---|
-| Explorer's thumbnail cache (`%LOCALAPPDATA%\Microsoft\Windows\Explorer\thumbcache_*.db`) | May hold orphaned entries for the deleted sample files. These are OS data; they contain no product code and are reclaimed by Disk Cleanup ("Thumbnails"). |
-| `C:\Windows\Prefetch\*.pf` for the executables that ran | OS-generated launch traces; administrator-only, aged out automatically by Windows. |
-| A UAC consent prompt left over from the abandoned elevated install | Should be answered **No**. Its target script has been deleted, so approving it would also be inert. |
+All observation ran on a disposable-state host. When it ended, the author removed every product artefact (files, registry keys, log and temporary files, and the product's thumbnail registrations), and a full registry re-export diffed against the pre-observation baseline showed no product keys and no unrelated changes beyond OS session and app-model bookkeeping. The machine-scope installer was never executed, so there was no machine-wide state to remove. All working files (installer, extracted binaries, snapshots, probe scripts, samples) were deleted from the authoring machine; only this document was retained. Operating-system data outside product control (the Explorer thumbnail cache, Prefetch traces) may still hold orphaned entries; it contains no product code and ages out automatically.
