@@ -195,4 +195,18 @@ mod tests {
             Err(DecodeError::Unsupported)
         );
     }
+
+    /// DB-03: a table page whose cells all point at one record is rejected, not re-parsed
+    /// once per cell.
+    #[test]
+    fn aliased_cells_are_too_large() {
+        let rec = record(&[Col::Blob(&[7u8; 790])]);
+        let (cell, _) = leaf_cell(1, &rec, 0);
+        let db = database(&[("CanvasPreview", 2)], vec![aliased_leaf_page(&cell, 100)]);
+        let mut f = MAGIC.to_vec();
+        f.extend_from_slice(&[0; 8]);
+        f.extend_from_slice(&24u64.to_be_bytes());
+        f.extend_from_slice(&chunk(SQLITE_TAG, &db));
+        assert_eq!(decode(&f), Err(DecodeError::TooLarge));
+    }
 }
