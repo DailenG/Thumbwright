@@ -475,7 +475,7 @@ fn worker_bench(exe: &Path, iters: usize) {
             let _ = black_box(
                 decoder
                     .run(&data, ext, edge)
-                    .map(|img| to_thumbnail(&img, edge)),
+                    .and_then(|img| to_thumbnail(img, edge)),
             );
         }));
         row_ms("same decoder in this process", &p);
@@ -865,7 +865,9 @@ fn cand_current(img: &DynamicImage, edge: u32) -> (u32, u32, Vec<u8>) {
 
 /// `to_thumbnail` as it ships now.
 fn cand_shipped(img: &DynamicImage, edge: u32) -> (u32, u32, Vec<u8>) {
-    let t = to_thumbnail(img, edge);
+    // `to_thumbnail` consumes the image (so conversions can reuse its buffer): the clone is
+    // part of what this candidate measures.
+    let t = to_thumbnail(img.clone(), edge).expect("thumbnail");
     (t.width, t.height, t.bgra)
 }
 
@@ -1176,7 +1178,8 @@ fn calls(iters: usize) {
             black_box(cand_current(&img, 256));
         }));
         let new = stats(time_each(reps, || {
-            black_box(to_thumbnail(&img, 256));
+            // The clone stands in for the image `to_thumbnail` now takes by value.
+            black_box(to_thumbnail(img.clone(), 256).ok());
         }));
         row_us("  decode only", &dec);
         row_us("  resize before: DynamicImage::thumbnail", &old);

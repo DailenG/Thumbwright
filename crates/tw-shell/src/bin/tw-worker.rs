@@ -45,7 +45,7 @@ fn main() -> ExitCode {
         request
             .decoder
             .run_with(&request.data, &request.ext, edge, request.param)
-            .map(|img| to_thumbnail(&img, edge))
+            .and_then(|img| to_thumbnail(img, edge))
     }))
     .unwrap_or_else(|_| Err(DecodeError::malformed("decoder panicked")));
 

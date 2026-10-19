@@ -14,6 +14,10 @@ const MAX_LAYERS: usize = 1024;
 const MAX_PROPS: usize = 4096;
 /// Largest number of tile pixels decoded for one file; bounds the work a hostile file can ask.
 const MAX_TILE_PIXELS: u64 = 400_000_000;
+/// Tile-table entries read for one file, over every layer and mask (decoded or not). A
+/// hostile file can point many layers at one huge table of off-canvas tiles; the pixel
+/// budget only charges tiles that are decoded.
+const MAX_TILE_ENTRIES: u64 = 1 << 21;
 
 const PROP_END: u32 = 0;
 const PROP_COLORMAP: u32 = 1;
@@ -136,7 +140,7 @@ struct Hierarchy {
     tiles: Vec<usize>,
 }
 
-fn read_hierarchy(r: &Reader<'_>, at: usize) -> Result<Hierarchy> {
+fn read_hierarchy(r: &Reader<'_>, at: usize, entries: &mut u64) -> Result<Hierarchy> {
     let (width, height, bpp) = (r.u32(at)?, r.u32(at + 4)?, r.u32(at + 8)? as usize);
     let level = r.ptr(at + 12)?;
     if level == 0 || !(1..=4).contains(&bpp) {
@@ -152,10 +156,11 @@ fn read_hierarchy(r: &Reader<'_>, at: usize) -> Result<Hierarchy> {
     {
         return Err(truncated());
     }
+    *entries = entries.checked_sub(count).ok_or(DecodeError::TooLarge)?;
     let mut tiles = Vec::with_capacity(count as usize);
-    let first = level + 8;
+    let first = level.checked_add(8).ok_or_else(truncated)?;
     for i in 0..count as usize {
-        let offset = r.ptr(first + i * r.ptr_size())?;
+        let offset = r.ptr(first.checked_add(i * r.ptr_size()).ok_or_else(truncated)?)?;
         if offset == 0 {
             return Err(truncated());
         }
@@ -284,18 +289,30 @@ struct Canvas {
     pixels: Vec<u8>,
 }
 
+/// What a file may still ask of the decoder.
+struct Budget {
+    /// Tile pixels that may still be decoded.
+    pixels: u64,
+    /// Tile-table entries that may still be read.
+    entries: u64,
+}
+
 #[allow(clippy::too_many_lines)]
 fn composite_layer(
     r: &Reader<'_>,
     at: usize,
     image: &Props,
     canvas: &mut Canvas,
-    budget: &mut u64,
+    budget: &mut Budget,
 ) -> Result<()> {
     let (lw, lh, ltype) = (r.u32(at)?, r.u32(at + 4)?, r.u32(at + 8)?);
     // Name: a length-prefixed string.
     let name_len = r.u32(at + 12)? as usize;
-    let (props, after) = read_props(r, at + 16 + name_len)?;
+    let props_at = at
+        .checked_add(16)
+        .and_then(|p| p.checked_add(name_len))
+        .ok_or_else(truncated)?;
+    let (props, after) = read_props(r, props_at)?;
     let hierarchy = r.ptr(after)?;
     let mask = r.ptr(after + r.ptr_size())?;
     if !props.visible || props.group || lw == 0 || lh == 0 {
@@ -315,14 +332,21 @@ fn composite_layer(
     if hierarchy == 0 {
         return Ok(());
     }
-    let hier = read_hierarchy(r, hierarchy)?;
+    let hier = read_hierarchy(r, hierarchy, &mut budget.entries)?;
     if hier.bpp != bpp || hier.width != lw || hier.height != lh {
         return Err(DecodeError::Unsupported);
     }
     let mask_hier = if mask != 0 && props.apply_mask {
-        let name_len = r.u32(mask + 8)? as usize;
-        let (_, after) = read_props(r, mask + 12 + name_len)?;
-        let h = read_hierarchy(r, r.ptr(after)?)?;
+        let name_len = mask
+            .checked_add(8)
+            .ok_or_else(truncated)
+            .and_then(|a| r.u32(a))? as usize;
+        let props_at = mask
+            .checked_add(12)
+            .and_then(|p| p.checked_add(name_len))
+            .ok_or_else(truncated)?;
+        let (_, after) = read_props(r, props_at)?;
+        let h = read_hierarchy(r, r.ptr(after)?, &mut budget.entries)?;
         if h.bpp != 1 || h.width != lw || h.height != lh {
             return Err(DecodeError::Unsupported);
         }
@@ -348,7 +372,8 @@ fn composite_layer(
             if gx >= cw || gy >= ch || gx + tw as i64 <= 0 || gy + th as i64 <= 0 {
                 continue;
             }
-            *budget = budget
+            budget.pixels = budget
+                .pixels
                 .checked_sub((tw * th) as u64)
                 .ok_or(DecodeError::TooLarge)?;
             let index = ty * tiles_x + tx;
@@ -430,17 +455,23 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
     }
     let (props, mut pos) = read_props(&r, pos)?;
 
+    // The same layer listed twice would be composited twice (and re-read its tile table
+    // twice); a file's layer list never repeats a layer, so each is used once. Every listed
+    // pointer still counts toward the layer cap.
     let mut layers = Vec::new();
-    for _ in 0..MAX_LAYERS + 1 {
+    let mut listed = std::collections::HashSet::new();
+    for n in 0..=MAX_LAYERS {
         let ptr = r.ptr(pos)?;
         pos += r.ptr_size();
         if ptr == 0 {
             break;
         }
-        if layers.len() == MAX_LAYERS {
+        if n == MAX_LAYERS {
             return Err(DecodeError::TooLarge);
         }
-        layers.push(ptr);
+        if listed.insert(ptr) {
+            layers.push(ptr);
+        }
     }
 
     let mut canvas = Canvas {
@@ -448,7 +479,10 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
         height,
         pixels: pixel_buffer(width, height, 4)?,
     };
-    let mut budget = MAX_TILE_PIXELS;
+    let mut budget = Budget {
+        pixels: MAX_TILE_PIXELS,
+        entries: MAX_TILE_ENTRIES,
+    };
     // The first layer in the file is the topmost.
     for &ptr in layers.iter().rev() {
         composite_layer(&r, ptr, &props, &mut canvas, &mut budget)?;
@@ -786,5 +820,127 @@ mod tests {
         f.extend(0xFFFF_FFF0u32.to_be_bytes());
         f.extend(0u32.to_be_bytes());
         assert!(matches!(decode(&f), Err(DecodeError::Malformed(_))));
+    }
+
+    /// `layers` layers of 96000 x 64000 px (1.5 million tiles) placed far off the canvas, all
+    /// sharing one tile table of 6 MB. With `distinct` every layer is its own record;
+    /// otherwise one record is listed `layers` times.
+    fn shared_table_file(layers: usize, distinct: bool) -> Vec<u8> {
+        let (w, h) = (1500u32 * 64, 1000u32 * 64);
+        let mut b = Builder {
+            buf: Vec::new(),
+            ptr64: false,
+        };
+        b.buf.extend(b"gimp xcf v003\0");
+        b.u32(4);
+        b.u32(4);
+        b.u32(0);
+        b.prop(PROP_COMPRESSION, &[0]);
+        b.end_props();
+        let slots: Vec<usize> = (0..layers).map(|_| b.slot()).collect();
+        b.patch_zero_terminator();
+        b.patch_zero_terminator();
+        let table = b.buf.len();
+        b.u32(w);
+        b.u32(h);
+        b.u32(3);
+        let level_slot = b.slot();
+        let level = b.buf.len();
+        b.patch(level_slot, level);
+        b.u32(w);
+        b.u32(h);
+        let entry = 8u32.to_be_bytes();
+        b.buf
+            .extend(std::iter::repeat_n(entry, 1500 * 1000).flatten());
+        b.patch_zero_terminator();
+        let mut first = None;
+        for slot in slots {
+            let at = match first {
+                Some(at) if !distinct => at,
+                _ => {
+                    let at = b.buf.len();
+                    b.u32(w);
+                    b.u32(h);
+                    b.u32(0);
+                    b.u32(2);
+                    b.buf.extend(b"l\0");
+                    let mut off = Vec::new();
+                    off.extend((1i32 << 30).to_be_bytes());
+                    off.extend(0i32.to_be_bytes());
+                    b.prop(PROP_OFFSETS, &off);
+                    b.end_props();
+                    let hs = b.slot();
+                    b.patch(hs, table);
+                    b.slot();
+                    first = Some(at);
+                    at
+                }
+            };
+            b.patch(slot, at);
+        }
+        b.buf
+    }
+
+    /// DB-08: layers may share one tile table; the entries read are budgeted per file, not
+    /// per layer, whether or not the tiles are on the canvas.
+    #[test]
+    fn tile_table_entries_are_budgeted_across_layers() {
+        // One such layer is within the budget (and draws nothing).
+        let one = decode(&shared_table_file(1, true)).unwrap().to_rgba8();
+        assert!(one.pixels().all(|p| p.0[3] == 0));
+        // Two distinct layers over the same table are not.
+        assert_eq!(
+            decode(&shared_table_file(2, true)),
+            Err(DecodeError::TooLarge)
+        );
+    }
+
+    /// DB-08: one layer listed many times is composited (and its table read) once.
+    #[test]
+    fn repeated_layer_pointer_is_composited_once() {
+        let spec = || LayerSpec {
+            ltype: 1,
+            w: 2,
+            h: 2,
+            offset: (0, 0),
+            opacity: 128,
+            visible: true,
+            pixels: solid(2, 2, [0, 255, 0, 255]),
+            mask: None,
+        };
+        let mut f = build("v003", 2, 2, 0, &[spec(), spec(), spec()]);
+        // Header 26 + compression property 9 + PROP_END 8, then three 4-byte layer pointers.
+        let first = f[43..47].to_vec();
+        f[47..51].copy_from_slice(&first);
+        f[51..55].copy_from_slice(&first);
+        let img = decode(&f).unwrap().to_rgba8();
+        // Half-opaque once; three blends would read 223.
+        assert_eq!(img.get_pixel(0, 0).0[3], 128);
+        // The same layer listed three times over the big table reads that table once.
+        assert!(decode(&shared_table_file(3, false)).is_ok());
+    }
+
+    /// DB-10: a 64-bit pointer near `usize::MAX` wrapped in the offset arithmetic.
+    #[test]
+    fn wrapping_pointer_arithmetic_is_an_error() {
+        let f = build("v011", 4, 4, 0, &two_layers()[..1]);
+        let u64_at =
+            |f: &[u8], at: usize| u64::from_be_bytes(f[at..at + 8].try_into().unwrap()) as usize;
+        // Header 26 + precision 4 + compression property 9 + PROP_END 8, then the layer pointer.
+        let list_at = 26 + 4 + 9 + 8;
+        let layer_at = u64_at(&f, list_at);
+        let hier_at = u64_at(&f, layer_at + 12 + 6 + 12 + 12 + 16 + 8);
+        // Tile-table pointer.
+        let mut bad = f.clone();
+        bad[hier_at + 12..hier_at + 20].copy_from_slice(&(u64::MAX - 3).to_be_bytes());
+        assert!(matches!(decode(&bad), Err(DecodeError::Malformed(_))));
+        // Name length that wraps the property offset.
+        let mut bad = f.clone();
+        bad[layer_at + 12..layer_at + 16].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(matches!(decode(&bad), Err(DecodeError::Malformed(_))));
+        // Layer pointer at the very end of the address space.
+        let mut bad = f;
+        bad[list_at..list_at + 8].copy_from_slice(&(u64::MAX - 7).to_be_bytes());
+        assert!(matches!(decode(&bad), Err(DecodeError::Malformed(_))));
     }
 }

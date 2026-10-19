@@ -90,6 +90,8 @@ pub(super) const MAX_ENTRIES: usize = 4096;
 pub(super) const MAX_DECODE_ATTEMPTS: usize = 16;
 /// EPUB spine documents scanned for a first image.
 const MAX_SPINE_DOCS: usize = 8;
+/// Manifest items and spine references read from one OPF package document.
+const MAX_OPF_ITEMS: usize = 1 << 16;
 /// Contact sheet: 2x2 cells of this edge (sheet at most 512x512).
 pub(super) const SHEET_CELL: u32 = 256;
 pub(super) const SHEET_MAX_TILES: usize = 4;
@@ -931,6 +933,8 @@ struct ManifestItem {
 
 struct Opf {
     items: Vec<ManifestItem>,
+    /// First manifest item per `id`, so spine lookups are O(1).
+    by_id: HashMap<String, usize>,
     meta_cover: Option<String>,
     guide_cover: Vec<String>,
     spine: Vec<String>,
@@ -940,16 +944,19 @@ impl Opf {
     fn parse(xml: &str, dir: &str) -> Self {
         let mut opf = Opf {
             items: Vec::new(),
+            by_id: HashMap::new(),
             meta_cover: None,
             guide_cover: Vec::new(),
             spine: Vec::new(),
         };
         for t in tags(xml).filter(|t| !t.end) {
             match t.local().to_ascii_lowercase().as_str() {
-                "item" => {
+                "item" if opf.items.len() < MAX_OPF_ITEMS => {
                     if let Some(href) = t.attr("href") {
+                        let id = t.attr("id").unwrap_or_default();
+                        opf.by_id.entry(id.clone()).or_insert(opf.items.len());
                         opf.items.push(ManifestItem {
-                            id: t.attr("id").unwrap_or_default(),
+                            id,
                             href: resolve(dir, &href),
                             media_type: t
                                 .attr("media-type")
@@ -972,7 +979,9 @@ impl Opf {
                     opf.guide_cover
                         .extend(t.attr("href").map(|h| resolve(dir, &h)));
                 }
-                "itemref" => opf.spine.extend(t.attr("idref")),
+                "itemref" if opf.spine.len() < MAX_OPF_ITEMS => {
+                    opf.spine.extend(t.attr("idref"));
+                }
                 _ => {}
             }
         }
@@ -980,7 +989,7 @@ impl Opf {
     }
 
     fn item(&self, id: &str) -> Option<&ManifestItem> {
-        self.items.iter().find(|i| i.id == id)
+        self.by_id.get(id).map(|&i| &self.items[i])
     }
 
     /// Declared cover images, most explicit first.
@@ -1015,12 +1024,13 @@ impl Opf {
         out
     }
 
-    fn spine_docs(&self) -> Vec<String> {
+    /// Spine documents in reading order, resolved lazily so a caller that takes a few does
+    /// not pay for the rest.
+    fn spine_docs(&self) -> impl Iterator<Item = String> + '_ {
         self.spine
             .iter()
             .filter_map(|id| self.item(id))
             .map(|i| i.href.clone())
-            .collect()
     }
 
     fn manifest_images(&self) -> Vec<String> {
@@ -1253,7 +1263,9 @@ pub(super) fn unescape(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        let Some(semi) = rest.find(';').filter(|&j| j <= 10) else {
+        // An entity is at most ten bytes long: look for its `;` there only. Searching the whole
+        // remainder made a run of bare ampersands quadratic.
+        let Some(semi) = rest.bytes().take(11).position(|b| b == b';') else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -2113,5 +2125,76 @@ mod tests {
             Err(DecodeError::Unsupported)
         );
         assert_eq!(livp_still(b"nope"), Err(DecodeError::Unsupported));
+    }
+
+    /// An EPUB whose spine lists `n` ids that match no manifest item, and how long it takes
+    /// to be rejected.
+    fn epub_with_unmatched_spine(n: usize) -> std::time::Duration {
+        let mut opf = String::from("<package><manifest>");
+        for i in 0..n {
+            opf.push_str(&format!(
+                r#"<item id="i{i}" href="h{i}.xhtml" media-type="application/xhtml+xml"/>"#
+            ));
+        }
+        opf.push_str("</manifest><spine>");
+        for i in 0..n {
+            opf.push_str(&format!(r#"<itemref idref="missing{i}"/>"#));
+        }
+        opf.push_str("</spine></package>");
+        let container = br#"<container><rootfile full-path="content.opf"/></container>"#;
+        let z = zip_of(
+            &[
+                ("META-INF/container.xml", container),
+                ("content.opf", opf.as_bytes()),
+            ],
+            CompressionMethod::Deflated,
+        );
+        let start = std::time::Instant::now();
+        assert!(extract(&z, "epub").is_err());
+        start.elapsed()
+    }
+
+    /// DA-4: an OPF whose `itemref`s match no manifest item used to cost a linear manifest
+    /// scan per reference (O(n^2)) before the first eight spine documents were taken.
+    /// Compares two sizes instead of a wall-clock limit, so machine speed and load cancel:
+    /// four times the items must cost about four times as much, not sixteen.
+    #[test]
+    fn epub_spine_lookup_is_not_quadratic() {
+        let small = epub_with_unmatched_spine(10_000).max(std::time::Duration::from_millis(50));
+        let large = epub_with_unmatched_spine(40_000);
+        assert!(
+            large < small * 8,
+            "10k items took {small:?}, 40k took {large:?}"
+        );
+    }
+
+    #[test]
+    fn opf_spine_still_resolves_in_reading_order_with_first_duplicate_id() {
+        let opf = Opf::parse(
+            r#"<package><manifest>
+                <item id="a" href="first.xhtml"/><item id="a" href="second.xhtml"/>
+                <item id="b" href="b.xhtml"/></manifest>
+                <spine><itemref idref="b"/><itemref idref="nope"/><itemref idref="a"/></spine></package>"#,
+            "OEBPS",
+        );
+        let docs: Vec<String> = opf.spine_docs().collect();
+        assert_eq!(docs, ["OEBPS/b.xhtml", "OEBPS/first.xhtml"]);
+    }
+
+    /// DA-5: `unescape` searched the whole remainder for `;` at every `&`.
+    #[test]
+    fn unescape_runs_of_ampersands_are_linear() {
+        let hostile = "&".repeat(200_000);
+        let start = std::time::Instant::now();
+        assert_eq!(unescape(&hostile), hostile);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "unescape took {:?}",
+            start.elapsed()
+        );
+        // Entities keep working, including at the edge of the ten-byte window.
+        assert_eq!(unescape("a &amp; b &#x41; &#65; &quot;"), "a & b A A \"");
+        assert_eq!(unescape("&#x10FFFF;"), "\u{10FFFF}");
+        assert_eq!(unescape("&#x110000;&amp"), "&#x110000;&amp");
     }
 }

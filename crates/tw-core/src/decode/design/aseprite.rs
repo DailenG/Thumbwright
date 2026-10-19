@@ -11,6 +11,7 @@ use flate2::read::ZlibDecoder;
 use image::{DynamicImage, RgbaImage};
 
 use crate::decode::{DecodeError, Result, check_alloc, check_dimensions};
+use crate::limits;
 
 const FILE_MAGIC: u16 = 0xA5E0;
 const FRAME_MAGIC: u16 = 0xF1FA;
@@ -74,16 +75,44 @@ struct PendingCel<'a> {
     body: &'a [u8],
 }
 
-struct Cel {
-    layer: usize,
+/// A decoded cel: geometry, and the raw samples it is drawn from (not expanded to RGBA).
+struct Cel<'a> {
     x: i32,
     y: i32,
-    opacity: u8,
-    z: i16,
     w: u32,
     h: u32,
-    /// RGBA8 (already palette-resolved).
-    rgba: Vec<u8>,
+    raw: &'a [u8],
+    depth: Depth,
+    palette: &'a [[u8; 4]],
+    /// Palette index that is transparent (`None` on a background layer).
+    transparent: Option<u8>,
+}
+
+impl Cel<'_> {
+    /// Sample `i` (row-major) as non-premultiplied RGBA.
+    fn pixel(&self, i: usize) -> Option<[u8; 4]> {
+        Some(match self.depth {
+            Depth::Rgba => {
+                let p = self.raw.get(i * 4..i * 4 + 4)?;
+                [p[0], p[1], p[2], p[3]]
+            }
+            Depth::Gray => {
+                let p = self.raw.get(i * 2..i * 2 + 2)?;
+                [p[0], p[0], p[0], p[1]]
+            }
+            Depth::Indexed => {
+                let index = *self.raw.get(i)?;
+                if Some(index) == self.transparent {
+                    [0, 0, 0, 0]
+                } else {
+                    self.palette
+                        .get(usize::from(index))
+                        .copied()
+                        .unwrap_or([0, 0, 0, 255])
+                }
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -104,6 +133,13 @@ impl Depth {
 }
 
 pub fn decode(data: &[u8]) -> Result<DynamicImage> {
+    decode_within(data, limits::ARCHIVE_TOTAL_MAX_BYTES)
+}
+
+/// [`decode`] with `cel_budget` bytes of cel pixel data (summed over every cel decoded) for
+/// the whole file. Cel size is independent of the canvas size, and a file may hold tens of
+/// thousands of cels, each a zlib stream that inflates about a thousandfold.
+fn decode_within(data: &[u8], cel_budget: u64) -> Result<DynamicImage> {
     let mut r = Reader { d: data, pos: 0 };
     if data.len() < HEADER_LEN || data.get(4..6) != Some(&FILE_MAGIC.to_le_bytes()) {
         return Err(DecodeError::Unsupported);
@@ -149,7 +185,6 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
     let mut palette: Vec<[u8; 4]> = Vec::new();
     let mut layers: Vec<Layer> = Vec::new();
     let mut pending: Vec<PendingCel> = Vec::new();
-    let mut cels: Vec<Cel> = Vec::new();
     for _ in 0..(chunk_count as usize).min(MAX_CHUNKS) {
         if r.pos + 6 > frame_end {
             break;
@@ -193,14 +228,24 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
         }
     }
 
+    // Draw order: layer index plus z-index, then z-index (higher draws later); stable, so
+    // equal keys keep file order.
+    pending.sort_by_key(|p| (p.layer as i64 + i64::from(p.z), p.z));
+
+    // Cels are decoded and drawn one at a time: what a file can make us hold is the canvas
+    // and the largest single cel, not every cel at once.
+    let canvas_bytes = u64::from(w) * u64::from(h) * 4;
+    let mut canvas = vec![0u8; canvas_bytes as usize];
+    let mut cel_budget = cel_budget;
+    let mut seen = 0usize;
     for PendingCel {
         layer,
         x,
         y,
         opacity,
-        z,
         cel_type,
         body,
+        ..
     } in pending
     {
         let Some(l) = layers.get(layer) else { continue };
@@ -215,9 +260,24 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
         }
         check_dimensions(cw, ch)?;
         let expected = u64::from(cw) * u64::from(ch) * depth.bytes();
+        // The canvas stays live while the cel is read, so both count against one buffer budget.
         check_alloc(expected)?;
-        let raw = if cel_type == 0 {
-            c.bytes(expected as usize)?.to_vec()
+        check_alloc(expected + canvas_bytes)?;
+        seen += 1;
+        // A cel wholly outside the canvas draws nothing: do not decode it.
+        if i64::from(x) >= i64::from(w)
+            || i64::from(y) >= i64::from(h)
+            || i64::from(x) + i64::from(cw) <= 0
+            || i64::from(y) + i64::from(ch) <= 0
+        {
+            continue;
+        }
+        cel_budget = cel_budget
+            .checked_sub(expected)
+            .ok_or(DecodeError::TooLarge)?;
+        let inflated;
+        let raw: &[u8] = if cel_type == 0 {
+            c.bytes(expected as usize)?
         } else {
             let mut out = Vec::new();
             ZlibDecoder::new(c.rest())
@@ -227,37 +287,31 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage> {
             if out.len() as u64 != expected {
                 return Err(DecodeError::malformed("aseprite: short cel data"));
             }
-            out
+            inflated = out;
+            &inflated
         };
-        let transparent = if background {
-            None
-        } else {
-            Some(transparent_index)
-        };
-        cels.push(Cel {
-            layer,
+        let cel = Cel {
             x,
             y,
-            opacity,
-            z,
             w: cw,
             h: ch,
-            rgba: to_rgba(&raw, depth, &palette, transparent),
-        });
+            raw,
+            depth,
+            palette: &palette,
+            transparent: if background {
+                None
+            } else {
+                Some(transparent_index)
+            },
+        };
+        let layer_opacity = layers.get(layer).map_or(255, |l| l.opacity);
+        let opacity = u32::from(opacity) * u32::from(layer_opacity) / 255;
+        blit(&mut canvas, w, h, &cel, opacity);
     }
-    if cels.is_empty() {
+    if seen == 0 {
         return Err(DecodeError::malformed(
             "aseprite: first frame has no visible cels",
         ));
-    }
-    // Layer order, then z-index (higher draws later).
-    cels.sort_by_key(|c| (c.layer as i64 + i64::from(c.z), c.z));
-
-    let mut canvas = vec![0u8; w as usize * h as usize * 4];
-    for cel in &cels {
-        let layer_opacity = layers.get(cel.layer).map_or(255, |l| l.opacity);
-        let opacity = u32::from(cel.opacity) * u32::from(layer_opacity) / 255;
-        blit(&mut canvas, w, h, cel, opacity);
     }
     RgbaImage::from_raw(w, h, canvas)
         .map(DynamicImage::ImageRgba8)
@@ -350,46 +404,19 @@ fn parse_old_palette(c: &mut Reader, palette: &mut Vec<[u8; 4]>) -> Result<()> {
     Ok(())
 }
 
-fn to_rgba(raw: &[u8], depth: Depth, palette: &[[u8; 4]], transparent: Option<u8>) -> Vec<u8> {
-    match depth {
-        Depth::Rgba => raw.to_vec(),
-        Depth::Gray => raw
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .flat_map(|p| [p[0], p[0], p[0], p[1]])
-            .collect(),
-        Depth::Indexed => raw
-            .iter()
-            .flat_map(|&i| {
-                if Some(i) == transparent {
-                    [0, 0, 0, 0]
-                } else {
-                    palette
-                        .get(usize::from(i))
-                        .copied()
-                        .unwrap_or([0, 0, 0, 255])
-                }
-            })
-            .collect(),
-    }
-}
-
 /// Source-over of a non-premultiplied cel (scaled by `opacity`) onto the canvas, clipped.
 fn blit(canvas: &mut [u8], cw: u32, ch: u32, cel: &Cel, opacity: u32) {
-    for sy in 0..cel.h {
-        let dy = i64::from(cel.y) + i64::from(sy);
-        if dy < 0 || dy >= i64::from(ch) {
-            continue;
-        }
-        for sx in 0..cel.w {
-            let dx = i64::from(cel.x) + i64::from(sx);
-            if dx < 0 || dx >= i64::from(cw) {
-                continue;
-            }
-            let s = (sy as usize * cel.w as usize + sx as usize) * 4;
+    // Only the part of the cel that lies on the canvas is visited (a cel can be far larger).
+    let (cx, cy) = (i64::from(cel.x), i64::from(cel.y));
+    let sx_range = (-cx).max(0)..(i64::from(cw) - cx).min(i64::from(cel.w));
+    let sy_range = (-cy).max(0)..(i64::from(ch) - cy).min(i64::from(cel.h));
+    for sy in sy_range {
+        let dy = cy + sy;
+        for sx in sx_range.clone() {
+            let dx = cx + sx;
+            let s = sy as usize * cel.w as usize + sx as usize;
             let d = (dy as usize * cw as usize + dx as usize) * 4;
-            let (Some(src), Some(dst)) = (cel.rgba.get(s..s + 4), canvas.get_mut(d..d + 4)) else {
+            let (Some(src), Some(dst)) = (cel.pixel(s), canvas.get_mut(d..d + 4)) else {
                 continue;
             };
             let sa = u32::from(src[3]) * opacity / 255;
@@ -642,5 +669,62 @@ mod tests {
         lie[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(decode(&lie), Err(DecodeError::Malformed(_))));
         assert_eq!(decode(&[0u8; 200]), Err(DecodeError::Unsupported));
+    }
+
+    /// An indexed file with `count` visible layers and one `side` x `side` cel (all zero
+    /// samples, zlib) per layer, all at the origin of a 16 x 16 canvas.
+    fn many_cels(count: u16, side: u16) -> Vec<u8> {
+        let samples = zlib(&vec![0u8; usize::from(side) * usize::from(side)]);
+        let mut chunks = Vec::new();
+        for _ in 0..count {
+            chunks.push(layer(1, 0, 255, 0));
+        }
+        for i in 0..count {
+            chunks.push(cel(i, 0, 0, 255, 2, side, side, &samples));
+        }
+        file(16, 16, 8, 0, &chunks)
+    }
+
+    /// DB-01: every cel was expanded to RGBA (4x for indexed) and kept until the end, so
+    /// peak memory grew with the number of cels. Cels are now drawn one at a time.
+    #[test]
+    fn cel_memory_does_not_accumulate() {
+        // 12 cels x 4 MiB of samples: 192 MiB of retained RGBA before the fix.
+        let f = many_cels(12, 2048);
+        let (result, usage) = crate::testalloc::measure(|| decode(&f));
+        assert!(result.is_ok());
+        assert!(usage.peak < 16 << 20, "peak {} bytes", usage.peak);
+        // No single request near the 16 MiB RGBA expansion of one cel.
+        assert!(usage.largest <= 8 << 20, "largest {} bytes", usage.largest);
+    }
+
+    /// A cel outside the canvas draws nothing and is not decoded (its data may be garbage).
+    #[test]
+    fn off_canvas_cels_are_not_decoded() {
+        let f = file(
+            4,
+            4,
+            32,
+            0,
+            &[
+                layer(1, 0, 255, 0),
+                layer(1, 0, 255, 0),
+                cel(0, 0, 0, 255, 0, 4, 4, &[255u8; 64]),
+                cel(1, 100, 0, 255, 2, 10, 10, b"not zlib"),
+            ],
+        );
+        let img = decode(&f).unwrap().to_rgba8();
+        assert_eq!(img.get_pixel(3, 3).0, [255; 4]);
+    }
+
+    /// The summed cel bytes of one file are budgeted, not just each cel.
+    #[test]
+    fn cumulative_cel_bytes_are_budgeted() {
+        let f = many_cels(3, 512); // 3 x 256 KiB
+        assert!(decode_within(&f, 3 * 512 * 512).is_ok());
+        assert_eq!(
+            decode_within(&f, 3 * 512 * 512 - 1),
+            Err(DecodeError::TooLarge)
+        );
     }
 }

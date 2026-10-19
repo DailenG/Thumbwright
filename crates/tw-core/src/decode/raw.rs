@@ -38,6 +38,9 @@ const MAX_IFD_ENTRIES: usize = 4096;
 const MAX_ARRAY: usize = 1024;
 /// Candidates kept per file.
 const MAX_CANDIDATES: usize = 64;
+/// Largest "lenient" (maker-note) preview. Those are the only candidates copied before
+/// decoding (the first byte is restored on the copy), and real ones are a few hundred KiB.
+const MAX_LENIENT_BYTES: usize = 16 * 1024 * 1024;
 /// Container boxes / heaps / sections walked.
 const MAX_BOXES: usize = 4096;
 /// How far into a preview box the JPEG start marker is searched.
@@ -140,7 +143,10 @@ impl Found {
                 range: start..end,
                 patch_first_byte: false,
             });
-        } else if lenient && blob.get(1..3) == Some(&[0xD8, 0xFF]) {
+        } else if lenient
+            && blob.len() <= MAX_LENIENT_BYTES
+            && blob.get(1..3) == Some(&[0xD8, 0xFF])
+        {
             self.candidates.push(Candidate {
                 range: start..end,
                 patch_first_byte: true,
@@ -167,7 +173,7 @@ impl Found {
             .candidates
             .into_iter()
             .filter_map(|c| {
-                let (w, h) = jpeg_dimensions(&c.bytes(data))?;
+                let (w, h) = jpeg_dimensions(&data[c.range.clone()], c.patch_first_byte)?;
                 Some((u64::from(w) * u64::from(h), c))
             })
             .collect();
@@ -202,8 +208,16 @@ fn decode_jpeg(bytes: &[u8], fallback: Option<u16>) -> Result<DynamicImage> {
 
 /// Frame size from the first SOF marker; `None` for lossless (raw sensor) JPEGs, which
 /// the `image` decoder cannot handle.
-fn jpeg_dimensions(b: &[u8]) -> Option<(u32, u32)> {
-    if !b.starts_with(&[0xFF, 0xD8]) {
+///
+/// `first_byte_patched`: the blob's first byte is not `0xFF` in the file but is read as if it
+/// were (see [`Candidate`]), so no patched copy is needed to inspect the header.
+fn jpeg_dimensions(b: &[u8], first_byte_patched: bool) -> Option<(u32, u32)> {
+    let soi = if first_byte_patched {
+        b.get(1) == Some(&0xD8)
+    } else {
+        b.starts_with(&[0xFF, 0xD8])
+    };
+    if !soi {
         return None;
     }
     let mut i = 2usize;
@@ -327,9 +341,14 @@ impl Tiff {
         })
     }
 
-    /// Integer values of a SHORT/LONG/IFD entry (capped).
+    /// Integer values of a SHORT/LONG/IFD entry (capped at [`MAX_ARRAY`]).
     fn values(&self, data: &[u8], e: &Entry) -> Vec<u32> {
-        let n = (e.count as usize).min(MAX_ARRAY);
+        self.values_up_to(data, e, MAX_ARRAY)
+    }
+
+    /// At most `max` integer values of a SHORT/LONG/IFD entry.
+    fn values_up_to(&self, data: &[u8], e: &Entry, max: usize) -> Vec<u32> {
+        let n = (e.count as usize).min(MAX_ARRAY).min(max);
         (0..n)
             .map_while(|i| match e.typ {
                 3 => self.u16(data, e.value_at + i * 2).map(u32::from),
@@ -340,7 +359,7 @@ impl Tiff {
     }
 
     fn first(&self, data: &[u8], e: &Entry) -> Option<u32> {
-        self.values(data, e).first().copied()
+        self.values_up_to(data, e, 1).first().copied()
     }
 
     /// Absolute range of an entry's value bytes.
@@ -398,14 +417,19 @@ impl<'a, 'f> Walker<'a, 'f> {
                 };
                 match e.tag {
                     TAG_COMPRESSION => compression = t.first(data, &e),
-                    TAG_STRIP_OFFSETS => strips = t.values(data, &e),
-                    TAG_STRIP_BYTE_COUNTS => strip_counts = t.values(data, &e),
+                    TAG_STRIP_OFFSETS if strips.is_empty() => strips = t.values(data, &e),
+                    TAG_STRIP_BYTE_COUNTS if strip_counts.is_empty() => {
+                        strip_counts = t.values(data, &e);
+                    }
                     TAG_ORIENTATION if is_ifd0 && self.found.orientation.is_none() => {
                         self.found.orientation =
                             t.first(data, &e).and_then(|v| u16::try_from(v).ok());
                     }
                     TAG_SUB_IFDS | TAG_EXIF_IFD if !makernote => {
-                        queue.extend(t.values(data, &e));
+                        // Only as many IFDs as the walk can still visit: queueing every value
+                        // of every entry grew without bound before the visit cap applied.
+                        let room = MAX_IFDS.saturating_sub(self.visited.len() + queue.len());
+                        queue.extend(t.values_up_to(data, &e, room));
                     }
                     TAG_RW2_JPG_FROM_RAW if !makernote => {
                         let (start, len) = t.blob(&e);
@@ -512,10 +536,12 @@ impl<'a, 'f> Walker<'a, 'f> {
         } else if note.starts_with(b"OLYMP\0") {
             self.walk(t, (start - t.origin + 8) as u32, true);
         } else if note.starts_with(b"AOC\0") {
-            let le = match &note[4..6] {
-                b"II" => true,
-                b"MM" => false,
-                _ => t.le,
+            let le = match note.get(4..6) {
+                Some(b"II") => true,
+                Some(b"MM") => false,
+                Some(_) => t.le,
+                // Nothing follows the signature: no IFD to walk.
+                None => return,
             };
             self.walk(
                 Tiff {
@@ -1164,5 +1190,49 @@ mod tests {
         f[84..88].copy_from_slice(&0xFFFF_FF00u32.to_be_bytes());
         f[88..92].copy_from_slice(&0xFFu32.to_be_bytes());
         assert_eq!(extract(&f), Err(DecodeError::Unsupported));
+    }
+
+    /// DA-9: every value of every `SubIFDs` entry was queued before the visit cap applied.
+    #[test]
+    fn subifd_fan_out_is_bounded() {
+        const ENTRIES: usize = 4096;
+        let array_at = 50_000;
+        let mut t = Lt::new(b"II*\0", array_at + 4096 + 64);
+        // IFD0 at 8: 4096 SubIFDs entries of 1024 values each, all sharing one array.
+        let entries = vec![(TAG_SUB_IFDS, 4u16, 1024u32, array_at as u32); ENTRIES];
+        t.ifd(8, &entries, 0);
+        let array: Vec<u8> = (0..1024u32).flat_map(|_| 8u32.to_le_bytes()).collect();
+        t.blob(array_at, &array);
+        let (result, usage) = crate::testalloc::measure(|| extract(&t.0));
+        assert_eq!(result, Err(DecodeError::Unsupported));
+        // 4096 x 1024 queued u32 is 16 MiB; the walk can only ever visit MAX_IFDS.
+        assert!(usage.peak < 1 << 20, "peak {} bytes", usage.peak);
+    }
+
+    /// DA-10: `AOC\0` maker note cut off by the end of the file sliced past it.
+    #[test]
+    fn truncated_aoc_maker_note_is_not_a_panic() {
+        let mut t = Lt::new(b"II*\0", 100);
+        t.ifd(8, &[(TAG_EXIF_IFD, 4, 1, 40)], 0);
+        // Declares 8 bytes at 96; only 4 are in the file.
+        t.ifd(40, &[(TAG_MAKER_NOTE, 7, 8, 96)], 0);
+        t.blob(96, b"AOC\0");
+        assert_eq!(extract(&t.0), Err(DecodeError::Unsupported));
+    }
+
+    /// DA-11: a lenient (maker-note) preview was copied whole, however large, before decoding.
+    #[test]
+    fn oversized_lenient_preview_is_not_copied() {
+        let blob_len = (16 << 20) + (4 << 20);
+        let blob_at = 200;
+        let mut t = Lt::new(b"II*\0", blob_at + blob_len);
+        t.ifd(8, &[(TAG_EXIF_IFD, 4, 1, 40)], 0);
+        t.ifd(40, &[(TAG_MAKER_NOTE, 7, 60, 100)], 0);
+        // Plain-IFD maker note: tag 0x0081 holds an inline blob that starts `00 D8 FF`.
+        t.ifd(100, &[(0x0081, 7, blob_len as u32, blob_at as u32)], 0);
+        t.blob(blob_at, &[0x00, 0xD8, 0xFF, 0x00]);
+        let (result, usage) = crate::testalloc::measure(|| extract(&t.0));
+        assert_eq!(result, Err(DecodeError::Unsupported));
+        assert!(usage.peak < 1 << 20, "peak {} bytes", usage.peak);
     }
 }

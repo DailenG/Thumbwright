@@ -17,3 +17,10 @@ pub mod registration;
 pub mod spawn;
 #[cfg(windows)]
 pub mod worker;
+
+#[cfg(test)]
+mod testalloc;
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: testalloc::Tracking = testalloc::Tracking;

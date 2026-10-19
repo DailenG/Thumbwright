@@ -124,6 +124,10 @@ impl<'a> Db<'a> {
         f: &mut dyn FnMut(i64, &[u8]) -> Result<bool>,
     ) -> Result<()> {
         let mut seen = vec![false; self.pages + 1];
+        // Real records occupy distinct bytes, so the payloads of one walk add up to at most
+        // the file. Cell pointers that alias one record (or overflow chains that loop) would
+        // otherwise make every cell re-assemble and re-parse the same bytes.
+        let mut budget = self.data.len() as u64;
         let mut stack = vec![root];
         while let Some(n) = stack.pop() {
             let index = n as usize;
@@ -166,7 +170,8 @@ impl<'a> Db<'a> {
                     for i in 0..cells {
                         let cell = be16(page, array + 2 * i)
                             .ok_or_else(|| DecodeError::malformed("short cell array"))?;
-                        let (rowid, payload) = self.leaf_cell(page, cell)?;
+                        let (rowid, payload) =
+                            self.leaf_cell(page, cell, &mut seen, &mut budget)?;
                         if !f(rowid, &payload)? {
                             return Ok(());
                         }
@@ -178,16 +183,23 @@ impl<'a> Db<'a> {
         Ok(())
     }
 
-    fn leaf_cell(&self, page: &'a [u8], at: usize) -> Result<(i64, Cow<'a, [u8]>)> {
+    fn leaf_cell(
+        &self,
+        page: &'a [u8],
+        at: usize,
+        seen: &mut [bool],
+        budget: &mut u64,
+    ) -> Result<(i64, Cow<'a, [u8]>)> {
         let short = || DecodeError::malformed("short leaf cell");
         let (size, n1) = varint(page, at).ok_or_else(short)?;
         let (rowid, n2) = varint(page, at + n1).ok_or_else(short)?;
         let body = at + n1 + n2;
         let usable = self.usable as u64;
         let max_local = usable - 35;
-        if size > MAX_RECORD_BYTES {
+        if size > MAX_RECORD_BYTES || size > *budget {
             return Err(DecodeError::TooLarge);
         }
+        *budget -= size;
         if size <= max_local {
             let end = body.checked_add(size as usize).ok_or_else(short)?;
             return Ok((
@@ -206,6 +218,13 @@ impl<'a> Db<'a> {
         buf.extend_from_slice(page.get(body..body + local).ok_or_else(short)?);
         let mut next = be32(page, body + local).ok_or_else(short)?;
         while (buf.len() as u64) < size {
+            // Each overflow page belongs to one record: a revisit is a loop or an alias.
+            let used = seen
+                .get_mut(next as usize)
+                .ok_or_else(|| DecodeError::malformed("SQLite overflow page outside file"))?;
+            if std::mem::replace(used, true) {
+                return Err(DecodeError::malformed("SQLite overflow page reused"));
+            }
             let overflow = self
                 .page(next)
                 .ok_or_else(|| DecodeError::malformed("SQLite overflow page outside file"))?;
@@ -385,6 +404,17 @@ pub(crate) mod fixtures {
         p
     }
 
+    /// A leaf page of `count` cells whose pointers all refer to the one `cell`.
+    pub fn aliased_leaf_page(cell: &[u8], count: usize) -> Vec<u8> {
+        let mut p = leaf_page(std::slice::from_ref(&cell.to_vec()), 0);
+        let top = [p[8], p[9]];
+        p[3..5].copy_from_slice(&(count as u16).to_be_bytes());
+        for i in 0..count {
+            p[8 + 2 * i..10 + 2 * i].copy_from_slice(&top);
+        }
+        p
+    }
+
     pub fn interior_page(children: &[u32], right: u32) -> Vec<u8> {
         let mut p = vec![0u8; PAGE];
         p[0] = 0x05;
@@ -550,7 +580,8 @@ mod tests {
         pages.extend(overflow);
         let db = database(&[("T", 2)], pages);
         let d = Db::open(&db).unwrap();
-        assert_eq!(rows(&d, 2).unwrap()[0].1.len(), 3000);
+        // A page is part of one record: the loop is reported, not followed.
+        assert!(matches!(rows(&d, 2), Err(DecodeError::Malformed(_))));
 
         // Cell pointer beyond the page.
         let mut p = leaf_page(&[vec![1, 1, 0]], 0);
@@ -560,6 +591,33 @@ mod tests {
         assert!(matches!(rows(&d, 2), Err(DecodeError::Malformed(_))));
         // Truncated file: the table's page is missing.
         let db = database(&[("T", 2)], vec![]);
+        let d = Db::open(&db).unwrap();
+        assert!(matches!(rows(&d, 2), Err(DecodeError::Malformed(_))));
+    }
+
+    /// DB-03: cell pointers that alias one record made every cell re-parse (and, with
+    /// overflow, re-assemble) the same bytes.
+    #[test]
+    fn aliased_cells_exceed_the_file_budget() {
+        let rec = record(&[Col::Blob(&[7u8; 790])]);
+        let (cell, _) = leaf_cell(1, &rec, 0);
+        let page = aliased_leaf_page(&cell, 100);
+        let db = database(&[("T", 2)], vec![page]);
+        let d = Db::open(&db).unwrap();
+        // 100 x ~800 bytes of payload from a 2 KiB file.
+        assert_eq!(rows(&d, 2).unwrap_err(), DecodeError::TooLarge);
+    }
+
+    /// DB-03: a record spilling into overflow pages cannot be claimed by several cells.
+    #[test]
+    fn aliased_overflow_records_are_rejected() {
+        let big = vec![9u8; 3000];
+        let (cell, overflow) = leaf_cell(1, &big, 3);
+        let mut pages = vec![aliased_leaf_page(&cell, 3)];
+        pages.extend(overflow);
+        // Padding keeps the byte budget out of the way: the reuse itself must be caught.
+        pages.extend(std::iter::repeat_n(vec![0u8; PAGE], 8));
+        let db = database(&[("T", 2)], pages);
         let d = Db::open(&db).unwrap();
         assert!(matches!(rows(&d, 2), Err(DecodeError::Malformed(_))));
     }
