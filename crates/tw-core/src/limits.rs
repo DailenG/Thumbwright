@@ -10,14 +10,10 @@ pub const WORKER_MEMORY_BYTES: u64 = 512 * MIB;
 pub const DECODE_ALLOC_BYTES: u64 = 512 * MIB;
 /// Worker elapsed-time budget for a thumbnail; the parent kills the worker after this.
 pub const WORKER_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(120);
-/// Worker elapsed-time budget for a conversion.
-pub const WORKER_CONVERT_TIMEOUT: Duration = Duration::from_secs(600);
 /// Worker user-mode CPU budget (Job Object per-process CPU time limit).
 pub const WORKER_CPU_TIME: Duration = Duration::from_secs(20);
 /// Largest decoded pixel area any tier may allocate.
 pub const MAX_PIXEL_AREA: u64 = 512 * 1_000_000;
-/// Largest frame count read from a multi-image container.
-pub const MAX_FRAMES: u32 = 256;
 /// Vector render budget (the SVG decoder runs in the worker; the parent kills it after this).
 pub const VECTOR_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Largest input read into memory for one thumbnail (the shell only has an IStream).

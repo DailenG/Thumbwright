@@ -142,13 +142,33 @@ pub(crate) fn write_thumbnail(
             Ok(())
         }
         Err(f) => {
-            log::error(&format!(
-                "GetThumbnail: failed hr=0x{:08X} ext={} size={} cause={}",
-                E_FAIL.0 as u32,
-                f.ext.as_deref().unwrap_or("?"),
-                f.size,
-                f.cause
-            ));
+            // Settings-driven refusals are expected behaviour, not errors: a user who turns
+            // thumbnails off would otherwise generate one ERROR line per file per view.
+            // Everything else (decode failure, read failure) stays an error.
+            let level = if f.cause == "thumbnails disabled"
+                || f.cause == "type disabled"
+                || f.cause == "cached failure"
+            {
+                "INFO"
+            } else {
+                "ERROR"
+            };
+            if level == "ERROR" {
+                log::error(&format!(
+                    "GetThumbnail: failed hr=0x{:08X} ext={} size={} cause={}",
+                    E_FAIL.0 as u32,
+                    f.ext.as_deref().unwrap_or("?"),
+                    f.size,
+                    f.cause
+                ));
+            } else {
+                log::info(&format!(
+                    "GetThumbnail: refused ext={} size={} cause={}",
+                    f.ext.as_deref().unwrap_or("?"),
+                    f.size,
+                    f.cause
+                ));
+            }
             // REQ-COM-7: a failure HRESULT, never a placeholder bitmap.
             Err(E_FAIL.into())
         }

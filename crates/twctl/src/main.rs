@@ -144,6 +144,11 @@ fn parse(args: Vec<String>) -> Result<Cli> {
             cli.help = true;
         } else if VALUE_OPTS.contains(&a.as_str()) {
             let v = it.next().ok_or_else(|| format!("{a} needs a value"))?;
+            // A value that is itself an option token is a mistake (`doctor --bundle
+            // --json`), not an output path literally named `--json`.
+            if v.starts_with("--") {
+                return Err(format!("{a} needs a value, got option {v}"));
+            }
             cli.opts.insert(a, v);
         } else if FLAG_OPTS.contains(&a.as_str()) {
             cli.flags.push(a);
@@ -231,7 +236,10 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Runs `f` for every file across all cores; collects per-file errors.
+/// Runs `f` for every file across all cores; collects per-file errors. A panic in `f`
+/// (hostile input reaching an in-process decoder) becomes that file's error, like
+/// `jobs::run_isolated`; a panicked worker thread can no longer discard its results and
+/// let the command exit 0.
 fn batch(files: &[PathBuf], f: impl Fn(&Path) -> Result<PathBuf> + Sync) -> Result<String> {
     let workers = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
@@ -245,7 +253,9 @@ fn batch(files: &[PathBuf], f: impl Fn(&Path) -> Result<PathBuf> + Sync) -> Resu
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(file) = files.get(i) else { break mine };
-                        mine.push((i, f(file)));
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(file)))
+                            .unwrap_or_else(|_| Err("decoder panicked".into()));
+                        mine.push((i, r));
                     }
                 })
             })
@@ -759,6 +769,15 @@ fn formats_listing(json: bool) -> String {
 }
 
 fn register(cli: &Cli, dir: &Path, settings: &Settings) -> Result<String> {
+    let layout = Layout::for_scope(Scope::User);
+    // A corrupt journal (tampering, partial write) otherwise strands registration: register
+    // unregisters first, and unregister refuses to replay a journal it cannot parse. This
+    // escape hatch removes the product's own registration keys, so the next register starts
+    // clean.
+    if cli.flag("--reset-journal") {
+        registration::reset(&layout).map_err(|e| e.to_string())?;
+        return Ok("registration journal reset; product keys removed".into());
+    }
     let layout = Layout::for_scope(Scope::User);
     if cli.flag("--status") {
         return Ok(match registration::status(&layout) {

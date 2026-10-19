@@ -289,7 +289,10 @@ pub fn ordered(chain: &'static [Decoder], prefer_embedded: bool) -> Cow<'static,
 }
 
 /// Runs `chain` in order (all stages in the current process), stopping at the first
-/// success or at a failure that must not fall through.
+/// success or at a failure that must not fall through. Test and fixture-harness use only:
+/// shipped code must never run worker-placed decoders in-process (invariant I2), so this
+/// is `pub` solely so the integration tests can reach it.
+#[cfg_attr(not(test), doc(hidden))]
 pub fn run_chain(chain: &[Decoder], data: &[u8], ext: &str, edge: u32) -> Result<DynamicImage> {
     let mut last = DecodeError::Unsupported;
     for d in chain {
