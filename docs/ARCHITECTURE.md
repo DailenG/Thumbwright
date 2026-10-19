@@ -18,7 +18,7 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 |---|---|---|
 | `crates/tw-core` | rlib | IDs/GUIDs (`ids.rs`), format matrix (`formats/`), budgets (`limits.rs`), settings (`config.rs`), log (`log.rs`), routing + decoders (`decode/`), worker wire protocol (`protocol.rs`), worker client with Job Object (`worker.rs`), tier pipeline (`pipeline.rs`), registry engine (`registration.rs`) |
 | `crates/tw-shell` | `thumbwright_shell.dll` + `tw-worker.exe` | COM exports and class factory (`lib.rs`, `factory.rs`), thumbnail provider (`thumbnail.rs`), DIB creation (`bitmap.rs`), context menu (`menu.rs`), cloud-folder thumbnail provider (`cloud.rs`), preview handler (`preview.rs`), property handler (`property.rs`), Windows 11 modern menu (`explorer_command.rs`), worker main (`src/bin/tw-worker.rs`), integration tests (`tests/`) |
-| `crates/twctl` | `twctl.exe` | CLI and menu-verb back end (`main.rs`, `cmds.rs`), image operations (`ops.rs`), lossless JPEG rotate/flip in the DCT coefficient domain (`jpeg_lossless.rs`), EXIF reader/normaliser/carry-over (`exif.rs`), lossless metadata strip (`strip.rs`), clipboard/wallpaper/message box (`win.rs`), `doctor`, `batch` (`jobs.rs`), `prebuild`, PDF/CBZ (`pdf.rs`), OCR (`ocr.rs`), rename/sort (`organize.rs`, `meta.rs`), upload over WinHTTP (`upload.rs`), AVIF/JXL writers (`modern.rs`), dialogs and eyedropper (`ui.rs`, `eyedropper.rs`), MCP server (`mcp.rs`) |
+| `crates/twctl` | `twctl.exe` | CLI and menu-verb back end (`main.rs`, `cmds.rs`), image operations (`ops.rs`), lossless JPEG rotate/flip in the DCT coefficient domain (`jpeg_lossless.rs`), EXIF reader/normaliser/carry-over (`exif.rs`), lossless metadata strip (`strip.rs`), clipboard/wallpaper/message box (`win.rs`), `doctor`, `batch` (`jobs.rs`), `prebuild`, PDF/CBZ (`pdf.rs`), OCR (`ocr.rs`), rename/sort (`organize.rs`, `meta.rs`), AVIF/JXL writers (`modern.rs`), dialogs and eyedropper (`ui.rs`, `eyedropper.rs`), MCP server (`mcp.rs`) |
 | `crates/tw-settings` | `thumbwright-settings.exe` | Settings window (`ui.rs`, raw Win32 controls via `win.rs`), applying settings and per-user registration toggles (`model.rs`), thumbnail-cache rebuild (`cache.rs`) |
 | `xtask` | dev tool | Dependency audit that generates `THIRD_PARTY_LICENSES.md` |
 
@@ -77,6 +77,12 @@ never registered, so Windows' own handlers stay in charge. Which formats are
 verified against real files versus synthetic fixtures is tracked in
 `docs/history/REVIEW_HANDOFF.md` section 5 and the issues; fixture provenance
 is in `crates/tw-core/tests/fixtures/README.md`.
+
+## Deliberate omissions
+
+- **Upload (spec 6.2, 6.4, 10.3).** Removed in 0.1.1: the default hosts were third-party
+  services the project does not want to send users' files to. With it gone no component
+  performs network I/O, which is stricter than REQ-NET-1/2 require.
 
 ## Settings
 

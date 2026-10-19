@@ -81,7 +81,7 @@
 
 .EXAMPLE
     # elevated
-    .\scripts\test-install.ps1 -Msi .\dist\Thumbwright-0.1.0-x64.msi
+    .\scripts\test-install.ps1 -Msi .\dist\Thumbwright-0.1.1-x64.msi
 #>
 [CmdletBinding()]
 param(
@@ -193,6 +193,11 @@ function Test-MsiPackage {
     $hasRegistry = Test-MsiTable $db 'Registry'
     $registryRows = if ($hasRegistry) { (Get-MsiRows $db 'SELECT Registry FROM Registry' 1).Count } else { 0 }
     Assert-Check 'No Registry table rows (the DLL engine owns all HKLM state)' ($registryRows -eq 0) "rows: $registryRows"
+
+    $arpIcon = Get-MsiProperty $db 'ARPPRODUCTICON'
+    $iconRows = if (Test-MsiTable $db 'Icon') { @(Get-MsiRows $db 'SELECT Name FROM Icon' 1 | ForEach-Object { $_[0] }) } else { @() }
+    Assert-Check 'ARPPRODUCTICON names an icon in the Icon table (Programs and Features)' (
+        $arpIcon -and ($iconRows -contains $arpIcon)) "ARPPRODUCTICON=$arpIcon icons=$($iconRows -join ',')"
 
     $actions = @{}
     foreach ($row in (Get-MsiRows $db 'SELECT Action, Type, Source, Target FROM CustomAction' 4)) {
@@ -373,6 +378,11 @@ function Test-SparsePackageFile {
         $null -ne $verb -and $verb.Clsid -eq $explorerCommand)
     Assert-Check "[$Label] COM surrogate class is CLSID_EXPLORER_COMMAND in thumbwright_shell.dll (STA)" (
         $null -ne $class -and $class.Id -eq $explorerCommand -and $class.Path -eq 'thumbwright_shell.dll' -and $class.ThreadingModel -eq 'STA')
+    $pris = @($entries | Where-Object { $_ -like '*.pri' })
+    Assert-Check "[$Label] package indexes its logos (one resources.pri, scaled and target-size Square44x44Logo)" (
+        ($pris.Count -eq 1 -and $pris[0] -eq 'resources.pri') -and
+        ($entries -contains 'Assets/Square44x44Logo.scale-100.png') -and
+        ($entries -contains 'Assets/Square44x44Logo.targetsize-24_altform-unplated.png')) ($pris -join ', ')
     $signed = $entries -contains 'AppxSignature.p7x'
     Write-Host ("    package {0}, publisher {1}, {2}" -f $identity.Name, $identity.Publisher, $(if ($signed) { 'signed' } else { 'UNSIGNED (cannot be registered)' }))
     return [pscustomobject]@{

@@ -54,17 +54,35 @@ const PREVIEW_PAD: i32 = 6;
 /// How long drawing the preview may wait for the shell's thumbnail.
 const PREVIEW_WAIT: Duration = Duration::from_millis(1500);
 
-/// One invokable command: `twctl <args...> --notify <files...>`.
+/// One invokable command: `twctl <args...> --notify <files...>`, or `twctl <args...> --notify`
+/// for a verb that acts on no file (the selection only decides where the menu appears).
 #[derive(Clone, Copy)]
 pub(crate) struct Verb {
     /// Canonical verb name (GetCommandString / string invocation).
     pub(crate) name: &'static str,
     pub(crate) label: &'static str,
     pub(crate) args: &'static [&'static str],
+    /// Whether the selected files are passed on; `twctl` rejects files for commands that take none.
+    pub(crate) files: bool,
 }
 
 const fn v(name: &'static str, label: &'static str, args: &'static [&'static str]) -> Verb {
-    Verb { name, label, args }
+    Verb {
+        name,
+        label,
+        args,
+        files: true,
+    }
+}
+
+/// A verb whose `twctl` command takes no file arguments.
+const fn v0(name: &'static str, label: &'static str, args: &'static [&'static str]) -> Verb {
+    Verb {
+        name,
+        label,
+        args,
+        files: false,
+    }
 }
 
 pub(crate) enum Node {
@@ -224,17 +242,6 @@ pub(crate) const TREE: &[Node] = &[
         single: true,
         verb: v("tw.datauri", "Copy as data URI", &["data-uri"]),
     },
-    // Network verb: twctl asks for confirmation (Cancel is the default button, REQ-SEC-3)
-    // before anything leaves the machine; the DLL itself never touches the network.
-    Node::Leaf {
-        id: "upload",
-        single: false,
-        verb: v(
-            "tw.upload",
-            "Upload (copy link)",
-            &["upload", "--copy", "--confirm"],
-        ),
-    },
     Node::Separator,
     Node::Leaf {
         id: "combine_pdf",
@@ -316,7 +323,7 @@ pub(crate) const TREE: &[Node] = &[
     Node::Leaf {
         id: "pick_color",
         single: true,
-        verb: v(
+        verb: v0(
             "tw.pickcolor",
             "Pick color (eyedropper)\u{2026}",
             &["pick-color"],
@@ -359,7 +366,7 @@ pub(crate) const TREE: &[Node] = &[
     Node::Leaf {
         id: SETTINGS_ID,
         single: false,
-        verb: v("tw.settings", "Settings", &["settings"]),
+        verb: v0("tw.settings", "Settings", &["settings"]),
     },
 ];
 
@@ -1056,6 +1063,7 @@ const CMDLINE_BUDGET: usize = 30_000;
 pub(crate) fn launch(verb: &Verb, files: &[PathBuf], _hwnd: HWND) -> Result<()> {
     let started = Instant::now();
     let exe = crate::install_dir().join(ids::CTL_EXE_NAME);
+    let files = if verb.files { files } else { &[] };
     let mut args: Vec<OsString> = verb.args.iter().map(OsString::from).collect();
     args.push("--notify".into());
     let total: usize = files.iter().map(|f| f.as_os_str().len() + 3).sum();

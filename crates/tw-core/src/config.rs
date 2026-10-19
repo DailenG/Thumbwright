@@ -59,7 +59,6 @@ pub const MENU_ITEMS: &[MenuItem] = &[
     item("copy", "Copy to clipboard"),
     item("copy_text", "Copy text (OCR)"),
     item("copy_data_uri", "Copy as data URI"),
-    item("upload", "Upload (copy link)"),
     item("combine_pdf", "Combine into PDF"),
     item(
         "combine_pdf_searchable",

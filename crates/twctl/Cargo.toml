@@ -10,7 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-tw-core = { version = "0.1.0", path = "../tw-core" }
+tw-core = { version = "0.1.1", path = "../tw-core" }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
 # Pure-Rust deflate for PDF streams (the same backend `zip` and `png` already use).
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
@@ -22,7 +22,7 @@ lofty = "0.25.4"
 ravif = { version = "0.13", default-features = false }
 rgb = "0.8"
 serde_json = "1"
-windows = { version = "0.62.2", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage", "Storage_Streams", "System_UserProfile", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_Networking_WinHttp", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_WinRT", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage", "Storage_Streams", "System_UserProfile", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_WinRT", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-registry = "0.6"
 zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 # JPEG XL output (lossless, pure Rust).

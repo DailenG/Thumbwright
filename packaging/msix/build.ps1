@@ -3,10 +3,12 @@
     Builds the unsigned sparse MSIX package for the Windows 11 modern context menu.
 
 .DESCRIPTION
-    Fills the tokens in AppxManifest.xml, generates the three logo images the manifest
-    references, and runs makeappx pack. The package has no payload besides the manifest
-    and logos: the binaries stay in the install directory, which is given as the external
-    location when the package is registered (see the comment in AppxManifest.xml).
+    Fills the tokens in AppxManifest.xml, copies the logos from packaging\icons\msix (every
+    scale and target size, made by packaging\icons\generate.ps1), indexes them into
+    resources.pri with makepri so the shell can pick a size, and runs makeappx pack. The
+    package has no payload besides the manifest, logos and index: the binaries stay in the
+    install directory, which is given as the external location when the package is
+    registered (see the comment in AppxManifest.xml).
 
     The package is NOT signed here. Signing is the release step: sign the .msix with the
     certificate whose subject is exactly the -Publisher value, or registration fails.
@@ -31,7 +33,8 @@
     Where to write the .msix. Defaults to out\Thumbwright.msix next to this script.
 
 .PARAMETER MakeAppx
-    Path to makeappx.exe. Defaults to the newest Windows 10/11 SDK found.
+    Path to makeappx.exe. Defaults to the newest Windows 10/11 SDK found; makepri.exe is
+    taken from the same directory.
 
 .EXAMPLE
     .\build.ps1 -Publisher 'CN=Example Publisher'
@@ -100,32 +103,6 @@ function Find-MakeAppx {
     return $found.FullName
 }
 
-# Plain solid-colour logos: the package is never listed in Start (AppListEntry="none"), so
-# these only satisfy the manifest. Drawn here so no binary assets live in the repository.
-function New-Logo {
-    param([string]$Path, [int]$Size)
-    Add-Type -AssemblyName System.Drawing
-    $bitmap = New-Object System.Drawing.Bitmap $Size, $Size
-    try {
-        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-        try {
-            $graphics.Clear([System.Drawing.Color]::FromArgb(255, 32, 64, 128))
-            $font = New-Object System.Drawing.Font 'Segoe UI', ([single]($Size * 0.5)), ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
-            $format = New-Object System.Drawing.StringFormat
-            $format.Alignment = [System.Drawing.StringAlignment]::Center
-            $format.LineAlignment = [System.Drawing.StringAlignment]::Center
-            $area = New-Object System.Drawing.RectangleF 0, 0, $Size, $Size
-            $graphics.DrawString('T', $font, [System.Drawing.Brushes]::White, $area, $format)
-        }
-        finally {
-            $graphics.Dispose()
-        }
-        $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-    }
-    finally {
-        $bitmap.Dispose()
-    }
-}
 
 if (-not $Version) {
     $Version = (Get-WorkspaceVersion) + '.0'
@@ -158,6 +135,14 @@ if ($left) {
 [xml]$null = $manifest   # fail early on malformed XML
 
 $makeappxExe = Find-MakeAppx
+$makepriExe = Join-Path (Split-Path -Parent $makeappxExe) 'makepri.exe'
+if (-not (Test-Path -LiteralPath $makepriExe)) {
+    throw "makepri.exe not found next to $makeappxExe."
+}
+$logos = Join-Path $PSScriptRoot '..\icons\msix'
+if (-not (Test-Path -LiteralPath (Join-Path $logos 'Square44x44Logo.scale-100.png'))) {
+    throw "Logos missing in $logos; run packaging\icons\generate.ps1."
+}
 $outputFull = [System.IO.Path]::GetFullPath($OutputPath)
 
 if ($PSCmdlet.ShouldProcess($outputFull, 'Build unsigned sparse MSIX package')) {
@@ -167,9 +152,21 @@ if ($PSCmdlet.ShouldProcess($outputFull, 'Build unsigned sparse MSIX package')) 
         New-Item -ItemType Directory -Path $assets -Force | Out-Null
         Write-Verbose "Staging in $stage"
         [System.IO.File]::WriteAllText((Join-Path $stage 'AppxManifest.xml'), $manifest, (New-Object System.Text.UTF8Encoding $false))
-        New-Logo -Path (Join-Path $assets 'StoreLogo.png') -Size 50
-        New-Logo -Path (Join-Path $assets 'Square44x44Logo.png') -Size 44
-        New-Logo -Path (Join-Path $assets 'Square150x150Logo.png') -Size 150
+        Copy-Item -Path (Join-Path $logos '*.png') -Destination $assets
+
+        # resources.pri maps Assets\Square44x44Logo.png to its scale and target-size
+        # variants; without it the shell finds no file under the plain name. The config's
+        # autoResourcePackage splitting is removed: a sparse package has no resource packs, so
+        # every variant must be indexed in the one resources.pri.
+        $priConfig = Join-Path $stage 'priconfig.xml'
+        & $makepriExe createconfig /cf $priConfig /dq en-US /pv 10.0.0 /o | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "makepri createconfig failed with exit code $LASTEXITCODE" }
+        [xml]$cfg = Get-Content -LiteralPath $priConfig -Raw
+        foreach ($node in @($cfg.SelectNodes('//packaging'))) { [void]$node.ParentNode.RemoveChild($node) }
+        $cfg.Save($priConfig)
+        & $makepriExe new /pr $stage /cf $priConfig /mn (Join-Path $stage 'AppxManifest.xml') /of (Join-Path $stage 'resources.pri') /o | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "makepri new failed with exit code $LASTEXITCODE" }
+        Remove-Item -LiteralPath $priConfig
 
         New-Item -ItemType Directory -Path (Split-Path -Parent $outputFull) -Force | Out-Null
         if (Test-Path -LiteralPath $outputFull) {

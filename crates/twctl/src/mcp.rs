@@ -2,9 +2,9 @@
 //!
 //! Every tool is a CLI command: a call builds an argument vector, parses it with the same
 //! parser as the command line, and runs it through the same `run`, so the tools cannot
-//! drift from the CLI. Tools that need a dialog, the clipboard, the network or system
-//! settings (upload, wallpaper, lock screen, pick color, settings, register) are not
-//! exposed. `view` returns a decoded image as a PNG content block.
+//! drift from the CLI. Tools that need a dialog, the clipboard or system settings
+//! (wallpaper, lock screen, pick color, settings, register) are not exposed. `view` returns
+//! a decoded image as a PNG content block.
 
 use std::io::{BufRead, Read, Write};
 
@@ -638,7 +638,7 @@ mod tests {
         ] {
             assert!(names.contains(&want), "{want} missing: {names:?}");
         }
-        assert!(!names.contains(&"upload") && !names.contains(&"register"));
+        assert!(!names.contains(&"wallpaper") && !names.contains(&"register"));
         let pdf = tools.iter().find(|t| t["name"] == "pdf").unwrap();
         assert_eq!(pdf["inputSchema"]["required"], json!(["output", "inputs"]));
         assert_eq!(pdf["inputSchema"]["properties"]["inputs"]["type"], "array");

@@ -208,8 +208,13 @@ impl IExplorerCommand_Impl for ExplorerCommand_Impl {
         dup(self.entry.title())
     }
 
+    /// The top entry shows the product icon: group icon id 1 in this DLL's resources
+    /// (`build.rs`), as an icon resource location `"<dll path>,-1"`. Sub-items have none.
     fn GetIcon(&self, _items: Ref<IShellItemArray>) -> Result<PWSTR> {
-        Err(E_NOTIMPL.into())
+        match self.entry {
+            Entry::Top => dup(&format!("{},-1", crate::module_path().display())),
+            _ => Err(E_NOTIMPL.into()),
+        }
     }
 
     fn GetToolTip(&self, _items: Ref<IShellItemArray>) -> Result<PWSTR> {

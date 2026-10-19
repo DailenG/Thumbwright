@@ -7,6 +7,27 @@ on-disk formats may still change.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-19
+
+### Fixed
+
+- **Settings** and **Pick color** in the context menu failed with "takes exactly 0 file
+  argument(s)": the menu passed the selected files to `twctl` commands that take none.
+
+### Added
+
+- Product icon (`packaging/icons/`): embedded in every executable and the DLL, shown for
+  the Windows 11 menu entry, in Programs and Features, and in the Windows 11 extension list
+  (the sparse package now ships its logos at every scale and target size, indexed in
+  `resources.pri`; it previously had single placeholder images and no index, which some
+  shell lists rendered blank).
+
+### Removed
+
+- **Upload** (menu verb and the `upload`, `upload-hosts` and `upload-history` commands). Its
+  default hosts were third-party services; with it gone no Thumbwright component makes a
+  network connection.
+
 ## [0.1.0] - 2026-10-19
 
 First public release. Clean-room implementation of a Windows Explorer thumbnail

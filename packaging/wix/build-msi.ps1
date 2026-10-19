@@ -31,7 +31,7 @@
     Pass `-acceptEula wix7` to wix for this build.
 
 .EXAMPLE
-    .\build-msi.ps1 -SourceDir ..\..\dist -OutFile ..\..\dist\Thumbwright-0.1.0-x64.msi -Version 0.1.0
+    .\build-msi.ps1 -SourceDir ..\..\dist -OutFile ..\..\dist\Thumbwright-0.1.1-x64.msi -Version 0.1.1
 #>
 [CmdletBinding()]
 param(

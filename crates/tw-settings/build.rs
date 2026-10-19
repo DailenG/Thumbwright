@@ -39,6 +39,13 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=build.rs");
 
+    // The product icon (packaging/icons/generate.ps1); link.exe and lld-link accept a
+    // compiled .res as an input, so no resource compiler is needed.
+    let res = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"))
+        .join("../../packaging/icons/thumbwright.res");
+    println!("cargo:rerun-if-changed={}", res.display());
+    println!("cargo:rustc-link-arg-bins={}", res.display());
+
     println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
     println!(
         "cargo:rustc-link-arg-bins=/MANIFESTDEPENDENCY:type='win32' \

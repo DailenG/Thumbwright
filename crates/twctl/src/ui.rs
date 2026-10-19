@@ -1,6 +1,5 @@
-//! Small native dialogs for the interactive verbs: the Cancel-default upload confirmation
-//! (REQ-SEC-3), a one-line prompt, and an editable text window. They run in `twctl`, never
-//! in Explorer.
+//! Small native dialogs for the interactive verbs: a one-line prompt and an editable text
+//! window. They run in `twctl`, never in Explorer.
 
 use std::cell::RefCell;
 
@@ -15,29 +14,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GetClientRect,
-    GetMessageW, GetWindowTextLengthW, GetWindowTextW, IDC_ARROW, IDCANCEL, IDOK, IDYES,
-    IsDialogMessageW, LoadCursorW, MB_DEFBUTTON2, MB_ICONQUESTION, MB_OKCANCEL, MB_SETFOREGROUND,
-    MB_TOPMOST, MSG, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassW, SW_SHOW,
-    SendMessageW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-    WM_COMMAND, WM_DESTROY, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_USER, WNDCLASSW, WS_BORDER,
-    WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    GetMessageW, GetWindowTextLengthW, GetWindowTextW, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW,
+    LoadCursorW, MSG, MoveWindow, PostQuitMessage, RegisterClassW, SW_SHOW, SendMessageW,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_USER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD,
+    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{HSTRING, PCWSTR, w};
-
-/// Confirmation dialog whose default button is Cancel. `true` only on an explicit OK.
-pub fn confirm_cancel_default(text: &str) -> bool {
-    // SAFETY: owner-less message box with valid strings.
-    let r = unsafe {
-        MessageBoxW(
-            None,
-            &HSTRING::from(text),
-            w!("Thumbwright"),
-            MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND,
-        )
-    };
-    r == IDOK || r == IDYES
-}
 
 /// Opts the process into per-monitor DPI awareness (first call wins; failure is harmless).
 pub fn dpi_aware() {

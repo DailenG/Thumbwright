@@ -214,30 +214,6 @@ pub fn lock_screen(input: &Path, max: u64) -> Result<String> {
     Ok(format!("lock screen set from {}", input.display()))
 }
 
-/// Opens `path` with the user's default application for its type.
-pub fn open_in_editor(path: &Path) -> Result<()> {
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    use windows::core::w;
-    // SAFETY: valid NUL-terminated strings; the call only starts another process.
-    let h = unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            &HSTRING::from(path.as_os_str()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    // Values above 32 mean success.
-    if h.0 as usize > 32 {
-        Ok(())
-    } else {
-        Err(format!("cannot open {}", path.display()))
-    }
-}
-
 /// `settings`: starts the settings application that ships next to `twctl.exe`.
 pub fn settings(dir: &Path) -> Result<String> {
     let exe = dir.join(SETTINGS_EXE);

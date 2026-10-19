@@ -55,9 +55,9 @@ The settings window (`thumbwright-settings.exe`) edits the same settings. The co
 `Thumbwright-<version>-x64.msi` installs to `Program Files\Thumbwright` for all users and needs elevation (REQ-REG-8). It ships `thumbwright_shell.dll`, `tw-worker.exe`, `twctl.exe`, `thumbwright-settings.exe`, `Thumbwright.msix`, `LICENSE` and `THIRD_PARTY_LICENSES.md`, and never a `Thumbwright.ini`, so an installed copy is not in portable mode.
 
 ```
-msiexec /i Thumbwright-0.1.0-x64.msi /qn      # silent install
-msiexec /fa Thumbwright-0.1.0-x64.msi /qn     # repair (re-registers)
-msiexec /x  Thumbwright-0.1.0-x64.msi /qn     # uninstall
+msiexec /i Thumbwright-0.1.1-x64.msi /qn      # silent install
+msiexec /fa Thumbwright-0.1.1-x64.msi /qn     # repair (re-registers)
+msiexec /x  Thumbwright-0.1.1-x64.msi /qn     # uninstall
 ```
 
 Registration is done by the DLL, not by the MSI's registry tables: a deferred custom action runs `regsvr32 /s thumbwright_shell.dll` (`DllRegisterServer`, `Scope::Machine`: HKLM class and handler keys plus `Shell Extensions\Approved`, journaled under `HKLM\Software\Thumbwright\Registration`); uninstall runs `regsvr32 /u` before the files are removed, and upgrade and repair re-register cleanly. Details and the reasoning: `packaging/wix/README.md`. Per-user (`twctl register`) is for portable copies only and refuses to run from an installed copy.
@@ -91,7 +91,6 @@ The script runs the dependency audit, `cargo build --release --workspace --locke
 - `ocr <in>`: Windows' built-in OCR engine (runs in `twctl`, never in the shell DLL).
 - `rename`, `sort`, `folder-icon`, `lock-screen`, `pick-color`, `settings`.
 - `convert-to avif|jxl`: pure-Rust encoders (AVIF through `ravif`/`rav1e` without assembly; JPEG XL is lossless only).
-- `upload <file...> [--copy] [--confirm]`, `upload-hosts [--open]`, `upload-history`: HTTPS POST to the hosts in `upload-hosts.conf` (spec 10.3) through WinHTTP. Nothing is sent without an explicit upload command; the menu verb asks first with Cancel as the default button.
 - `--mcp`: MCP server over stdio exposing the CLI's operations plus `view`.
 
 ## Diagnostics log

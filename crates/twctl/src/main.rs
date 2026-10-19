@@ -22,7 +22,6 @@ mod pdf;
 mod prebuild;
 mod strip;
 mod ui;
-mod upload;
 mod verbs;
 mod win;
 
@@ -62,9 +61,6 @@ const USAGE: &str = "usage: twctl <command> [args]
   ocr <in> [--copy] [--window]
   rename --by date|camera-date|artist-title|track-title|pattern [--pattern P] [--ask] <file...>
   sort --by size|date|tag [--tag artist|album|genre|year] [--ask] <file...>
-  upload <file...> [--copy] [--confirm]
-  upload-hosts [--open]
-  upload-history [--json]
   pick-color
   lock-screen <in>
   folder-icon <in>

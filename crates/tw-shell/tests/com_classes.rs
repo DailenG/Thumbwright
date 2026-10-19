@@ -707,9 +707,13 @@ fn explorer_command_enumerates_the_menu_tree_for_a_png() {
             root.GetCanonicalName().unwrap(),
             GUID::from_u128(ids::CLSID_EXPLORER_COMMAND.guid)
         );
-        assert_eq!(
-            root.GetIcon(&items).err().map(|e| e.code()),
-            Some(E_NOTIMPL)
+        // The product icon: group icon 1 in the loaded DLL itself.
+        let icon = lpwstr_to_string(root.GetIcon(&items).unwrap());
+        let (path, index) = icon.rsplit_once(',').unwrap();
+        assert_eq!(index, "-1", "{icon}");
+        assert!(
+            Path::new(path).ends_with(ids::SHELL_DLL_NAME) && Path::new(path).is_file(),
+            "{icon}"
         );
     }
 
@@ -719,6 +723,12 @@ fn explorer_command_enumerates_the_menu_tree_for_a_png() {
         .iter()
         .filter(|c| unsafe { c.GetState(&items, false) }.unwrap() == ECS_ENABLED.0 as u32)
         .collect();
+    // Only the top entry has an icon.
+    // SAFETY: plain COM call.
+    assert_eq!(
+        unsafe { shown[0].GetIcon(&items) }.err().map(|e| e.code()),
+        Some(E_NOTIMPL)
+    );
     let titles: Vec<String> = shown
         .iter()
         .map(|c| {
@@ -744,7 +754,6 @@ fn explorer_command_enumerates_the_menu_tree_for_a_png() {
             "Copy to clipboard",
             "Copy text (OCR)",
             "Copy as data URI",
-            "Upload (copy link)",
             "-",
             "Combine into PDF",
             "Combine into searchable PDF (OCR)",
@@ -1076,4 +1085,37 @@ fn verbose_log_records_a_menu_verb_launch() {
     // SAFETY: as above.
     unsafe { png_cmd.Invoke(&items, None).unwrap() };
     assert!(trace_lines(&log_since(before)).is_empty());
+}
+
+/// The menu passed the selection to `twctl settings` and `twctl pick-color`, which take no
+/// file and refused with "takes exactly 0 file argument(s)". The launch trace records how many
+/// files went on the command line.
+#[test]
+fn file_less_verbs_launch_without_the_selection() {
+    let s = Scratch::new("verbose-fileless");
+    let png = s.file("pic.png", &red_png(8, 8));
+    let items = items_for(&png);
+    let root: IExplorerCommand = create(ids::CLSID_EXPLORER_COMMAND);
+    let top = children(&root);
+    let find = |label: &str| {
+        top.iter()
+            .find(|c| title(c, &items).starts_with(label))
+            .unwrap_or_else(|| panic!("no {label:?} item"))
+            .clone()
+    };
+    let _on = Settings::set("VerboseLog=1");
+    for (label, files) in [("Settings", 0), ("Pick color", 0), ("Image info", 1)] {
+        let cmd = find(label);
+        let before = log_len();
+        // SAFETY: plain COM call; launches the stand-in `twctl.exe`.
+        unsafe { cmd.Invoke(&items, None).unwrap() };
+        let log = log_since(before);
+        let lines = trace_lines(&log);
+        assert_eq!(lines.len(), 1, "{label}");
+        assert!(
+            lines[0].contains(&format!("files={files} ")),
+            "{label}: {}",
+            lines[0]
+        );
+    }
 }

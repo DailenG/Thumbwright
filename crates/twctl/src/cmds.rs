@@ -1,5 +1,5 @@
 //! Command arms for the verbs added on top of the core CLI: batch, prebuild, combine,
-//! OCR, organise, upload, shell verbs, doctor and the MCP server.
+//! OCR, organise, shell verbs, doctor and the MCP server.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use tw_core::config::Settings;
 
 use crate::ops::{self, Result};
 use crate::{
-    Cli, doctor, eyedropper, jobs, mcp, meta, ocr, organize, pdf, prebuild, ui, upload, verbs, win,
+    Cli, doctor, eyedropper, jobs, mcp, meta, ocr, organize, pdf, prebuild, ui, verbs, win,
 };
 
 /// Page margin (PDF units) when the "margin on combined PDFs" setting is on.
@@ -76,109 +76,6 @@ fn write_combined(
         Target::Auto(first) => ops::write_new(&first, " (combined)", ext, bytes)?,
     };
     Ok(if json { c.json(&out) } else { c.summary(&out) })
-}
-
-fn confirm_text(files: &[PathBuf], hosts: &[upload::Host]) -> String {
-    const SHOWN: usize = 8;
-    let mut s = format!(
-        "Upload {} file{} to the internet?\n\n",
-        files.len(),
-        if files.len() == 1 { "" } else { "s" }
-    );
-    for f in files.iter().take(SHOWN) {
-        s.push_str(&format!(
-            "  {}\n",
-            f.file_name().map_or_else(
-                || f.display().to_string(),
-                |n| n.to_string_lossy().into_owned()
-            )
-        ));
-    }
-    if files.len() > SHOWN {
-        s.push_str(&format!("  ... and {} more\n", files.len() - SHOWN));
-    }
-    let names: Vec<String> = hosts
-        .iter()
-        .map(|h| {
-            h.url
-                .trim_start_matches("https://")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .to_owned()
-        })
-        .collect();
-    s.push_str(&format!(
-        "\nThe file{} will be sent over HTTPS to the first of these hosts that accepts it, and anyone with the link can open it:\n  {}",
-        if files.len() == 1 { "" } else { "s" },
-        names.join(", ")
-    ));
-    s
-}
-
-fn upload_cmd(cli: &Cli, dir: &Path) -> Result<String> {
-    cli.allow(&[], &["--copy", "--confirm"])?;
-    let files = cli.files()?;
-    let hosts = upload::load_hosts(dir)?;
-    if cli.flag("--confirm") && !ui::confirm_cancel_default(&confirm_text(&files, &hosts)) {
-        return Ok("upload cancelled".into());
-    }
-    let (mut links, mut errors) = (Vec::new(), Vec::new());
-    for f in &files {
-        match upload::upload_file(&hosts, f) {
-            Ok(up) => {
-                if let Err(e) = upload::record(f, &up) {
-                    tw_core::log::error(&format!("upload history: {e}"));
-                }
-                links.push((f.clone(), up));
-            }
-            Err(e) => errors.push(e),
-        }
-    }
-    let text: Vec<String> = links
-        .iter()
-        .map(|(f, up)| {
-            if files.len() == 1 {
-                up.link.clone()
-            } else {
-                format!("{} -> {}", f.display(), up.link)
-            }
-        })
-        .collect();
-    if cli.flag("--copy") && !links.is_empty() {
-        let joined: Vec<&str> = links.iter().map(|(_, u)| u.link.as_str()).collect();
-        win::copy_text(&joined.join("\r\n"))?;
-    }
-    if errors.is_empty() {
-        // Menu invocation: tell the user where the link went.
-        if cli.flag("--notify") {
-            win::message(
-                &format!(
-                    "{}\n\n{}",
-                    if cli.flag("--copy") {
-                        "Link copied to the clipboard:"
-                    } else {
-                        "Uploaded:"
-                    },
-                    text.join("\n")
-                ),
-                false,
-            );
-        }
-        Ok(text.join("\n"))
-    } else {
-        Err(format!(
-            "{} of {} failed:\n{}{}",
-            errors.len(),
-            files.len(),
-            errors.join("\n"),
-            if text.is_empty() {
-                String::new()
-            } else {
-                format!("\nuploaded:\n{}", text.join("\n"))
-            }
-        ))
-    }
 }
 
 fn batch_cmd(cli: &Cli, settings: &Settings, dir: &Path) -> Result<String> {
@@ -410,21 +307,6 @@ pub fn run(cli: &Cli, dir: &Path, settings: &Settings, max: u64) -> Option<Resul
         "ocr" => ocr_cmd(cli, max),
         "rename" => rename_cmd(cli, max),
         "sort" => sort_cmd(cli, max),
-        "upload" => upload_cmd(cli, dir),
-        "upload-hosts" => (|| {
-            cli.allow(&[], &["--open"])?;
-            cli.exactly(0)?;
-            let path = upload::ensure_hosts_file(dir)?;
-            if cli.flag("--open") {
-                verbs::open_in_editor(&path)?;
-            }
-            Ok(path.display().to_string())
-        })(),
-        "upload-history" => (|| {
-            cli.allow(&[], &["--json"])?;
-            cli.exactly(0)?;
-            upload::history(cli.flag("--json"))
-        })(),
         "pick-color" => pick_color_cmd(cli),
         "lock-screen" => (|| {
             cli.allow(&[], &[])?;

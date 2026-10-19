@@ -456,7 +456,6 @@ fn context_menu_tree_for_single_png() {
                 "Copy to clipboard",
                 "Copy text (OCR)",
                 "Copy as data URI",
-                "Upload (copy link)",
                 "Combine into PDF",
                 "Combine into searchable PDF (OCR)",
                 "Combine into CBZ (comic)",

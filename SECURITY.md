@@ -29,9 +29,10 @@ differently:
   (decompression bombs, header bombs, deeply nested metadata): the worker dies,
   the surrogate survives.
 - **`twctl` and the settings app** run as your user, launched from the menu.
-  They validate before they write (atomic, exclusive staging), refuse
-  predictable-name attacks, and ask before anything that leaves the machine
-  (upload).
+  They validate before they write (atomic, exclusive staging) and refuse
+  predictable-name attacks.
+- **No network access.** No component opens a network connection: there is
+  no upload, telemetry or update check.
 
 The full review that established this, and the hostile-input findings and
 their fixes, are in `docs/history/REVIEW_FINDINGS.md`. The invariants the code
