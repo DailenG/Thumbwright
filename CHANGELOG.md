@@ -7,6 +7,42 @@ on-disk formats may still change.
 
 ## [Unreleased]
 
+### Changed
+
+- **Right-click menu, Windows 11:** the packaged entry is now one "Thumbwright" item (it was
+  a submenu that Windows 11 showed empty, or cut off after 16 commands). Clicking it opens
+  Thumbwright's own popup at the cursor (`twctl menu`), in the system's dark or light theme,
+  with a header row (file name, size, preview). The classic menu no longer adds a second
+  "Thumbwright" entry on Windows 11 while the package is registered for the user (folders
+  keep "Build thumbnails for this folder"). `THUMBWRIGHT_CLASSIC_MENU=1` brings the classic
+  menu back for diagnosis.
+- **One menu structure, shorter and clearer,** shared by both menus: Convert to, Resize,
+  Rotate & flip, Make smaller (email sizes, under 1/5/10 MB, remove location & camera info),
+  Copy text from image, Copy, Combine into (2+ files), Organise (rename, sort, move into a new
+  folder), Details, Set as (lock screen, folder icon), Thumbwright Workbench. Items that do not
+  apply to the selection are hidden, not greyed (audio renames only for audio, Combine only
+  for 2+ files, Set as only for one file). Saved menu order and hidden items keep working for
+  the items that kept their id (`convert_into`, `resize`, `rotate`, `copy_text`, `copy`,
+  `image_info`, `settings`). Items that merged into groups (`email`, `compress`, `strip_meta`
+  into `make_smaller`; the combine, rename, sort and folder items into `combine` and
+  `organise`; `lock_screen` and `folder_icon` into `set_as`) start visible again, and their
+  old hidden or ordered entries are ignored.
+- The menu preview is on or off (the "in the submenu" / "in the menu itself" choice is gone;
+  both old values read as on).
+
+### Fixed
+
+- Classic menu: when the shell offered a short command-id range, the whole "Thumbwright"
+  entry vanished; it now takes the first id and shows what fits.
+- Classic menu: the preview row broke dark mode (light preview background, white separator
+  bars, invisible submenu arrows). The preview is now a themed item bitmap.
+- Labels containing `&` ("Rotate & flip") lost the character to a menu mnemonic.
+
+### Removed
+
+- "Set as wallpaper" (Windows has "Set as desktop background") and "Pick color" from the
+  file menu. `twctl wallpaper` and `twctl pick-color` remain.
+
 ## [0.1.1] - 2026-10-19
 
 ### Fixed

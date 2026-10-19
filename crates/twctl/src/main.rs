@@ -19,6 +19,7 @@ mod ocr;
 mod ops;
 mod organize;
 mod pdf;
+mod popup;
 mod prebuild;
 mod strip;
 mod ui;
@@ -65,6 +66,7 @@ const USAGE: &str = "usage: twctl <command> [args]
   lock-screen <in>
   folder-icon <in>
   settings
+  menu [--at X,Y] <file...>
   doctor [file] [--bundle out.zip]
   --mcp
   formats [--json]
@@ -92,6 +94,7 @@ const VALUE_OPTS: &[&str] = &[
     "--max-size",
     "--style",
     "--files-from",
+    "--at",
     "--out",
     "--retry-from",
     "--bundle",
@@ -565,6 +568,24 @@ fn run(cli: &Cli) -> Result<String> {
             cli.allow(&[], &["--json"])?;
             cli.exactly(0)?;
             Ok(formats_listing(cli.flag("--json")))
+        }
+        "menu" => {
+            cli.allow(&["--at"], &[])?;
+            let files = cli.files()?;
+            let at = cli
+                .opt("--at")
+                .map_or_else(|| Ok(popup::cursor()), popup::parse_at)?;
+            let Some(verb) = popup::choose(&settings, &files, at)? else {
+                return Ok(String::new());
+            };
+            // The choice runs here, through the same dispatch as a verb started from the
+            // classic menu (`twctl <verb> --notify <files>`).
+            let args = verb
+                .argv(&files)
+                .into_iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            run(&parse(args)?)
         }
         "register" => {
             cli.allow(&[], &["--off", "--status"])?;

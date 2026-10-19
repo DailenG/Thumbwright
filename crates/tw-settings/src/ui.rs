@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::path::PathBuf;
 
-use tw_core::config::{self, MENU_ITEMS, MenuPreview, Settings};
+use tw_core::config::{self, MENU_ITEMS, Settings};
 use tw_core::registration::{Layout, Scope};
 use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM,
@@ -635,11 +635,8 @@ impl App {
         set_checked(self.c.menu_here, s.menu_build_here);
         set_text(self.c.max_file, &s.max_file_mb.to_string());
         set_text(self.c.max_thumb, &s.max_thumb_px.to_string());
-        let which = match s.menu_preview {
-            MenuPreview::Off => 0,
-            MenuPreview::InSubmenu => 1,
-            MenuPreview::InContextMenu => 2,
-        };
+        // The preview is on or off now; the first two radio buttons stand for those.
+        let which = usize::from(s.menu_preview);
         for (i, &h) in self.c.preview.iter().enumerate() {
             set_checked(h, i == which);
         }
@@ -758,13 +755,7 @@ impl App {
             16,
             u64::from(tw_core::limits::DEFAULT_MAX_THUMB_EDGE),
         )? as u32;
-        s.menu_preview = if is_checked(self.c.preview[0]) {
-            MenuPreview::Off
-        } else if is_checked(self.c.preview[2]) {
-            MenuPreview::InContextMenu
-        } else {
-            MenuPreview::InSubmenu
-        };
+        s.menu_preview = !is_checked(self.c.preview[0]);
         // Entries for extensions or menu items this window does not list are not ours to drop.
         let listed_type = |e: &str| self.types.iter().any(|t| t.ext == e);
         s.disabled_types = self
@@ -1267,9 +1258,9 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         menu_enabled: false,
         menu_all_file_types: true,
         menu_build_here: false,
-        menu_preview: MenuPreview::InContextMenu,
+        menu_preview: false,
         // A saved order lists every item (the window writes the full order).
-        menu_order: config::ordered_menu_ids(&["wallpaper".into(), "resize".into()])
+        menu_order: config::ordered_menu_ids(&["set_as".into(), "resize".into()])
             .into_iter()
             .map(String::from)
             .collect(),
@@ -1305,7 +1296,7 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         &format!("controls do not read back their settings:\n{read:?}\n{settings:?}"),
     )?;
 
-    // A user ticking .png back on, and unticking the first menu row (wallpaper).
+    // A user ticking .png back on, and unticking the first menu row (set_as).
     let png = all
         .iter()
         .position(|f| f.ext == "png")
@@ -1320,7 +1311,7 @@ pub fn self_test(dir: PathBuf) -> Result<String, String> {
         "type toggle",
     )?;
     check(
-        after.hidden_menu_items.contains(&"wallpaper".to_string()),
+        after.hidden_menu_items.contains(&"set_as".to_string()),
         "menu visibility toggle",
     )?;
     check(
