@@ -7,6 +7,7 @@
     <authors>Dailen Gunter</authors>
     <owners>Dailen</owners>
     <projectUrl>https://daileng.github.io/Thumbwright/</projectUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/DailenG/Thumbwright@168fc0f0c87bbfa9795ee7dfb4ae75449aeff6d1/site/img/icon.png</iconUrl>
     <projectSourceUrl>https://github.com/DailenG/Thumbwright</projectSourceUrl>
     <packageSourceUrl>https://github.com/DailenG/Thumbwright/tree/main/packaging/chocolatey</packageSourceUrl>
     <bugTrackerUrl>https://github.com/DailenG/Thumbwright/issues</bugTrackerUrl>
