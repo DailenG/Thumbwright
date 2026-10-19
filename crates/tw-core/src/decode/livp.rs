@@ -3,8 +3,9 @@
 //!
 //! The still is pulled out of the ZIP under the usual entry/total budgets
 //! ([`super::zip_preview::livp_still`]). A JPEG/PNG still is decoded in Rust; a HEIC/HEIF
-//! still needs the OS codecs, so this decoder runs in the worker process
-//! (`Placement::Worker`, REQ-ISO-2) where WIC is allowed.
+//! still goes to `open-heic` ([`super::heif`]) and, when that cannot decode it, to the OS
+//! codecs; WIC is only allowed in the worker process, so this decoder runs there
+//! (`Placement::Worker`, REQ-ISO-2).
 
 use image::DynamicImage;
 
@@ -16,11 +17,20 @@ pub const EXTENSIONS: &[&str] = &["livp"];
 pub fn extract(data: &[u8], edge: u32) -> Result<DynamicImage> {
     let (still, ext) = livp_still(data)?;
     if matches!(ext, "heic" | "heif") {
-        return wic(&still, edge);
+        return heif_then_wic(&still, edge);
     }
     match decode_bytes(&still) {
         // A mislabelled HEIC inside a ".jpg" entry.
-        Err(DecodeError::Unsupported) => wic(&still, edge),
+        Err(DecodeError::Unsupported) => heif_then_wic(&still, edge),
+        other => other,
+    }
+}
+
+/// `open-heic`, then the OS codec for what it declines or cannot decode. A budget failure
+/// (`TooLarge`, `Timeout`) is final (REQ-TMO-1).
+fn heif_then_wic(still: &[u8], edge: u32) -> Result<DynamicImage> {
+    match super::heif::decode(still, edge) {
+        Err(e) if e.falls_through() => wic(still, edge),
         other => other,
     }
 }
@@ -69,6 +79,20 @@ mod tests {
         assert_eq!(img.dimensions(), (40, 30));
         let p = img.get_pixel(20, 15).0;
         assert!(p[0] > 180 && p[1] > 80 && p[1] < 120 && p[2] < 80, "{p:?}");
+    }
+
+    /// The HEIC still is decoded by `open-heic`, with no OS codec involved.
+    #[test]
+    fn livp_with_heic_still_decodes_with_open_heic() {
+        let heic = include_bytes!("../../tests/fixtures/heic/quad.heic");
+        let z = zip(&[
+            ("IMG_0001.MOV", b"\0\0\0\x14ftypqt  movie bytes"),
+            ("IMG_0001.HEIC", heic),
+        ]);
+        assert_eq!(extract(&z, 256).unwrap().dimensions(), (160, 120));
+        // A HEIC under a ".jpg" entry name is found by content.
+        let z = zip(&[("IMG_0002.JPG", heic)]);
+        assert_eq!(extract(&z, 256).unwrap().dimensions(), (160, 120));
     }
 
     #[test]

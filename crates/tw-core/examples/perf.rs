@@ -641,7 +641,7 @@ fn gen_corpus(dir: &Path) {
             )),
         );
     }
-    // JPEG content under a HEIC name: routed straight to the WIC worker.
+    // JPEG content under a HEIC name: the HEIF worker declines it, the in-process raster tier decodes it.
     for i in 0..6 {
         put(
             format!("heic_{i:03}.heic"),

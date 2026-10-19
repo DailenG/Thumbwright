@@ -17,6 +17,7 @@ pub mod design;
 pub mod djvu;
 pub mod ebook;
 pub mod exif;
+pub mod heif;
 pub mod j2k;
 pub mod jxl;
 pub mod livp;

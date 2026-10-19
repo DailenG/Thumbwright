@@ -7,6 +7,23 @@ on-disk formats may still change.
 
 ## [Unreleased]
 
+### Changed
+
+- **HEIC and HEIF thumbnails and conversions no longer need Microsoft's Store codecs.**
+  `.heic`, `.heif`, `.hif`, `.heics` and `.heifs` (iPhone, Android and camera photos: HEVC
+  stills, tiled grids, embedded thumbnails, rotation and mirroring, 8/10-bit) are decoded by
+  [`open-heic`](https://github.com/DailenG/open-heic), a pure-Rust reader (MIT OR Apache-2.0,
+  `forbid(unsafe_code)`) pinned by commit. It runs in the isolated worker, because its HEVC
+  decoder is young and panics on corrupt streams; the shell asks for the file's embedded
+  thumbnail first, which takes milliseconds. Windows' own codecs stay as the fallback for what
+  `open-heic` cannot read (JPEG-coded HEIF items, overlays, 4:2:2/4:4:4 chroma), and a JPEG
+  saved under a `.heic` name is decoded in-process. Live Photo (`.livp`) stills use the same
+  path. Known limit: the separate transparency plane Apple writes for portrait-mode cutouts is
+  not applied, so those images show opaque. AVIF and AVCI are unchanged (Windows codecs only).
+- `twctl doctor` now says HEIC/HEIF thumbnails are built in and lists the Store HEIF and HEVC
+  extensions as an optional fallback.
+- The format table no longer lists an OS codec for the HEIC family.
+
 ## [0.1.2] - 2026-10-19
 
 ### Changed

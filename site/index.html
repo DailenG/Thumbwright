@@ -617,8 +617,8 @@ choco upgrade thumbwright</pre>
     </div>
     <div class="reqs">
       <div class="note warn rv">
-        <h3>HEIC photos need a free Microsoft add-on</h3>
-        <p>Windows decodes HEIC, HEIF and AVIF itself, and it only has the codecs if you install Microsoft's <b>HEIF Image Extensions</b> and <b>HEVC Video Extensions</b> from the Microsoft Store (AVIF needs the AV1 extension). Run <code>twctl doctor</code> and it tells you which ones are missing. Camera RAW, JPEG XL and most other formats need nothing extra.</p>
+        <h3>HEIC photos need nothing extra; AVIF needs a free Microsoft add-on</h3>
+        <p>Thumbwright decodes HEIC and HEIF photos (iPhone, Android, cameras) itself, with no Microsoft Store codec. If a file uses a variant it cannot read, it tries Windows' own codecs when you have the <b>HEIF Image Extensions</b> and <b>HEVC Video Extensions</b> installed. AVIF and AVCI pictures are decoded by Windows only, so they need the Store's AV1 and HEIF extensions. Run <code>twctl doctor</code> and it tells you which ones are missing. Camera RAW, JPEG XL and most other formats need nothing extra.</p>
       </div>
       <div class="note rv">
         <h3>What has been tested</h3>
@@ -642,7 +642,7 @@ choco upgrade thumbwright</pre>
     <div class="faq rv">
       <details name="faq">
         <summary>Why do my HEIC files still have no thumbnail?</summary>
-        <div class="ans"><p>HEIC is decoded by Windows, not by Thumbwright, and Windows needs two free add-ons from the Microsoft Store: <b>HEIF Image Extensions</b> and <b>HEVC Video Extensions</b>. Install both, then run <code>twctl doctor</code> to confirm. If thumbnails still look stale, another program may own the <code>.heic</code> type, see the next question.</p></div>
+        <div class="ans"><p>HEIC is decoded by Thumbwright itself, so the Microsoft Store codecs are not needed. A missing thumbnail usually means the file is damaged, uses a variant the built-in decoder cannot read (then Windows' <b>HEIF Image Extensions</b> and <b>HEVC Video Extensions</b> help, if installed), or another program owns the <code>.heic</code> type, see the next question. Run <code>twctl doctor</code> on the file to see which.</p></div>
       </details>
       <details name="faq">
         <summary>Why does another app still draw some of my thumbnails?</summary>
@@ -873,11 +873,11 @@ choco upgrade thumbwright</pre>
 ["hdp","HD Photo (JPEG XR)","Raster","FullDecode",1,1,"WicJpegXr"],
 ["hdr","Radiance RGBE image format","Raster","FullDecode",1,1,"None"],
 ["hdri","Radiance HDR image format","Raster","FullDecode",1,1,"None"],
-["heic","High Efficiency Image Format","Raster","FullDecode",1,1,"WicHeif"],
-["heics","HEIF image sequence","Raster","FullDecode",1,1,"WicHeif"],
-["heif","High Efficiency Image Format","Raster","FullDecode",1,1,"WicHeif"],
-["heifs","HEIF image sequence","Raster","FullDecode",1,1,"WicHeif"],
-["hif","High Efficiency Image Format","Raster","FullDecode",1,1,"WicHeif"],
+["heic","High Efficiency Image Format","Raster","FullDecode",1,1,"None"],
+["heics","HEIF image sequence","Raster","FullDecode",1,1,"None"],
+["heif","High Efficiency Image Format","Raster","FullDecode",1,1,"None"],
+["heifs","HEIF image sequence","Raster","FullDecode",1,1,"None"],
+["hif","High Efficiency Image Format","Raster","FullDecode",1,1,"None"],
 ["icb","Truevision Targa image","Raster","FullDecode",1,1,"None"],
 ["icns","Apple Icon Image","Design","EmbeddedPreview",1,1,"None"],
 ["ico","Microsoft icon","Raster","FullDecode",1,1,"None"],

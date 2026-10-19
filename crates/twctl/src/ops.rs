@@ -121,8 +121,9 @@ pub fn read_input(p: &Path, max_bytes: u64) -> Result<Vec<u8>> {
 /// process; decoders that parse hostile tags or call OS codecs or fixed-function libraries
 /// (audio tags can overflow the stack, which would end `twctl` without the `--notify` message
 /// box; WIC, video, PDF and metafiles use OS codecs and need COM, which only the worker
-/// initialises; DjVu and JPEG 2000 cannot bound their allocation) go through the
-/// Job-Object-confined worker, like in the shell. `twctl` never hosts WIC itself (I2).
+/// initialises; DjVu and JPEG 2000 cannot bound their allocation; the HEVC decoder behind
+/// HEIC panics on corrupt streams) go through the Job-Object-confined worker, like in the
+/// shell. `twctl` never hosts WIC itself (I2).
 pub fn decode_full(p: &Path, max_bytes: u64) -> Result<DynamicImage> {
     decode_bytes(p, read_input(p, max_bytes)?)
 }
@@ -199,7 +200,7 @@ fn isolated_edge(decoder: Decoder) -> Option<u32> {
         Decoder::Pdf | Decoder::Metafile | Decoder::OleMetafile | Decoder::Djvu => {
             Some(VECTOR_EDGE)
         }
-        Decoder::J2k | Decoder::Wic | Decoder::Livp => Some(RASTER_EDGE),
+        Decoder::J2k | Decoder::Wic | Decoder::Heif | Decoder::Livp => Some(RASTER_EDGE),
         Decoder::Archive => Some(VECTOR_EDGE),
         Decoder::Audio | Decoder::Video => Some(COVER_ART_EDGE),
         _ => None,

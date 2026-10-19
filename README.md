@@ -23,7 +23,7 @@ Free · open source · no internet access · Windows 10/11</p>
 
 - **Thumbnails only** (no right-click menu): `msiexec /i Thumbwright-<version>-x64.msi /qn MENU=0`. Pick a Starter kit with `KIT=photos|paperwork|design|cad|thumbnails|everything`; with Chocolatey, `choco install thumbwright --params "/Menu:0 /Kit:photos"`.
 
-HEIC and HEIF files need the free Microsoft HEIF and HEVC extensions from the Microsoft Store; `twctl doctor` tells you whether they are present.
+HEIC and HEIF photos (iPhone, Android, cameras) are decoded by Thumbwright itself and need no Microsoft Store codec. AVIF and AVCI thumbnails use the Microsoft Store AV1 and HEIF extensions; `twctl doctor` tells you whether they are present.
 
 ## What you get
 
@@ -79,7 +79,7 @@ Run `twctl formats` for the full list, or use the lookup box on the [website](ht
 
 - Pre-1.0: interfaces and on-disk formats may still change.
 - Tested on Windows 11 build 26340. Windows 10 is not yet tested (classic menu only there).
-- HEIC, HEIF, AVCI and AVIF thumbnails need the Microsoft Store codec extensions (HEIF, HEVC, AV1).
+- HEIC and HEIF are decoded by a built-in pure-Rust decoder (HEVC photos, grids, embedded thumbnails, rotation). Variants it cannot read, such as JPEG-coded HEIF items, fall back to the Microsoft HEIF and HEVC Store extensions if installed. Known limit: the transparency channel Apple writes for portrait-mode cutouts is not applied, so those images show opaque. AVIF and AVCI thumbnails need the Microsoft Store extensions (AV1, HEIF).
 - Video frames use Media Foundation. "N" editions of Windows need the Media Feature Pack.
 - File types already owned by another program (for example a cloud-storage app's thumbnail handler) are left alone. Thumbwright never takes over another app's handler automatically, and `twctl doctor` lists them.
 - Windows' own handler wins for some types, such as .jpg (Photo Thumbnail Provider) and .ico.
@@ -93,7 +93,7 @@ Run `twctl doctor`: it checks each part and prints a fix hint for every problem.
 <details>
 <summary>Why do my HEIC files have no thumbnail?</summary>
 
-Windows needs the free HEIF and HEVC extensions from the Microsoft Store to decode HEIC. Install them, then run `twctl doctor` to confirm. Another program may also own .heic; see the next question.
+HEIC and HEIF thumbnails are built in and need no Microsoft Store codec, so a missing thumbnail usually means the file is damaged, uses a variant the built-in decoder does not support (it then tries Windows' codecs, if installed), or another program owns .heic; see the next question. Run `twctl doctor` on the file.
 </details>
 
 <details>

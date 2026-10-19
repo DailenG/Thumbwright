@@ -22,6 +22,9 @@ jxl-oxide = { version = "0.12.6", default-features = false }
 lofty = "0.25.4"
 memchr = { version = "2", default-features = false }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+# HEIC/HEIF (HEVC): the author's pure-Rust reader (`forbid(unsafe_code)`). Not on crates.io, so it
+# is pinned by commit; `cargo xtask licenses` takes its licence from its Cargo.toml.
+open-heic = { git = "https://github.com/DailenG/open-heic", rev = "cfa6d66e3a75ecf4040f70ac0d76c0582be9504b" }
 psd = "0.3.5"
 resvg = "0.48.1"
 ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }

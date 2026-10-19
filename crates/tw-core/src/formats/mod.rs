@@ -97,7 +97,8 @@ mod tests {
     #[test]
     fn lookup_is_case_and_dot_insensitive() {
         assert_eq!(lookup(".PNG").map(|f| f.ext), Some("png"));
-        assert_eq!(lookup("Heic").map(|f| f.os_codec), Some(OsCodec::WicHeif));
+        assert_eq!(lookup("Heic").map(|f| f.os_codec), Some(OsCodec::None));
+        assert_eq!(lookup("avci").map(|f| f.os_codec), Some(OsCodec::WicHeif));
         assert!(lookup("exe").is_none());
         assert!(!lookup("zip").unwrap().convertible);
     }

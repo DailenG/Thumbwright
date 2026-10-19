@@ -738,18 +738,24 @@ fn capability(doc: &mut Doc) {
             os(OsCodec::WicJpegXr)
         ),
     );
+    // HEIC/HEIF are decoded by the built-in `open-heic` first; the Store extensions are only
+    // the fallback for what it cannot do (JPEG-coded items, overlays), and the only way to
+    // decode AVC (AVCI) stills.
     doc.line(
-        if heif { Level::Ok } else { Level::Warn },
+        Level::Ok,
+        "HEIC/HEIF thumbnails: built in, no Microsoft Store codec needed",
+    );
+    doc.line(
+        if heif { Level::Ok } else { Level::Info },
         format!(
-            "WIC HEIF: {} ({} formats depend on it)",
-            if heif { "present" } else { "missing" },
-            os(OsCodec::WicHeif)
+            "WIC HEIF (Store HEIF Image Extensions): {} (optional fallback; AVCI stills need it)",
+            if heif { "present" } else { "not found" }
         ),
     );
     doc.line(
-        if hevc { Level::Ok } else { Level::Info },
+        Level::Info,
         format!(
-            "HEVC video extension: {} (needed for HEIC photos)",
+            "HEVC video extension: {} (optional fallback for HEIC files the built-in decoder cannot read)",
             if hevc { "installed" } else { "not found" }
         ),
     );

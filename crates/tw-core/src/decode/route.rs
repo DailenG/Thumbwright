@@ -31,8 +31,11 @@ pub enum Decoder {
     Zip = 8,
     /// SVG / SVGZ via resvg.
     Svg = 9,
-    /// Windows Imaging Component (OS codecs, C++): HEIF, JPEG XR, AVIF, RAW extension.
+    /// Windows Imaging Component (OS codecs, C++): JPEG XR, AVIF, AVCI, RAW extension, and
+    /// the fallback for HEIC/HEIF files `open-heic` cannot decode.
     Wic = 10,
+    /// HEIC/HEIF stills (HEVC) via `open-heic`, pure Rust, no OS codec needed.
+    Heif = 11,
     /// Design/package embedded previews: InDesign, Corel, EPS, Blender, ICNS, Aseprite, Paint.NET.
     Design = 70,
     /// Previews embedded in CAD, slicer and drawing files (G-code, DWG, DXF, CLIP).
@@ -59,7 +62,7 @@ pub enum Decoder {
     /// 7-Zip and RAR (incl. comic variants): contact sheet or first image. Worker: real
     /// decompression with attacker-chosen dictionary sizes.
     Archive = 61,
-    /// Apple Live Photo bundle: ZIP holding a HEIC/JPEG still (HEIC needs WIC, so worker).
+    /// Apple Live Photo bundle: ZIP holding a HEIC/JPEG still (HEIC: `open-heic`, then WIC).
     Livp = 62,
     /// Scientific, medical, film, texture and network formats (FITS, DPX, DICOM, XCF, ...).
     Sci = 40,
@@ -80,7 +83,7 @@ pub enum Placement {
 }
 
 impl Decoder {
-    pub const ALL: [Decoder; 25] = [
+    pub const ALL: [Decoder; 26] = [
         Self::Raster,
         Self::Jxl,
         Self::Pcx,
@@ -91,6 +94,7 @@ impl Decoder {
         Self::Zip,
         Self::Svg,
         Self::Wic,
+        Self::Heif,
         Self::Design,
         Self::Cad,
         Self::Mesh,
@@ -111,6 +115,7 @@ impl Decoder {
     pub fn placement(self) -> Placement {
         match self {
             Self::Svg
+            | Self::Heif
             | Self::Wic
             | Self::Audio
             | Self::Djvu
@@ -152,6 +157,7 @@ impl Decoder {
         match self {
             Self::Raster => super::raster::decode(data, Some(ext)),
             Self::Jxl => super::jxl::decode(data),
+            Self::Heif => super::heif::decode(data, edge),
             Self::Pcx => super::pcx::decode(data),
             Self::Sgi => super::sgi::decode(data),
             Self::Psd => super::psd::extract(data),
@@ -206,9 +212,9 @@ pub const PDF_EXTENSIONS: &[&str] = &["pdf", "ai"];
 /// Windows metafiles, plain and gzip-compressed.
 pub const METAFILE_EXTENSIONS: &[&str] = &["emf", "emz", "wmf", "wmz", "emg"];
 
-const WIC_ONLY: &[&str] = &[
-    "heic", "heif", "hif", "heics", "heifs", "avci", "avif", "avifs", "jxr", "wdp", "hdp", "wmp",
-];
+/// Formats only the OS imaging codecs decode: AVC and AV1 stills (the Microsoft Store AVC /
+/// AV1 extensions) and JPEG XR.
+const WIC_ONLY: &[&str] = &["avci", "avif", "avifs", "jxr", "wdp", "hdp", "wmp"];
 
 /// Ordered tier chain for an extension (lower-case, no dot). Empty means "not handled":
 /// such types are never registered, so Windows' own handler stays in charge.
@@ -216,6 +222,12 @@ pub fn chain_for_ext(ext: &str) -> &'static [Decoder] {
     use Decoder::*;
     if super::raster::format_for_ext(ext).is_some() {
         return &[Raster, Wic];
+    }
+    if super::heif::EXTENSIONS.contains(&ext) {
+        // `open-heic` first. The OS codec stays as the fallback for what it cannot decode
+        // (JPEG-coded items, overlays, Store-codec-only variants). A JPEG under a HEIC name
+        // is not a HEIF file: `Raster` takes it in-process, ahead of the worker-hosted WIC.
+        return &[Heif, Raster, Wic];
     }
     if WIC_ONLY.contains(&ext) {
         return &[Wic];
@@ -338,6 +350,7 @@ mod tests {
     fn every_routed_extension_is_in_the_spec_matrix() {
         for ext in WIC_ONLY
             .iter()
+            .chain(super::super::heif::EXTENSIONS)
             .chain(super::super::pcx::EXTENSIONS)
             .chain(super::super::sgi::EXTENSIONS)
             .chain(super::super::psd::EXTENSIONS)
@@ -366,6 +379,8 @@ mod tests {
     #[test]
     fn non_memory_safe_vector_and_audio_decoders_run_out_of_process() {
         assert_eq!(Decoder::Wic.placement(), Placement::Worker);
+        // `rust_h265` is pure Rust but young and panics on corrupt streams: worker isolation.
+        assert_eq!(Decoder::Heif.placement(), Placement::Worker);
         assert_eq!(Decoder::Svg.placement(), Placement::Worker);
         assert_eq!(Decoder::Audio.placement(), Placement::Worker);
         assert_eq!(Decoder::Video.placement(), Placement::Worker);
@@ -403,8 +418,58 @@ mod tests {
     }
 
     #[test]
+    fn heif_family_decodes_with_open_heic_before_any_os_codec() {
+        for ext in ["heic", "heif", "hif", "heics", "heifs"] {
+            assert_eq!(
+                chain_for_ext(ext),
+                &[Decoder::Heif, Decoder::Raster, Decoder::Wic],
+                "{ext}"
+            );
+            assert_eq!(
+                crate::formats::lookup(ext).unwrap().os_codec,
+                formats::OsCodec::None
+            );
+        }
+        // AVC and AV1 stills are not supported by `open-heic`: the OS codec only.
+        for ext in ["avci", "avif", "avifs"] {
+            assert_eq!(chain_for_ext(ext), &[Decoder::Wic], "{ext}");
+        }
+        // The embedded-preview setting has nothing to reorder in these chains.
+        let chain = chain_for_ext("heic");
+        assert_eq!(&*ordered(chain, false), chain);
+        assert_eq!(Decoder::Heif.code(), 11);
+    }
+
+    /// A JPEG named `.heic` is not a HEIF file: `Heif` declines, `Raster` decodes it, and
+    /// nothing needs WIC (so no Store codec either).
+    #[test]
+    fn a_jpeg_named_heic_decodes_without_wic() {
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            6,
+            image::Rgb([200, 30, 30]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        assert_eq!(
+            Decoder::Heif.run(&jpeg, "heic", 256),
+            Err(DecodeError::Unsupported)
+        );
+        let chain = &chain_for_ext("heic")[..2];
+        let img = run_chain(chain, &jpeg, "heic", 256).unwrap();
+        assert_eq!((img.width(), img.height()), (8, 6));
+    }
+
+    #[test]
     fn plan_prefers_extension_then_sniffs() {
-        assert_eq!(plan(Some("heic"), b""), &[Decoder::Wic]);
+        assert_eq!(
+            plan(Some("heic"), b""),
+            &[Decoder::Heif, Decoder::Raster, Decoder::Wic]
+        );
         assert_eq!(plan(Some("svg"), b""), &[Decoder::Svg]);
         assert_eq!(plan(None, b"<?xml version='1.0'?><svg>"), &[Decoder::Svg]);
         assert_eq!(

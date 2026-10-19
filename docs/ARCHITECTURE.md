@@ -37,7 +37,9 @@ issue first and say which invariant and why.
   surrogate (or Explorer). WIC, Media Foundation (video), Windows.Data.Pdf, GDI
   metafile playback, SVG (resvg is not cancellable), audio tags (lofty:
   unbounded recursion and tag inflation), JPEG 2000 and DjVu (pure Rust but
-  unable to bound allocation) and 7z/RAR/Live Photo bundles (real
+  unable to bound allocation), HEIC/HEIF (`open-heic`: pure Rust and
+  `forbid(unsafe)`, but its HEVC decoder is young and panics on corrupt
+  streams, so worker isolation is the safe call) and 7z/RAR/Live Photo bundles (real
   decompression with attacker-chosen parameters) run only in `tw-worker.exe`
   (`decode/route.rs` `Decoder::placement`). `twctl` follows the same rule for
   conversions: a test pins every worker-placed decoder except SVG against the

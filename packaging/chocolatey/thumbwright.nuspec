@@ -19,7 +19,7 @@
     <summary>See HEIC, RAW, PDF and CAD thumbnails in File Explorer, plus a right-click menu to convert, resize and OCR images. Free, offline.</summary>
     <description><![CDATA[Your HEIC, camera RAW, PDF and CAD files finally show a picture in Windows File Explorer, and a right-click menu lets you convert, resize and copy text out of images without opening another program. Thumbwright is free, open source and never connects to the internet.
 
-HEIC and AVIF thumbnails need Microsoft's free HEIF, HEVC and AV1 extensions from the Microsoft Store; Thumbwright draws the picture, Windows supplies the codec.
+HEIC and HEIF photos are decoded by Thumbwright itself and need no Microsoft Store codec. AVIF and AVCI thumbnails need Microsoft's free AV1 and HEIF extensions from the Microsoft Store; Thumbwright draws the picture, Windows supplies the codec.
 
 ## Features
 

@@ -1306,6 +1306,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "open-heic"
+version = "0.1.0"
+source = "git+https://github.com/DailenG/open-heic?rev=cfa6d66e3a75ecf4040f70ac0d76c0582be9504b#cfa6d66e3a75ecf4040f70ac0d76c0582be9504b"
+dependencies = [
+ "rust_h265",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1663,6 +1671,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust_h265"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dde60f5842f27ed06f1d84844cacd93d1a159f606365b30a5594c771e6b4eb17"
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1993,6 +2007,7 @@ dependencies = [
  "lofty",
  "memchr",
  "miniz_oxide 0.9.1",
+ "open-heic",
  "psd",
  "rars",
  "resvg",
