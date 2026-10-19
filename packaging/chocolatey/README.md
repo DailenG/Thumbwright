@@ -6,7 +6,7 @@ embeds the signed MSI from the GitHub release; `legal/VERIFICATION.txt` gives it
 Build (the MSI is not committed):
 
 ```
-gh release download v0.1.2 -p "*.msi" -D tools
+gh release download v0.1.3 -p "*.msi" -D tools
 choco pack
 ```
 

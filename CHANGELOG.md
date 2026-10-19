@@ -7,6 +7,8 @@ on-disk formats may still change.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-19
+
 ### Changed
 
 - **HEIC and HEIF thumbnails and conversions no longer need Microsoft's Store codecs.**

@@ -4,7 +4,7 @@ members = ["crates/tw-core", "crates/tw-shell", "crates/twctl", "crates/tw-setti
 default-members = ["crates/tw-core", "crates/tw-shell", "crates/twctl", "crates/tw-settings"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false
