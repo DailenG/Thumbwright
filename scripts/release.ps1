@@ -20,17 +20,32 @@
     8. Signs the MSI, then verifies it
 
     Signing, in order of preference:
-      a. The Azure Trusted Signing helper (-SignHelper, default
-         C:\Syncs\Resilio\Code\MCP\code-signer\sign-helper.ps1) when the file exists, the
-         AzureTrustedSignTool command is on PATH and AZURE_CLIENT_ID, AZURE_TENANT_ID,
-         AZURE_CLIENT_SECRET, AZURE_TRUSTED_SIGNING_ACCOUNT and AZURE_TRUSTED_SIGNING_PROFILE
-         are set (AZURE_TRUSTED_SIGNING_ENDPOINT is optional).
+      a. The Azure Trusted Signing helper (-SignHelper or $env:TW_SIGN_HELPER; there is no
+         default, so no machine-specific path is baked into the repository) when it names an
+         existing file, the AzureTrustedSignTool command is on PATH and AZURE_CLIENT_ID,
+         AZURE_TENANT_ID, AZURE_CLIENT_SECRET, AZURE_TRUSTED_SIGNING_ACCOUNT and
+         AZURE_TRUSTED_SIGNING_PROFILE are set (AZURE_TRUSTED_SIGNING_ENDPOINT is optional).
+         The helper receives the signing secrets in its environment: keep it in a folder only you
+         can write to, not in a synced or shared one.
       b. signtool sign /fd SHA256 /tr <RFC3161 url> /td SHA256 /sha1 <-CertThumbprint> when a
-         thumbprint is given.
+         thumbprint is given. This is the reproducible route for anyone with a code-signing
+         certificate in their certificate store; it needs nothing outside this repository.
+    A missing helper is an error with a message that names both routes, never a silent fallback.
     If neither is usable the script stops before signing anything; -SkipSign produces unsigned
     development output instead. Verification is `signtool verify /pa /v` and additionally requires
     a timestamp (RFC 3161) so signatures outlive the certificate. A file the signing helper left
     without a timestamp gets one added with `signtool timestamp` before verification.
+
+    Builder paths (audit P-5). rustc embeds source paths into panic locations, so a plain
+    release build carries the builder's cargo registry path (C:\Users\<name>\.cargo\registry\...).
+    Both cargo builds here pass `--config target.x86_64-pc-windows-msvc.rustflags=[...]` with a
+    --remap-path-prefix for the builder's user profile, rustup home, cargo home, target directory
+    and the repository root. Cargo appends these to the rustflags in .cargo/config.toml (the
+    crt-static flag stays). The prefixes are derived from this machine's USERPROFILE, CARGO_HOME,
+    RUSTUP_HOME and CARGO_TARGET_DIR at run time, so every builder remaps their own paths with no
+    edit. The script then scans the binaries and fails if any of those paths is still in them.
+    RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS replace config rustflags outright, so the script refuses
+    to run with either set.
 
 .PARAMETER SkipSign
     Do not sign or verify. Output is for local testing only and must not be distributed.
@@ -43,7 +58,8 @@
     RFC 3161 timestamp authority for signtool.
 
 .PARAMETER SignHelper
-    Path of the Azure Trusted Signing helper script.
+    Path of the Azure Trusted Signing helper script. Default: $env:TW_SIGN_HELPER (no built-in
+    default).
 
 .PARAMETER SignTool
     Path of signtool.exe. Default: newest x64 signtool under the Windows 10/11 SDK, else PATH.
@@ -75,7 +91,7 @@ param(
     [switch]$SkipSign,
     [string]$CertThumbprint,
     [string]$TimestampUrl = 'http://timestamp.digicert.com',
-    [string]$SignHelper = 'C:\Syncs\Resilio\Code\MCP\code-signer\sign-helper.ps1',
+    [string]$SignHelper = $env:TW_SIGN_HELPER,
     [string]$SignTool,
     [string]$DevPublisher = 'CN=Thumbwright Unsigned Development',
     [string]$DistDir,
@@ -196,6 +212,59 @@ function Invoke-Native {
     }
 }
 
+# --- Builder path remap (audit P-5) -------------------------------------------------------------
+# rustc embeds absolute source paths (panic locations, include_str!/OUT_DIR), which would put the
+# builder's user name into a shipped binary. Returns the extra cargo arguments that remap them.
+# `--config` arrays are appended to .cargo/config.toml's rustflags (the crt-static flag stays), but
+# RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS replace config rustflags outright, so refuse to run with them.
+# Later --remap-path-prefix flags win, so the broad prefix (the user profile) comes first.
+function Get-PathRemapPrefixes {
+    $userHome = $env:USERPROFILE
+    if ([string]::IsNullOrWhiteSpace($userHome)) { throw 'USERPROFILE is not set; cannot derive the builder paths to remap.' }
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $userHome '.cargo' }
+    $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $userHome '.rustup' }
+    $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root 'target' }
+    $pairs = @(
+        @($userHome, 'home'), @($rustupHome, 'rustup'), @($cargoHome, 'cargo'),
+        @($target, 'target'), @($root, '.'))
+    foreach ($p in $pairs) {
+        $full = [System.IO.Path]::GetFullPath($p[0]).TrimEnd('\')
+        if ($full.Contains("'")) { throw "Cannot remap '$full': a single quote in the path cannot be passed through cargo --config." }
+        [pscustomobject]@{ From = $full; To = $p[1] }
+    }
+}
+
+function Get-PathRemapArgs {
+    if ($env:RUSTFLAGS -or $env:CARGO_ENCODED_RUSTFLAGS) {
+        throw 'RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS are set; they would replace the rustflags in .cargo/config.toml (crt-static) and the path remap. Unset them for a release build.'
+    }
+    $flags = @(Get-PathRemapPrefixes | ForEach-Object { "'--remap-path-prefix=$($_.From)=$($_.To)'" })
+    return @('--config', ('target.x86_64-pc-windows-msvc.rustflags=[' + ($flags -join ',') + ']'))
+}
+
+# Fails the release when a binary still contains a builder path (ASCII or UTF-16, any case).
+function Assert-NoBuilderPaths {
+    param([string[]]$Files)
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+    $needles = @(Get-PathRemapPrefixes | ForEach-Object { $_.From } | Select-Object -Unique)
+    $bad = @()
+    foreach ($file in $Files) {
+        $bytes = [System.IO.File]::ReadAllBytes($file)
+        $ascii = $latin1.GetString($bytes)
+        $wide = [System.Text.Encoding]::Unicode.GetString($bytes)
+        $wideOdd = [System.Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)
+        foreach ($n in $needles) {
+            foreach ($hay in $ascii, $wide, $wideOdd) {
+                if ($hay.IndexOf($n, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $bad += "$(Split-Path -Leaf $file) contains $n"; break }
+            }
+        }
+    }
+    if ($bad.Count -gt 0) {
+        throw ("Builder paths leaked into the binaries (--remap-path-prefix did not cover them): " + ($bad -join '; '))
+    }
+    Write-Host '  no builder paths in the binaries'
+}
+
 # Decide how to sign before building anything, so a misconfigured machine fails in seconds
 # instead of after a 30 minute release build.
 function Get-SigningMethod {
@@ -203,7 +272,7 @@ function Get-SigningMethod {
         'AZURE_TRUSTED_SIGNING_ACCOUNT', 'AZURE_TRUSTED_SIGNING_PROFILE')
     $missing = @($azureVars | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
     $haveTool = [bool](Get-Command AzureTrustedSignTool -ErrorAction SilentlyContinue)
-    if ((Test-Path -LiteralPath $SignHelper) -and $haveTool -and $missing.Count -eq 0) {
+    if ($SignHelper -and (Test-Path -LiteralPath $SignHelper) -and $haveTool -and $missing.Count -eq 0) {
         if (-not $TrustedSigningDlib -or -not (Test-Path -LiteralPath $TrustedSigningDlib)) {
             throw ('Azure Trusted Signing also needs -TrustedSigningDlib (Azure.CodeSigning.Dlib.dll, ' +
                 'bin\x64 of the Microsoft.Trusted.Signing.Client NuGet package) to sign the sparse package.')
@@ -214,11 +283,16 @@ function Get-SigningMethod {
         return 'signtool'
     }
     $why = @()
-    if (-not (Test-Path -LiteralPath $SignHelper)) { $why += "helper not found: $SignHelper" }
+    if (-not $SignHelper) {
+        $why += 'no signing helper: set $env:TW_SIGN_HELPER or pass -SignHelper (there is no built-in default)'
+    } elseif (-not (Test-Path -LiteralPath $SignHelper)) {
+        $why += "helper not found: $SignHelper"
+    }
     if (-not $haveTool) { $why += 'AzureTrustedSignTool is not on PATH' }
     if ($missing.Count -gt 0) { $why += "unset: $($missing -join ', ')" }
     throw ("No signing method available. Azure Trusted Signing: $($why -join '; '). " +
-        'signtool: pass -CertThumbprint. For an unsigned development build pass -SkipSign.')
+        'Reproducible alternative with any code-signing certificate in your store: pass -CertThumbprint <sha1>. ' +
+        'For an unsigned development build pass -SkipSign.')
 }
 
 # AzureTrustedSignTool signs PE files and MSIs, but repacks app packages with MakeAppx, which
@@ -303,6 +377,9 @@ if ($SkipSign) {
     Write-Host "Signing method: $method (signtool: $tool)"
 }
 
+# Remap the builder's paths out of the binaries (audit P-5); refuses to run with RUSTFLAGS set.
+$remapArgs = Get-PathRemapArgs
+
 Push-Location $root
 try {
     Write-Host '== Dependency policy'
@@ -311,7 +388,7 @@ try {
     # The first pass has no package identity (the publisher is not known yet); see below.
     Remove-Item Env:TW_MSIX_PUBLISHER, Env:TW_MSIX_PACKAGE_NAME, Env:TW_MSIX_APPLICATION_ID -ErrorAction SilentlyContinue
     Write-Host '== cargo build --release --workspace'
-    Invoke-Native 'cargo' @('build', '--release', '--workspace', '--locked')
+    Invoke-Native 'cargo' (@('build', '--release', '--workspace', '--locked') + $remapArgs)
 } finally {
     Pop-Location
 }
@@ -337,6 +414,8 @@ foreach ($name in $binaries) {
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $dist
 Copy-Item -LiteralPath (Join-Path $root 'THIRD_PARTY_LICENSES.md') -Destination $dist
 $payload = @($binaries | ForEach-Object { Join-Path $dist $_ })
+Write-Host '== Scan binaries for builder paths'
+Assert-NoBuilderPaths $payload
 
 if ($SkipSign) {
     $publisher = $DevPublisher
@@ -361,7 +440,7 @@ $env:TW_MSIX_PACKAGE_NAME = $msixPackageName
 $env:TW_MSIX_APPLICATION_ID = $msixApplicationId
 Push-Location $root
 try {
-    Invoke-Native 'cargo' @('build', '--release', '--workspace', '--locked')
+    Invoke-Native 'cargo' (@('build', '--release', '--workspace', '--locked') + $remapArgs)
 } finally {
     Pop-Location
     Remove-Item Env:TW_MSIX_PUBLISHER, Env:TW_MSIX_PACKAGE_NAME, Env:TW_MSIX_APPLICATION_ID -ErrorAction SilentlyContinue
@@ -370,6 +449,7 @@ $settingsSrc = Join-Path $releaseDir $settingsExe
 if (-not (Test-Path -LiteralPath $settingsSrc)) { throw "Release build did not produce $settingsSrc" }
 Copy-Item -LiteralPath $settingsSrc -Destination $dist
 $settingsPath = Join-Path $dist $settingsExe
+Assert-NoBuilderPaths @($settingsPath)
 Assert-EmbeddedIdentity $settingsPath $publisher $msixPackageName $msixApplicationId
 if (-not $SkipSign) {
     Invoke-Sign -Files @($settingsPath) -Method $method -Scope 'Bin' -Tool $tool
