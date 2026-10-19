@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question or share your thumbnails (Discussions)
+    url: https://github.com/DailenG/Thumbwright/discussions
+    about: "How do I...?, ideas, and \"show your thumbnails\". Not for bugs: use the bug form."
+  - name: Report a security problem privately
+    url: https://github.com/DailenG/Thumbwright/security/policy
+    about: Do not open a public issue for a vulnerability. SECURITY.md explains the private route.

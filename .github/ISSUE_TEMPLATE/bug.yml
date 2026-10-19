@@ -1,0 +1,77 @@
+name: Bug report
+description: "Something does not work: a missing or wrong thumbnail, a right-click action that fails, the Workbench, the installer."
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. Two things make a report fixable: the support bundle (below) and which file or folder you right-clicked.
+
+        Questions, ideas and "how do I...?" belong in [Discussions](https://github.com/DailenG/Thumbwright/discussions). Security problems: please use the private route in [SECURITY.md](https://github.com/DailenG/Thumbwright/security/policy), not a public issue.
+  - type: input
+    id: windows
+    attributes:
+      label: Windows build
+      description: "Press Win + R, run `winver`. Example: Windows 11 25H2, OS build 26200.1234"
+      placeholder: Windows 11 25H2, OS build 26200.1234
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Thumbwright version
+      description: "Run `twctl --version`, or look in Settings > Apps > Installed apps."
+      placeholder: "0.1.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How Thumbwright was installed
+      options:
+        - MSI (double-click or msiexec)
+        - Chocolatey
+        - Portable copy (Thumbwright.ini next to the files)
+        - Built from source
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: rightclicked
+    attributes:
+      label: What you right-clicked (skip for thumbnail problems)
+      description: "The kind and number of items (one photo, 12 photos, a folder, the empty background of a folder), and which menu you used: Windows 11 menu (Thumbwright or App extensions), or Shift + right-click."
+      placeholder: "Right-clicked 3 HEIC photos in Pictures, then Shift + right-click > Thumbwright > Convert to > JPEG."
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected
+      description: For a thumbnail problem, include the file type (extension) and whether the file is in a cloud folder (OneDrive, Egnyte, ...).
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Support bundle
+      description: |
+        Open a terminal (Windows Terminal or PowerShell) and run:
+
+        `twctl doctor --bundle out.zip`
+
+        Then drag `out.zip` into this box (or attach it after you submit). It holds the diagnostic report, the recent log and your settings, never your files; the log can contain file names, so open the zip first if that matters. If `twctl` is not found, run it from `C:\Program Files\Thumbwright\twctl.exe`.
+      placeholder: Drag out.zip here.
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: Sample file (optional)
+      description: "If one file triggers it and you are allowed to share it, attach it or link to it. Do not attach anything private."

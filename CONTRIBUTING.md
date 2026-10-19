@@ -41,14 +41,28 @@ Windows x64 with the toolchain pinned in `rust-toolchain.toml` (rustup installs
 it). Linking needs the MSVC CRT/SDK libraries (Visual Studio Build Tools with
 "Desktop development with C++"), or nothing else.
 
+## Checks before a push
+
+CI on GitHub runs only the **format** check and the **dependency policy**
+(`licenses`), on Linux. The Windows build, clippy and the test suite are **not**
+run on push or pull request (the Windows job in `.github/workflows/ci.yml` is
+manual, for release candidates). A green CI badge therefore says nothing about
+whether the code builds or passes its tests on Windows, so the local gate below
+is required: run all four commands on Windows and make them pass **before every
+push and before you open or update a pull request**.
+
 ```
-cargo test --workspace
-cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked --no-fail-fast
 cargo xtask licenses --check
 ```
 
-All four must pass. CI runs them on every push.
+- `fmt` and `licenses` are what CI repeats; `clippy` and `test` are yours alone.
+- Run `cargo fmt --all` to fix formatting. If `licenses` rejects a dependency,
+  see the ground rules above (pure Rust, permissive licences).
+- A pull request that was not run through the local gate will be asked to do so
+  before review.
 
 Some tests write a throw-away key under `HKCU\Software\ThumbwrightTest-*`
 (removed on drop) and files under `%TEMP%`.

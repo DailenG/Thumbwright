@@ -6,21 +6,21 @@ in verifying that this package's contents are trustworthy.
 The package maintainer is also the software author. The embedded MSI is the
 release asset published on the project's GitHub releases page:
 
-  https://github.com/DailenG/Thumbwright/releases/tag/v0.1.1
+  https://github.com/DailenG/Thumbwright/releases/tag/v0.1.2
 
 To verify:
 
-1. Download Thumbwright-0.1.1-x64.msi from the page above.
-2. Compare its checksum with the embedded tools\Thumbwright-0.1.1-x64.msi:
+1. Download Thumbwright-0.1.2-x64.msi from the page above.
+2. Compare its checksum with the embedded tools\Thumbwright-0.1.2-x64.msi:
 
-     Get-FileHash -Algorithm SHA256 Thumbwright-0.1.1-x64.msi
+     Get-FileHash -Algorithm SHA256 Thumbwright-0.1.2-x64.msi
 
-   SHA256: DD4F51E14960A3D4A1A00AF7C2F609B9A43831E03CDF0A27EA51987AB6A1E0DB
+   SHA256: <filled in from the release's SHA256SUMS.txt when the package is built>
 
 3. The MSI and every binary inside it carry an Authenticode signature with
    an RFC 3161 timestamp:
 
-     Get-AuthenticodeSignature Thumbwright-0.1.1-x64.msi
+     Get-AuthenticodeSignature Thumbwright-0.1.2-x64.msi
 
 The license (GPL-3.0) is in legal\LICENSE.txt and at
 https://github.com/DailenG/Thumbwright/blob/main/LICENSE

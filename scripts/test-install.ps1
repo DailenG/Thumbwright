@@ -41,15 +41,21 @@
     (-SkipSign) one cannot be registered, which is reported and skipped.
 
     -DryRun is the non-elevated mode: it builds an MSI from -SourceDir (or inspects -Msi) and checks
-    its tables through the Windows Installer API (files, no INI, no Registry rows, the deferred
+    its tables through the Windows Installer API (files, no INI, no Registry rows except the optional MENU/KIT defaults, the deferred
     register action after InstallFiles, the unregister action before RemoveFiles, the package
     register/unregister actions, and that no public property can inject into them: the install
     directory Id is the private InstallFolder, no INSTALLFOLDER exists, no directory Id other
     than TARGETDIR is all upper case, and no action formats an all-upper-case [PROPERTY], so
     nothing on the msiexec command line reaches a command), extracts it with an administrative
     install into the work
-    directory, inspects the Thumbwright.msix in it, and runs `wix msi validate` (ICE). Nothing is
-    installed and no registry is touched.
+    directory, inspects the Thumbwright.msix in it, and runs `wix msi validate` (ICE; ICE43 and
+    ICE57 are suppressed for the all-users Start Menu shortcut, see Test-IceValidation). It also
+    checks the front door: the installer UI (InstallUISequence, WelcomeEulaDlg/ProgressDlg/
+    ExitDialog, the GPL-3.0 summary on the licence page, the exit-dialog "Open Thumbwright
+    Workbench" checkbox and its explorer.exe launch), the "Thumbwright Workbench" Start Menu
+    shortcut (Shortcut table, target, icon, owning component), and the MENU and KIT silent
+    presets (secure properties, conditional HKLM Defaults Registry rows, rejection of bad values).
+    Nothing is installed and no registry is touched.
 
 .PARAMETER Msi
     The package under test. Default: newest dist\Thumbwright-*-x64.msi. In -DryRun, when omitted,
@@ -165,12 +171,140 @@ function Get-MsiProperty {
     return $rows[0][0]
 }
 
+# The first column of every row as a string array. Get-MsiRows returns its row list as ONE
+# pipeline object, so it must be assigned to a variable before it is piped or enumerated.
+function Get-MsiColumn {
+    param($Db, [string]$Sql)
+    $rows = Get-MsiRows $Db $Sql 1
+    return @($rows | ForEach-Object { $_[0] })
+}
+
 # ---------------------------------------------------------------------------------------------
 # Package inspection (used by -DryRun, and as a precondition of the elevated run)
 # ---------------------------------------------------------------------------------------------
 $script:RequiredFiles = @('thumbwright_shell.dll', 'tw-worker.exe', 'twctl.exe', 'Thumbwright.msix', 'LICENSE', 'THIRD_PARTY_LICENSES.md')
 # Identity name of the sparse package as the MSI's package actions know it; set by Test-MsiPackage.
 $script:CaPackageName = $null
+
+# The "front door": installer UI, Start Menu shortcut, silent presets. $files, $actions and
+# $sequence are the File rows, the CustomAction rows by name and InstallExecuteSequence rows by
+# name that Test-MsiPackage already read.
+function Test-MsiFrontDoor {
+    param($Db, $Files, $Actions, $Sequence)
+    Write-Host '== Front door: installer UI, Start Menu shortcut, MENU and KIT presets'
+    $longNames = @{}
+    foreach ($f in $Files) { $longNames[$f[0]] = ($f[2] -split '\|')[-1] }
+    $hasSettings = $longNames.Values -contains 'thumbwright-settings.exe'
+
+    # --- Installer UI (WixUI_Minimal), authored in the UI sequence only -------------------------
+    $hasUi = Test-MsiTable $Db 'InstallUISequence'
+    Assert-Check 'InstallUISequence exists (installer UI)' $hasUi
+    if ($hasUi) {
+        $dialogs = @(Get-MsiColumn $Db 'SELECT `Dialog` FROM `Dialog`')
+        foreach ($name in 'WelcomeEulaDlg', 'ProgressDlg', 'ExitDialog') {
+            Assert-Check "Dialog table has $name (welcome and licence, progress, exit)" ($dialogs -contains $name)
+        }
+        $uiSeq = @(Get-MsiColumn $Db 'SELECT `Action` FROM `InstallUISequence`')
+        Assert-Check 'InstallUISequence shows the welcome and licence dialog, then runs ExecuteAction' (
+            ($uiSeq -contains 'WelcomeEulaDlg') -and ($uiSeq -contains 'ExecuteAction')) ($uiSeq -join ', ')
+        $license = Get-MsiRows $Db 'SELECT `Text` FROM `Control` WHERE `Dialog_`=''WelcomeEulaDlg'' AND `Type`=''ScrollableText''' 1
+        $licenseText = if ($license.Count -gt 0) { $license[0][0] } else { '' }
+        Assert-Check 'Licence page shows the GPL-3.0 summary, not the full licence text' (
+            $licenseText -match 'GPL-3\.0' -and $licenseText.Length -gt 200 -and $licenseText.Length -lt 6000 -and
+            $licenseText -notmatch 'TERMS AND CONDITIONS') "$($licenseText.Length) characters"
+        # Silent installs (/qn, /qb) never run the UI sequence, so nothing may live only in it
+        # that an unattended install needs, and nothing UI-related may run in the execute sequence.
+        Assert-Check 'No dialog or UI action is in InstallExecuteSequence (silent installs show nothing)' (
+            -not ($Sequence.Keys | Where-Object { $_ -in @('WelcomeDlg', 'WelcomeEulaDlg', 'ExitDialog', 'LaunchWorkbench') -or $dialogs -contains $_ }))
+    }
+
+    if ($hasSettings) {
+        $eventRows = Get-MsiRows $Db 'SELECT `Dialog_`, `Control_`, `Event`, `Argument`, `Condition` FROM `ControlEvent`' 5
+        $events = @($eventRows | Where-Object { $_[0] -eq 'ExitDialog' -and $_[1] -eq 'Finish' -and $_[2] -eq 'DoAction' -and $_[3] -eq 'LaunchWorkbench' })
+        Assert-Check 'Exit dialog Finish runs LaunchWorkbench only when the "Open Thumbwright Workbench" checkbox is ticked and on a new install' (
+            $events.Count -eq 1 -and $events[0][4] -match 'WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1' -and $events[0][4] -match 'NOT Installed')
+        Assert-Check 'Exit dialog checkbox text is "Open Thumbwright Workbench"' (
+            (Get-MsiProperty $Db 'WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT') -eq 'Open Thumbwright Workbench')
+        if ($Actions.ContainsKey('LaunchWorkbench')) {
+            $a = $Actions['LaunchWorkbench']
+            $type = [int]$a[1]
+            # Type bits: 2 = EXE, 32 = directory, 64 = ignore exit code, 128 = asynchronous,
+            # 1024 = deferred (must be clear: runs in the UI client, not elevated by us).
+            Assert-Check 'LaunchWorkbench is an immediate, not-waited-for EXE action' (
+                (($type -band 7) -eq 2) -and (($type -band 1024) -eq 0) -and (($type -band 128) -ne 0) -and (($type -band 64) -ne 0)) "type $type"
+            Assert-Check 'LaunchWorkbench starts the Workbench through explorer.exe (the unelevated user shell), not directly' (
+                $a[3] -eq '"[WindowsFolder]explorer.exe" "[InstallFolder]thumbwright-settings.exe"') $a[3]
+        } else {
+            Assert-Check 'CustomAction LaunchWorkbench exists' $false
+        }
+    } else {
+        Assert-Check 'No Workbench shortcut or launch action without thumbwright-settings.exe' (
+            -not $Actions.ContainsKey('LaunchWorkbench') -and -not (Test-MsiTable $Db 'Shortcut'))
+    }
+
+    # --- Start Menu shortcut ------------------------------------------------------------------
+    if ($hasSettings) {
+        $hasShortcut = Test-MsiTable $Db 'Shortcut'
+        $shortcuts = if ($hasShortcut) { Get-MsiRows $Db 'SELECT `Shortcut`, `Directory_`, `Name`, `Component_`, `Target`, `Icon_` FROM `Shortcut`' 6 } else { @() }
+        Assert-Check 'Shortcut table has exactly one row (the Start Menu entry)' ($shortcuts.Count -eq 1) "$($shortcuts.Count) rows"
+        if ($shortcuts.Count -eq 1) {
+            $s = $shortcuts[0]
+            $shortName = ($s[2] -split '\|')[-1]
+            Write-Host ("    Shortcut {0}: {1} in {2}, target {3}, icon {4}" -f $s[0], $shortName, $s[1], $s[4], $s[5])
+            Assert-Check 'Start Menu shortcut is named "Thumbwright Workbench" and sits in the all-users Programs folder (ProgramMenuFolder)' (
+                $shortName -eq 'Thumbwright Workbench' -and $s[1] -eq 'ProgramMenuFolder')
+            $targetFile = if ($s[4] -match '^\[#(.+)\]$') { $Matches[1] } else { $null }
+            Assert-Check 'Start Menu shortcut targets thumbwright-settings.exe in the install directory' (
+                $targetFile -and $longNames[$targetFile] -eq 'thumbwright-settings.exe') $s[4]
+            $iconNames = if (Test-MsiTable $Db 'Icon') { @(Get-MsiColumn $Db 'SELECT `Name` FROM `Icon`') } else { @() }
+            Assert-Check 'Start Menu shortcut has the Thumbwright icon (Icon table row)' ($s[5] -and ($iconNames -contains $s[5])) "icon=$($s[5]) icons=$($iconNames -join ',')"
+            $owner = Get-MsiRows $Db ('SELECT `Component`, `KeyPath`, `Directory_` FROM `Component` WHERE `Component`=''{0}''' -f $s[3]) 3
+            Assert-Check 'The shortcut belongs to the component that installs thumbwright-settings.exe, so uninstall removes it' (
+                $owner.Count -eq 1 -and $owner[0][2] -eq 'InstallFolder' -and $longNames[$owner[0][1]] -eq 'thumbwright-settings.exe')
+        }
+    }
+
+    # --- Silent presets: MENU and KIT ----------------------------------------------------------
+    $secure = @((Get-MsiProperty $Db 'SecureCustomProperties') -split ';')
+    Assert-Check 'MENU and KIT are secure public properties (honoured in an elevated managed install)' (
+        ($secure -ccontains 'MENU') -and ($secure -ccontains 'KIT')) ($secure -join ';')
+
+    $kits = 'photos', 'paperwork', 'design', 'cad', 'thumbnails', 'everything'
+    $rows = @()
+    if (Test-MsiTable $Db 'Registry') { $rows = Get-MsiRows $Db 'SELECT `Root`, `Key`, `Name`, `Value`, `Component_` FROM `Registry`' 5 }
+    $conditions = @{}
+    foreach ($c in (Get-MsiRows $Db 'SELECT `Component`, `Condition`, `Directory_`, `Attributes` FROM `Component`' 4)) { $conditions[$c[0]] = $c }
+    # Name "-" is a remove-the-key-on-uninstall row (RemoveRegistryKey); the others write values.
+    $valueRows = @($rows | Where-Object { $_[2] -ne '-' })
+    $removeRows = @($rows | Where-Object { $_[2] -eq '-' })
+    $allHklm = -not ($rows | Where-Object { $_[0] -ne '2' -or $_[1] -ne 'Software\Thumbwright\Defaults' })
+    Assert-Check 'Defaults are written only to HKLM\Software\Thumbwright\Defaults (64-bit view): one MenuEnabled and six StarterKit values' (
+        $valueRows.Count -eq 7 -and $allHklm -and -not ($rows | Where-Object { (([int]$conditions[$_[4]][3]) -band 256) -eq 0 })) "$($valueRows.Count) values"
+    $menuRows = @($valueRows | Where-Object { $_[2] -eq 'MenuEnabled' })
+    Assert-Check 'MENU=0 writes the DWORD MenuEnabled=0 through a component conditional on MENU = "0"' (
+        $menuRows.Count -eq 1 -and $menuRows[0][3] -eq '#0' -and $conditions[$menuRows[0][4]][1] -eq 'MENU = "0"') (($menuRows | ForEach-Object { $_ -join '|' }) -join '; ')
+    $kitRows = @($valueRows | Where-Object { $_[2] -eq 'StarterKit' })
+    $kitOk = ($kitRows.Count -eq $kits.Count)
+    foreach ($kit in $kits) {
+        $row = @($kitRows | Where-Object { $_[3] -ceq $kit })
+        $kitOk = $kitOk -and $row.Count -eq 1 -and $conditions[$row[0][4]][1] -eq ('KIT ~= "{0}"' -f $kit)
+    }
+    Assert-Check 'KIT=<kit> writes the constant StarterKit name through its own conditional component, for all six kits' $kitOk (($kitRows | ForEach-Object { $_[3] }) -join ', ')
+    # With neither property set nothing is written: every Registry row lives in a component that
+    # has a condition.
+    Assert-Check 'Every Registry row is in a conditional component (no MENU/KIT: nothing written)' (
+        $rows.Count -gt 0 -and -not ($rows | Where-Object { -not $conditions[$_[4]][1] }))
+    Assert-Check 'Every component that writes a default also removes the Defaults key on uninstall' (
+        $removeRows.Count -eq 7 -and -not ($valueRows | Where-Object { $c = $_[4]; -not ($removeRows | Where-Object { $_[4] -eq $c }) }))
+    foreach ($name in 'RejectBadMenu', 'RejectBadKit') {
+        Assert-Check "$name is an error action sequenced after CostFinalize, install only, with a condition" (
+            $Actions.ContainsKey($name) -and ([int]$Actions[$name][1] -band 63) -eq 19 -and $Sequence.ContainsKey($name) -and
+            $Sequence[$name][1] -match 'NOT \(REMOVE="ALL"\)' -and $Sequence[$name][1] -match ($name -replace 'RejectBad', '').ToUpper())
+    }
+    if ($Sequence.ContainsKey('RejectBadKit')) {
+        Assert-Check 'RejectBadKit accepts exactly the six kits' (-not ($kits | Where-Object { $Sequence['RejectBadKit'][1] -notmatch ('KIT ~= "{0}"' -f $_) }))
+    }
+}
 
 function Test-MsiPackage {
     param([string]$Path)
@@ -190,12 +324,16 @@ function Test-MsiPackage {
     Assert-Check 'All components are 64-bit in InstallFolder' (
         -not ($components | Where-Object { (([int]$_[2]) -band 256) -eq 0 -or $_[1] -ne 'InstallFolder' }))
 
+    # The DLL engine owns every shell key. The only Registry rows are the optional machine-wide
+    # defaults (MENU, KIT), checked by Test-MsiFrontDoor.
     $hasRegistry = Test-MsiTable $db 'Registry'
-    $registryRows = if ($hasRegistry) { (Get-MsiRows $db 'SELECT Registry FROM Registry' 1).Count } else { 0 }
-    Assert-Check 'No Registry table rows (the DLL engine owns all HKLM state)' ($registryRows -eq 0) "rows: $registryRows"
+    $registryKeys = if ($hasRegistry) { @(Get-MsiColumn $db 'SELECT `Key` FROM `Registry`') } else { @() }
+    $strayRegistry = @($registryKeys | Where-Object { $_ -ne 'Software\Thumbwright\Defaults' })
+    Assert-Check 'No Registry rows besides the optional HKLM\Software\Thumbwright\Defaults values (the DLL engine owns all other HKLM state)' (
+        $strayRegistry.Count -eq 0) ($strayRegistry -join ', ')
 
     $arpIcon = Get-MsiProperty $db 'ARPPRODUCTICON'
-    $iconRows = if (Test-MsiTable $db 'Icon') { @(Get-MsiRows $db 'SELECT Name FROM Icon' 1 | ForEach-Object { $_[0] }) } else { @() }
+    $iconRows = if (Test-MsiTable $db 'Icon') { @(Get-MsiColumn $db 'SELECT Name FROM Icon') } else { @() }
     Assert-Check 'ARPPRODUCTICON names an icon in the Icon table (Programs and Features)' (
         $arpIcon -and ($iconRows -contains $arpIcon)) "ARPPRODUCTICON=$arpIcon icons=$($iconRows -join ',')"
 
@@ -300,15 +438,17 @@ function Test-MsiPackage {
             (& $seq 'StagePackageRollback') -gt (& $seq 'RegisterShell'))
     }
 
+    Test-MsiFrontDoor $db $files $actions $sequence
+
     # P-1 / P-2: a public property (no lower-case letter in its name) can be set on the msiexec
     # command line and would be pasted into the elevated custom actions. The install directory
     # must be private, and no action may format a public property or directory.
-    $propertyNames = @(Get-MsiRows $db 'SELECT Property FROM Property' 1 | ForEach-Object { $_[0] })
+    $propertyNames = @(Get-MsiColumn $db 'SELECT Property FROM Property')
     Assert-Check 'Property table has no INSTALLFOLDER (a public install directory would be overridable and injectable)' (
         -not ($propertyNames | Where-Object { $_ -ceq 'INSTALLFOLDER' }))
     $secure = Get-MsiProperty $db 'SecureCustomProperties'
     Assert-Check 'SecureCustomProperties does not list INSTALLFOLDER' (-not $secure -or (@($secure -split ';') -cnotcontains 'INSTALLFOLDER')) $secure
-    $directoryIds = @(Get-MsiRows $db 'SELECT Directory FROM Directory' 1 | ForEach-Object { $_[0] })
+    $directoryIds = @(Get-MsiColumn $db 'SELECT Directory FROM Directory')
     $publicDirectories = @($directoryIds | Where-Object { $_ -cne 'TARGETDIR' -and $_ -cnotmatch '[a-z]' })
     Assert-Check 'Every Directory Id except TARGETDIR is private (has a lower-case letter)' ($publicDirectories.Count -eq 0) ($publicDirectories -join ', ')
     Assert-Check 'The install directory Id is InstallFolder' ($directoryIds -ccontains 'InstallFolder')
@@ -435,7 +575,13 @@ function Test-IceValidation {
     }
     $eula = @()
     if ($AcceptWixEula) { $eula = @('-acceptEula', 'wix7') }
-    $out = & $wixExe msi validate @eula $Path 2>&1 | Out-String
+    # ICE43 and ICE57 are suppressed for one reason: the Start Menu shortcut of the per-machine
+    # package lives in the all-users Programs folder and shares the file-keyed component of
+    # thumbwright-settings.exe. ICE43 wants every non-advertised shortcut component to be keyed
+    # on an HKCU value, and ICE57 then objects to mixing that per-user data with per-machine
+    # state; both are written for per-user shortcuts and would put a per-user registry value
+    # into a per-machine install (and Windows Installer would not remove it for other users).
+    $out = & $wixExe msi validate @eula -sice ICE43 -sice ICE57 $Path 2>&1 | Out-String
     $code = $LASTEXITCODE
     if ($out.Trim()) { Write-Host $out }
     Assert-Check 'wix msi validate (ICE) reports no errors' ($code -eq 0) "exit code $code"
