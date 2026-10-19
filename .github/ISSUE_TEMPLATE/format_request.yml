@@ -1,0 +1,54 @@
+name: Format request
+description: Ask for thumbnails, or conversion, for a file type Thumbwright does not draw (or draws wrongly).
+title: "[Format] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you file: run `twctl formats --json` and look for the extension. A type listed with `thumbnail: true` that shows no picture is a **bug** (use the bug form); a type that is missing or listed without a thumbnail is a request, and this is the right form.
+
+        You must be able to share anything you attach. Please do not post files you do not have the right to share, and do not paste code, strings or file layouts taken from other products (see the clean-room rule in [CONTRIBUTING.md](https://github.com/DailenG/Thumbwright/blob/main/CONTRIBUTING.md)).
+  - type: input
+    id: extension
+    attributes:
+      label: File extension(s)
+      placeholder: ".cr3, .xyz"
+    validations:
+      required: true
+  - type: input
+    id: software
+    attributes:
+      label: Camera or software that makes the file
+      description: "The camera model, or the program and its version."
+      placeholder: "Canon EOS R6 Mark II / Affinity Photo 2.5 / FreeCAD 1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: Sample file
+      description: "A small real file, attached or linked. This is the single most useful thing in a format request. If you cannot share one, say why."
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Published documentation (optional)
+      description: "A link to a public format specification, book or documentation page."
+  - type: dropdown
+    id: want
+    attributes:
+      label: What you want
+      multiple: true
+      options:
+        - A thumbnail in File Explorer
+        - Convert to another format from the right-click menu
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: "What Explorer shows today (a blank icon, another program's thumbnail), and which program currently owns this file type."

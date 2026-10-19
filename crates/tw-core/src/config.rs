@@ -10,6 +10,17 @@ use crate::limits;
 
 pub const PORTABLE_INI: &str = "Thumbwright.ini";
 pub const PRODUCT_KEY: &str = "Software\\Thumbwright";
+/// Machine-wide first-run defaults (HKLM), written by the MSI properties `MENU` and `KIT`.
+pub const MACHINE_DEFAULTS_KEY: &str = "Software\\Thumbwright\\Defaults";
+/// The starter kits the installer's `KIT` property accepts, as stored in `StarterKit`.
+pub const STARTER_KITS: [&str; 6] = [
+    "photos",
+    "paperwork",
+    "design",
+    "cad",
+    "thumbnails",
+    "everything",
+];
 const INI_SECTION: &str = "Settings";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,10 +386,19 @@ impl Settings {
     /// Loads the values stored under `HKCU\<key_path>`; `None` when the key does not exist.
     #[cfg(windows)]
     pub fn load_registry(key_path: &str) -> Option<Self> {
-        let key = windows_registry::CURRENT_USER.open(key_path).ok()?;
+        Self::read_registry(windows_registry::CURRENT_USER, key_path).map(|(s, _)| s)
+    }
+
+    /// Reads `<root>\<key_path>` into settings and counts the values applied (or ignored as
+    /// unknown); `None` when the key does not exist.
+    #[cfg(windows)]
+    fn read_registry(root: &windows_registry::Key, key_path: &str) -> Option<(Self, usize)> {
+        let key = root.open(key_path).ok()?;
         let mut s = Self::default();
+        let mut count = 0;
         if let Ok(values) = key.values() {
             for (name, value) in values {
+                count += 1;
                 let text = match value.ty() {
                     windows_registry::Type::U32 => u32::try_from(value).ok().map(|n| n.to_string()),
                     _ => String::try_from(value).ok(),
@@ -388,7 +408,7 @@ impl Settings {
                 }
             }
         }
-        Some(s)
+        Some((s, count))
     }
 
     /// Writes every value under `HKCU\<key_path>`, creating the key. Numbers and flags are
@@ -408,16 +428,49 @@ impl Settings {
         Ok(())
     }
 
-    /// Loads settings for binaries installed in `dir`.
+    /// Loads settings for binaries installed in `dir`: the portable INI, else the user's
+    /// values under HKCU, else (a user who has saved nothing yet) the machine-wide defaults.
     pub fn load(dir: &Path) -> Self {
         if let Ok(text) = std::fs::read_to_string(portable_ini(dir)) {
             return Self::from_ini(&text);
         }
-        #[cfg(windows)]
-        if let Some(s) = Self::load_registry(PRODUCT_KEY) {
-            return s;
+        Self::load_installed()
+    }
+
+    /// The installed (non-portable) settings: HKCU when the user has any value there, else the
+    /// machine-wide defaults.
+    #[cfg(windows)]
+    fn load_installed() -> Self {
+        match Self::read_registry(windows_registry::CURRENT_USER, PRODUCT_KEY) {
+            Some((s, n)) if n > 0 => s,
+            _ => Self::machine_defaults(),
         }
+    }
+
+    #[cfg(not(windows))]
+    fn load_installed() -> Self {
         Self::default()
+    }
+
+    /// Machine-wide defaults for a user who has saved no settings yet: the values under
+    /// `HKLM\Software\Thumbwright\Defaults`, laid over the built-in defaults. The MSI writes
+    /// `MenuEnabled=0` there for `MENU=0`; an administrator may add any other setting name.
+    /// Absent key: the built-in defaults.
+    #[cfg(windows)]
+    pub fn machine_defaults() -> Self {
+        Self::read_registry(windows_registry::LOCAL_MACHINE, MACHINE_DEFAULTS_KEY)
+            .map(|(s, _)| s)
+            .unwrap_or_default()
+    }
+
+    /// The starter kit the installer was told to preselect (`KIT=<name>`), as one of
+    /// [`STARTER_KITS`]; `None` when none was given or the stored name is not a known kit.
+    #[cfg(windows)]
+    pub fn machine_starter_kit() -> Option<&'static str> {
+        let key = windows_registry::LOCAL_MACHINE
+            .open(MACHINE_DEFAULTS_KEY)
+            .ok()?;
+        starter_kit_name(&key.get_string("StarterKit").ok()?)
     }
 
     /// Saves settings for binaries installed in `dir`, to wherever [`Settings::load`] reads
@@ -439,6 +492,14 @@ pub fn portable_ini(dir: &Path) -> PathBuf {
 /// Portable copies carry the INI marker next to their binaries (REQ-REG-6).
 pub fn is_portable(dir: &Path) -> bool {
     portable_ini(dir).is_file()
+}
+
+/// The canonical name of the starter kit `text` names (case-insensitive), if it is one.
+pub fn starter_kit_name(text: &str) -> Option<&'static str> {
+    let text = text.trim();
+    STARTER_KITS
+        .into_iter()
+        .find(|kit| kit.eq_ignore_ascii_case(text))
 }
 
 #[cfg(test)]
@@ -656,5 +717,50 @@ mod tests {
         assert_eq!(f("99999999999").video_frame_percent, 100);
         assert_eq!(f("-5").video_frame_percent, 30);
         assert_eq!(f("abc").video_frame_percent, 30);
+    }
+
+    #[test]
+    fn starter_kit_names_are_canonical_and_unknown_ones_rejected() {
+        assert_eq!(starter_kit_name("photos"), Some("photos"));
+        assert_eq!(starter_kit_name(" CAD "), Some("cad"));
+        assert_eq!(starter_kit_name("Everything"), Some("everything"));
+        assert_eq!(starter_kit_name(""), None);
+        assert_eq!(starter_kit_name("photo"), None);
+        assert_eq!(starter_kit_name("photos;calc"), None);
+    }
+
+    #[test]
+    fn machine_default_values_apply_like_user_values() {
+        // What the MSI writes for MENU=0: a REG_DWORD MenuEnabled of 0.
+        let mut s = Settings::default();
+        s.apply("MenuEnabled", "0");
+        assert!(!s.menu_enabled);
+        // The StarterKit value is not a setting and must not disturb anything.
+        let mut t = Settings::default();
+        t.apply("StarterKit", "photos");
+        assert_eq!(t, Settings::default());
+    }
+
+    #[test]
+    fn registry_values_are_counted_so_an_empty_key_counts_as_nothing_saved() {
+        let key = format!(
+            "Software\\ThumbwrightTest-config-count-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = windows_registry::CURRENT_USER;
+        assert!(Settings::read_registry(root, &key).is_none());
+        root.create(&key).unwrap();
+        let empty = Settings::read_registry(root, &key);
+        non_default().save_registry(&key).unwrap();
+        let filled = Settings::read_registry(root, &key);
+        let _ = root.remove_tree(&key);
+        assert_eq!(empty.map(|(_, n)| n), Some(0));
+        let (s, n) = filled.unwrap();
+        assert_eq!(s, non_default());
+        assert!(n > 0);
     }
 }

@@ -2,8 +2,9 @@
 <!--
   Thumbwright per-machine installer (REQ-REG-8, FUNCTIONAL_SPEC.md 4.2). WiX v7, schema v4.
 
-  Build (normally via scripts/release.ps1 or packaging/wix/build-msi.ps1):
-    wix build -arch x64 -d Version=0.1.1 -d PackageName=Thumbwright.ShellExtension -d SourceDir=dist -d IconFile=packaging\icons\thumbwright.ico [-d IncludeSettings=1] Package.wxs -o out.msi
+  Build (normally via scripts/release.ps1 or packaging/wix/build-msi.ps1, which also makes sure the
+  WixToolset.UI.wixext extension is available):
+    wix build -arch x64 -ext WixToolset.UI.wixext -d Version=0.1.2 -d PackageName=Thumbwright.ShellExtension -d SourceDir=dist -d IconFile=packaging\icons\thumbwright.ico -d LicenseRtf=packaging\wix\license-summary.rtf [-d IncludeSettings=1] Package.wxs -o out.msi
 
   Defines:
     Version          MSI ProductVersion, major.minor.build (Windows Installer ignores a 4th field).
@@ -11,14 +12,24 @@
                      actions that unregister it look it up by this name (build-msi.ps1 reads it
                      from the .msix itself).
     SourceDir        Directory holding the signed payload (dist\).
-    IncludeSettings  Optional. Set to 1 to also ship thumbwright-settings.exe from SourceDir.
+    IconFile         Absolute path of thumbwright.ico (Programs and Features, Start Menu shortcut).
+    LicenseRtf       Absolute path of the licence summary shown by the installer UI.
+    IncludeSettings  Optional. Set to 1 to also ship thumbwright-settings.exe from SourceDir, with
+                     its Start Menu shortcut ("Thumbwright Workbench") and the exit-dialog checkbox
+                     that opens it.
+
+  Installer UI: WixUI_Minimal (welcome and licence summary on one page, progress, exit). It is
+  part of the UI sequence only, so /qn, /qb and Chocolatey installs show nothing. Silent presets
+  are the public properties MENU and KIT, stored under HKLM\Software\Thumbwright\Defaults.
 
   Registration design: see packaging/wix/README.md. In short, the shell registry state is NOT
   authored as MSI Registry rows. It is written and journaled by the DLL's own engine
   (DllRegisterServer, Scope::Machine) through regsvr32 in a deferred, elevated custom action
   that runs after InstallFiles; the matching unregister runs before RemoveFiles. The MSI
   therefore owns files only, and the engine owns every HKLM key it creates, including
-  HKLM\Software\Thumbwright\Registration.
+  HKLM\Software\Thumbwright\Registration. The one exception is the optional machine-wide
+  defaults (HKLM\Software\Thumbwright\Defaults, written only when MENU or KIT is passed), which
+  are plain Registry rows in conditional components, so Windows Installer removes them.
 
   The Windows 11 modern-menu sparse package (Thumbwright.msix) is installed as a file and then
   staged and provisioned for all users by a second pair of deferred actions (RegisterPackage,
@@ -27,7 +38,7 @@
   The package deliberately has no Thumbwright.ini: its presence next to the binaries is the
   portable-mode marker (REQ-REG-6) and would make an installed copy behave as portable.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package
       Name="Thumbwright"
       Manufacturer="Dailen Gunter"
@@ -49,6 +60,26 @@
          absolute path as IconFile. -->
     <Icon Id="ThumbwrightIcon" SourceFile="$(IconFile)" />
     <Property Id="ARPPRODUCTICON" Value="ThumbwrightIcon" />
+
+    <!-- Installer UI (WixUI_Minimal from WixToolset.UI.wixext): one welcome + licence page,
+         progress, exit. WixUI is authored in the UI sequence only, so a silent or basic-UI
+         install (/qn, /qb, Chocolatey) shows nothing. The licence page shows a short GPL-3.0
+         summary (the full text is installed as LICENSE); the checkbox on it only lets setup
+         continue, GPL-3.0 needs no acceptance to use the software. -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
+
+    <!-- Silent presets, set on the msiexec command line or by Chocolatey package parameters:
+           MENU=0     start with the right-click menu off (default: on)
+           KIT=<name> starter kit for the Workbench first run: photos, paperwork, design, cad,
+                      thumbnails or everything (default: none)
+         They are public properties (upper case) and Secure, so they also work in an elevated
+         managed install. Neither is ever formatted into a command line: they only select which
+         of the Registry-row components below are installed, and the value written for KIT is
+         a constant per component, never the property text. Anything else is refused by
+         RejectBadMenu / RejectBadKit. -->
+    <Property Id="MENU" Secure="yes" />
+    <Property Id="KIT" Secure="yes" />
 
     <!-- The install directory Id is deliberately MIXED CASE (audit P-1, P-2). Windows Installer
          treats a property whose name has no lower-case letter as PUBLIC: it can be set on the
@@ -82,7 +113,15 @@
       </Component>
 <?ifdef IncludeSettings?>
       <Component Id="SettingsExe">
-        <File Id="SettingsExeFile" Name="thumbwright-settings.exe" Source="$(SourceDir)\thumbwright-settings.exe" KeyPath="yes" />
+        <!-- The Start Menu entry for all users (Programs). It is a child of the file, so its
+             target is [#SettingsExeFile], the component's key path is the exe itself (no
+             registry key path needed for an all-users shortcut), and Windows Installer
+             removes it on uninstall. -->
+        <File Id="SettingsExeFile" Name="thumbwright-settings.exe" Source="$(SourceDir)\thumbwright-settings.exe" KeyPath="yes">
+          <Shortcut Id="WorkbenchShortcut" Directory="ProgramMenuFolder" Name="Thumbwright Workbench"
+              Description="Choose the file types and right-click tools Thumbwright uses"
+              Icon="ThumbwrightIcon" WorkingDirectory="InstallFolder" />
+        </File>
       </Component>
 <?endif?>
       <Component Id="LicenseFile">
@@ -90,6 +129,44 @@
       </Component>
       <Component Id="ThirdPartyLicensesFile">
         <File Id="ThirdPartyLicensesFileFile" Name="THIRD_PARTY_LICENSES.md" Source="$(SourceDir)\THIRD_PARTY_LICENSES.md" KeyPath="yes" />
+      </Component>
+
+      <!-- Machine-wide defaults for users who have no settings of their own yet (read by
+           Settings::machine_defaults in tw-core). Each component is installed only when its
+           property selects it, so an install without MENU and KIT writes nothing. MENU=0 writes
+           MenuEnabled=0 (the same value name and meaning as the per-user setting). KIT writes
+           StarterKit with the kit's own constant name. Passing the property again is part of
+           a repair, modify or upgrade: Windows Installer removes a conditional component whose
+           condition is no longer true. -->
+      <Component Id="DefaultMenuOff" Condition='MENU = "0"'>
+        <RegistryValue Root="HKLM" Key="Software\Thumbwright\Defaults" Name="MenuEnabled" Type="integer" Value="0" KeyPath="yes" />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\Thumbwright\Defaults" />
+      </Component>
+      <!-- One component per kit, each with its own GUID: the six write the same value, and
+           their conditions are mutually exclusive (RejectBadKit refuses anything else). -->
+      <Component Id="DefaultKitPhotos" Guid="F96C60AC-2801-476B-93F8-9986035BDCEA" Condition='KIT ~= "photos"'>
+        <RegistryValue Root="HKLM" Key="Software\Thumbwright\Defaults" Name="StarterKit" Type="string" Value="photos" KeyPath="yes" />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\Thumbwright\Defaults" />
+      </Component>
+      <Component Id="DefaultKitPaperwork" Guid="FD85B626-470E-4245-98B2-8FE06662817F" Condition='KIT ~= "paperwork"'>
+        <RegistryValue Root="HKLM" Key="Software\Thumbwright\Defaults" Name="StarterKit" Type="string" Value="paperwork" KeyPath="yes" />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\Thumbwright\Defaults" />
+      </Component>
+      <Component Id="DefaultKitDesign" Guid="840A4A7D-62E5-47C6-B8DB-5D59B6545D31" Condition='KIT ~= "design"'>
+        <RegistryValue Root="HKLM" Key="Software\Thumbwright\Defaults" Name="StarterKit" Type="string" Value="design" KeyPath="yes" />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\Thumbwright\Defaults" />
+      </Component>
+      <Component Id="DefaultKitCad" Guid="B4186434-C91D-4F86-9864-3DE42A2D3988" Condition='KIT ~= "cad"'>
+        <RegistryValue Root="HKLM" Key="Software\Thumbwright\Defaults" Name="StarterKit" Type="string" Value="cad" KeyPath="yes" />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\Thumbwright\Defaults" />
+      </Component>
+      <Component Id="DefaultKitThumbnails" Guid="56A376E0-4286-4232-86B0-9A937AAF3917" Condition='KIT ~= "thumbnails"'>
+        <RegistryValue Root="HKLM" Key="Software\Thumbwright\Defaults" Name="StarterKit" Type="string" Value="thumbnails" KeyPath="yes" />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\Thumbwright\Defaults" />
+      </Component>
+      <Component Id="DefaultKitEverything" Guid="17ABE851-B718-434D-BFA7-39CD334E6CEB" Condition='KIT ~= "everything"'>
+        <RegistryValue Root="HKLM" Key="Software\Thumbwright\Defaults" Name="StarterKit" Type="string" Value="everything" KeyPath="yes" />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\Thumbwright\Defaults" />
       </Component>
     </ComponentGroup>
 
@@ -192,6 +269,27 @@
 
     <CustomAction Id="RejectUnsafeInstallFolder" Error="The install folder must not contain a single quote (')." />
 
+    <CustomAction Id="RejectBadMenu" Error="MENU must be 0 (start with the right-click menu off) or 1 (the default)." />
+    <CustomAction Id="RejectBadKit" Error="KIT must be one of: photos, paperwork, design, cad, thumbnails, everything." />
+<?ifdef IncludeSettings?>
+
+    <!-- Exit dialog checkbox "Open Thumbwright Workbench". The installer UI runs in the client
+         process; when msiexec was started from an elevated prompt that process is elevated, and
+         a packaged exe launched elevated writes its settings into the wrong (virtualized) HKCU.
+         Asking explorer.exe to open the file hands the launch to the user's own, unelevated
+         shell, so the Workbench always starts as the signed-in user. Immediate, not deferred,
+         and not waited for (asyncNoWait); formats only private properties. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open Thumbwright Workbench" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <CustomAction Id="LaunchWorkbench" Directory="InstallFolder"
+        Execute="immediate" Return="asyncNoWait"
+        ExeCommand="&quot;[WindowsFolder]explorer.exe&quot; &quot;[InstallFolder]thumbwright-settings.exe&quot;" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchWorkbench"
+          Condition='WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed' />
+    </UI>
+<?endif?>
+
     <InstallExecuteSequence>
       <!-- Remove the package first, so none of our code is loaded when the DLL is unregistered
            and its files are deleted: deprovision, remove, unregister the DLL, remove files.
@@ -215,6 +313,8 @@
            that cannot be escaped here, so refuse an install directory containing a single quote
            (reachable only through a transform or a relocated Program Files). -->
       <Custom Action="RejectUnsafeInstallFolder" After="CostFinalize" Condition='NOT (REMOVE="ALL") AND InstallFolder &gt;&lt; "&apos;"' />
+      <Custom Action="RejectBadMenu" After="RejectUnsafeInstallFolder" Condition='NOT (REMOVE="ALL") AND MENU AND MENU &lt;&gt; "0" AND MENU &lt;&gt; "1"' />
+      <Custom Action="RejectBadKit" After="RejectBadMenu" Condition='NOT (REMOVE="ALL") AND KIT AND NOT (KIT ~= "photos" OR KIT ~= "paperwork" OR KIT ~= "design" OR KIT ~= "cad" OR KIT ~= "thumbnails" OR KIT ~= "everything")' />
     </InstallExecuteSequence>
   </Package>
 </Wix>

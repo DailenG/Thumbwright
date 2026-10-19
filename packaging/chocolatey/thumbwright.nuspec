@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>thumbwright</id>
-    <version>0.1.1</version>
+    <version>0.1.2</version>
     <title>Thumbwright</title>
     <authors>Dailen Gunter</authors>
     <owners>Dailen</owners>
@@ -15,24 +15,34 @@
     <licenseUrl>https://github.com/DailenG/Thumbwright/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <copyright>Copyright (C) 2026 Dailen Gunter</copyright>
-    <tags>thumbnails explorer shell-extension context-menu raw jpeg-xl heic image-converter foss</tags>
-    <summary>Windows Explorer thumbnails for 315 file formats, plus a right-click image toolkit.</summary>
-    <description><![CDATA[Thumbwright is a Windows Explorer thumbnail provider and context-menu toolkit written in Rust.
+    <tags>thumbnails explorer shell-extension context-menu raw jpeg-xl heic avif pdf ocr windows-11 image-converter foss</tags>
+    <summary>See HEIC, RAW, PDF and CAD thumbnails in File Explorer, plus a right-click menu to convert, resize and OCR images. Free, offline.</summary>
+    <description><![CDATA[Your HEIC, camera RAW, PDF and CAD files finally show a picture in Windows File Explorer, and a right-click menu lets you convert, resize and copy text out of images without opening another program. Thumbwright is free, open source and never connects to the internet.
+
+HEIC and AVIF thumbnails need Microsoft's free HEIF, HEVC and AV1 extensions from the Microsoft Store; Thumbwright draws the picture, Windows supplies the codec.
 
 ## Features
 
 - **Thumbnails for 315 formats**: camera RAW (CR3, CR2, CRW, NEF, ARW, ORF, RW2, RAF, X3F, DNG and more), JPEG XL, JPEG 2000, HEIC/AVIF, Blender, Aseprite, GIMP XCF, PSD, Krita, SVG, DWG/DXF, FreeCAD, 3MF, G-code, PDF, EPUB, legacy Office, DjVu, ZIP/7z/RAR and CBZ/CBR comics, video frames, album art, Android APK icons and a long tail of scientific and legacy bitmaps.
-- **Right-click toolkit** in both the classic and the Windows 11 menu: convert, resize, lossless JPEG rotation, shrink for email, compress to size, OCR, combine into PDF or CBZ, rename by date or camera, sort into folders, wallpaper, lock screen and folder icon.
-- **Isolated decoders**: OS codecs and complex decoders run in a separate process limited by a Job Object (memory, CPU time, no UI access), so a malformed file cannot crash Explorer.
-- **Reversible registration**: Thumbwright never changes an extension's existing ProgID or default handler, and uninstall removes exactly what it wrote.
+- **Right-click tools**: convert, resize, lossless JPEG rotation, shrink for email, make a file smaller than a given size, copy text from an image (OCR), combine into PDF or comic book, rename by date or camera, sort into folders, wallpaper, lock screen and folder icon.
+- **Thumbwright Workbench**: a Start menu shortcut opens the settings, where you choose file types and menu items.
+- **Safe by design**: complex decoders run in a separate, locked-down process, so a malformed file cannot crash Explorer. Thumbwright never changes another program's file associations, and uninstall removes exactly what it added.
 - Command-line tool `twctl` for every menu verb plus batch conversion and diagnostics (`twctl doctor`).
+
+## Package parameters
+
+Silent installs show no window. Two optional parameters preset the first run for users who have not saved settings yet (they are stored machine-wide and can be changed later in Thumbwright Workbench):
+
+- `/Menu:0` starts with the right-click menu off (`/Menu:1`, the default, leaves it on).
+- `/Kit:<name>` preselects a starter kit: `photos`, `paperwork`, `design`, `cad`, `thumbnails` or `everything`.
+
+Example: `choco install thumbwright --params "'/Menu:0 /Kit:photos'"`. Pass the parameters again on `choco upgrade`; an upgrade without them clears the presets.
 
 ## Notes
 
 - Installs per-machine to `Program Files\Thumbwright` (requires administrator).
-- HEIC and AVIF thumbnails use Microsoft's HEIF, HEVC and AV1 codec extensions from the Microsoft Store.
-- Windows 11 may keep a newly installed menu entry hidden until you enable it in **Show more options > Customize menu**.
-- The Windows 11 menu entry appears after your next sign-in.
+- On Windows 11, right-click > App extensions > Thumbwright, or Shift + right-click for the full menu. You can pin Thumbwright to the top level from Customize menu. The Windows 11 entry appears after your next sign-in.
+- Windows and other programs keep file types they already handle, so a few types (for example HEIC while another app owns it) can show that program's thumbnail instead. `twctl doctor` lists them.
 ]]></description>
     <releaseNotes>https://github.com/DailenG/Thumbwright/blob/main/CHANGELOG.md</releaseNotes>
   </metadata>

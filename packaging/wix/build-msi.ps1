@@ -7,8 +7,10 @@
     Wraps `wix build` for packaging\wix\Package.wxs. SourceDir must contain thumbwright_shell.dll,
     tw-worker.exe, twctl.exe, Thumbwright.msix (the sparse package for the Windows 11 menu,
     built by packaging\msix\build.ps1; the MSI registers it for all users), LICENSE and
-    THIRD_PARTY_LICENSES.md; thumbwright-settings.exe is included when present (or excluded
-    with -NoSettings). The MSI never contains Thumbwright.ini.
+    THIRD_PARTY_LICENSES.md; thumbwright-settings.exe is included when present (with its Start
+    Menu shortcut and the exit-dialog checkbox that opens it), or left out with -NoSettings. The
+    MSI never contains Thumbwright.ini. The installer UI needs the WixToolset.UI.wixext extension
+    in the version of the wix CLI; the script adds it to the per-user wix cache when missing.
 
     WiX v7 requires acceptance of the WiX OSMF EULA (free below US$10,000/year of revenue from
     projects using WiX; see packaging\wix\README.md). Accept it once with `wix eula accept wix7`,
@@ -31,7 +33,7 @@
     Pass `-acceptEula wix7` to wix for this build.
 
 .EXAMPLE
-    .\build-msi.ps1 -SourceDir ..\..\dist -OutFile ..\..\dist\Thumbwright-0.1.1-x64.msi -Version 0.1.1
+    .\build-msi.ps1 -SourceDir ..\..\dist -OutFile $env:TEMP\Thumbwright-0.1.2-x64.msi -Version 0.1.2
 #>
 [CmdletBinding()]
 param(
@@ -97,9 +99,29 @@ if ($wix) {
     }
 }
 
+# The installer UI (WixUI_Minimal) comes from the WixToolset.UI.wixext extension, which must match
+# the wix version. It is cached per user (%USERPROFILE%\.wix), not installed system-wide; add it
+# once if it is missing.
+$wixVersion = ((& $wixExe --version) | Select-Object -First 1) -replace '\+.*$', ''
+if ($wixVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Cannot read the wix version from 'wix --version': '$wixVersion'"
+}
+$uiExtension = "WixToolset.UI.wixext/$wixVersion"
+$installedExtensions = @(& $wixExe extension list -g) -join "`n"
+if ($installedExtensions -notmatch ('(?m)^\s*WixToolset\.UI\.wixext\s+' + [regex]::Escape($wixVersion) + '\s*$')) {
+    Write-Host "Adding the WiX UI extension: $uiExtension"
+    $addArgs = @('extension', 'add', '-g', $uiExtension)
+    if ($AcceptWixEula) { $addArgs += @('-acceptEula', 'wix7') }
+    & $wixExe @addArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "wix extension add $uiExtension failed with exit code $LASTEXITCODE"
+    }
+}
+
 # -pdbtype none: no .wixpdb next to the MSI (dist\ must hold only shippable files).
 $iconFile = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\icons\thumbwright.ico')).Path
-$wixArgs = @('build', '-arch', 'x64', '-pdbtype', 'none', '-d', "Version=$Version", '-d', "PackageName=$packageName", '-d', "SourceDir=$SourceDir", '-d', "IconFile=$iconFile")
+$licenseRtf = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'license-summary.rtf')).Path
+$wixArgs = @('build', '-arch', 'x64', '-pdbtype', 'none', '-ext', $uiExtension, '-d', "Version=$Version", '-d', "PackageName=$packageName", '-d', "SourceDir=$SourceDir", '-d', "IconFile=$iconFile", '-d', "LicenseRtf=$licenseRtf")
 $settingsPresent = Test-Path -LiteralPath (Join-Path $SourceDir 'thumbwright-settings.exe')
 if ($settingsPresent -and -not $NoSettings) {
     $wixArgs += @('-d', 'IncludeSettings=1')
