@@ -778,6 +778,34 @@ pub fn unregister(layout: &Layout) -> Result<Report> {
     Ok(report)
 }
 
+/// Last-resort repair for a corrupt journal: deletes the product's registration keys
+/// (the journal key included) without replaying anything, then the product keys while they
+/// are empty. The shell state the journal would have undone (handler values under
+/// `Software\Classes`) is left in place; only keys whose names are ours by product name
+/// are removed, and a key holding foreign content (such as settings) survives.
+/// Callers should tell the user what this leaves behind.
+pub fn reset(layout: &Layout) -> Result<Report> {
+    let mut report = Report::default();
+    let manifest = layout.manifest_key();
+    // remove_created_key refuses to delete a non-empty key, so the journal's own values
+    // go first: everything under the journal key is ours by name.
+    if let Ok(journal) = layout.root.options().read().write().open(&manifest) {
+        let names: Vec<String> = journal
+            .values()
+            .map(|v| v.into_iter().map(|(n, _)| n).collect())
+            .unwrap_or_default();
+        for name in names {
+            let _ = journal.remove_value(name);
+        }
+    }
+    remove_created_key(layout.root, &manifest, &mut report)?;
+    remove_empty_product_keys(layout, &mut report)?;
+    if layout.notify {
+        notify_assoc_changed();
+    }
+    Ok(report)
+}
+
 /// Deletes the journal key and every key between it and the product key, product key
 /// included, deepest first, as long as each is empty. These keys are ours by name even when
 /// a crash kept them out of the journal; one that holds anything (such as settings) stays.
@@ -1237,6 +1265,38 @@ mod tests {
             assert!(unregister(&sb.layout).is_err(), "corruption {i}");
             assert_eq!(sb.snapshot(), before, "corruption {i} changed the registry");
         }
+    }
+
+    #[test]
+    fn reset_recovers_from_a_corrupt_journal() {
+        // After a corrupt journal, unregister refuses to touch anything and register
+        // strands; reset must remove the product's registration keys so a fresh register
+        // works, while a key holding foreign content (settings) survives (S10).
+        let dll = PathBuf::from(r"C:\x\thumbwright_shell.dll");
+        let sb = Sandbox::new("reset");
+        register(&sb.layout, &plan(&dll)).unwrap();
+        sb.journal().set_u32("00000", 7).unwrap();
+        assert!(unregister(&sb.layout).is_err());
+        reset(&sb.layout).unwrap();
+        assert!(CURRENT_USER.open(sb.layout.manifest_key()).is_err());
+        assert!(CURRENT_USER.open(&sb.layout.product).is_err());
+        assert!(status(&sb.layout).is_none());
+        // A fresh register works again (no stale journal to trip over).
+        register(&sb.layout, &plan(&dll)).unwrap();
+        unregister(&sb.layout).unwrap();
+
+        // Settings in the product key survive reset.
+        let sb = Sandbox::new("reset-keep");
+        register(&sb.layout, &plan(&dll)).unwrap();
+        sb.journal().set_string("00000", "V\tbogus").unwrap();
+        CURRENT_USER
+            .create(&sb.layout.product)
+            .unwrap()
+            .set_u32("MaxFileMb", 64)
+            .unwrap();
+        reset(&sb.layout).unwrap();
+        let product = CURRENT_USER.open(&sb.layout.product).unwrap();
+        assert_eq!(product.get_u32("MaxFileMb").unwrap(), 64);
     }
 
     #[test]

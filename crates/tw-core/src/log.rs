@@ -33,9 +33,7 @@ fn trim(path: &std::path::Path) {
     let Ok(meta) = std::fs::metadata(path) else {
         return;
     };
-    let Ok(size) = u64::try_from(meta.len()) else {
-        return;
-    };
+    let size = meta.len();
     if size <= TRIM_ABOVE {
         return;
     }
@@ -49,7 +47,12 @@ fn trim(path: &std::path::Path) {
         return;
     };
     // Start at the beginning of a line.
-    let start = start + data[start..].iter().position(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    let start = start
+        + data[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
     let _ = std::fs::write(path, &data[start..]);
 }
 
@@ -98,5 +101,42 @@ pub fn info(msg: &str) {
 pub fn verbose(enabled: bool, line: impl FnOnce() -> String) {
     if enabled {
         write_line("TRACE", &line());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_keeps_only_the_tail_on_a_line_boundary() {
+        let dir = std::env::temp_dir().join(format!("tw-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Thumbwright.log");
+        let lines = 40_000; // ~1.4 MiB with a 36-byte line
+        let mut body = String::new();
+        for i in 0..lines {
+            body.push_str(&format!("[pid 1 +0ms] ERROR line number {i:06}\n"));
+        }
+        std::fs::write(&path, &body).unwrap();
+        trim(&path);
+        let kept = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            kept.len() <= KEEP as usize + 64,
+            "kept {} bytes",
+            kept.len()
+        );
+        assert!(
+            kept.starts_with('['),
+            "cut mid-line: {}",
+            &kept[..kept.len().min(40)]
+        );
+        assert!(kept.contains(&format!("line number {:06}", lines - 1)));
+        assert!(!kept.contains("line number 000000"));
+        // Below the cap, nothing is touched.
+        std::fs::write(&path, "short\n").unwrap();
+        trim(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "short\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

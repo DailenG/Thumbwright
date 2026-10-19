@@ -72,8 +72,7 @@ const USAGE: &str = "usage: twctl <command> [args]
   doctor [file] [--bundle out.zip]
   --mcp
   formats [--json]
-  register [--off|--status]
-  --version
+  register [--off|--status|--reset-journal]
   --help | <command> --help
 global options: --notify (show errors in a message box), --files-from <list.txt>;
   -- ends options (later arguments are file names even if they start with --)";
@@ -110,6 +109,7 @@ const FLAG_OPTS: &[&str] = &[
     "--gui",
     "--off",
     "--status",
+    "--reset-journal",
     "--notify",
     "--recurse",
     "--strict",
@@ -1127,5 +1127,44 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("does not take --trim"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod s_fixes_tests {
+    use super::*;
+
+    #[test]
+    fn value_option_rejects_an_option_shaped_value() {
+        let err = match parse(vec!["doctor".into(), "--bundle".into(), "--json".into()]) {
+            Err(e) => e,
+            Ok(_) => panic!("option-shaped value must be a usage error"),
+        };
+        assert!(err.contains("needs a value"), "{err}");
+    }
+
+    #[test]
+    fn batch_reports_a_panicking_file_instead_of_silent_success() {
+        let dir = std::env::temp_dir().join(format!("twctl-panic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.png");
+        std::fs::write(&a, b"x").unwrap();
+        let b = dir.join("b.png");
+        std::fs::write(&b, b"x").unwrap();
+        let files = vec![a.clone(), b.clone()];
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let f = |p: &Path| -> Result<PathBuf> {
+            if p == a {
+                panic!("decoder panicked");
+            }
+            let target = out.join(p.file_name().unwrap());
+            std::fs::write(&target, b"ok").map_err(|e| e.to_string())?;
+            Ok(target)
+        };
+        let res = batch(&files, f).unwrap_err();
+        assert!(res.contains("decoder panicked"), "{res}");
+        assert!(res.contains("1 of 2 failed"), "{res}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
