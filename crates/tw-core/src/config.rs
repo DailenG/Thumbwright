@@ -6,6 +6,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::formats::{self, Category};
 use crate::limits;
 
 pub const PORTABLE_INI: &str = "Thumbwright.ini";
@@ -365,11 +366,7 @@ impl Settings {
         if let Ok(values) = key.values() {
             for (name, value) in values {
                 count += 1;
-                let text = match value.ty() {
-                    windows_registry::Type::U32 => u32::try_from(value).ok().map(|n| n.to_string()),
-                    _ => String::try_from(value).ok(),
-                };
-                if let Some(text) = text {
+                if let Some(text) = registry_value_text(value) {
                     s.apply(&name, &text);
                 }
             }
@@ -418,15 +415,43 @@ impl Settings {
         Self::default()
     }
 
-    /// Machine-wide defaults for a user who has saved no settings yet: the values under
-    /// `HKLM\Software\Thumbwright\Defaults`, laid over the built-in defaults. The MSI writes
-    /// `MenuEnabled=0` there for `MENU=0`; an administrator may add any other setting name.
-    /// Absent key: the built-in defaults.
+    /// Machine-wide defaults for a user who has saved no settings yet: the starter kit the
+    /// installer preselected (`KIT=<name>`), if any, with the values under
+    /// `HKLM\Software\Thumbwright\Defaults` laid over it (see [`Settings::layered_defaults`]).
+    /// The MSI writes `MenuEnabled=0` there for `MENU=0`; an administrator may add any other
+    /// setting name. Absent key: the built-in defaults.
     #[cfg(windows)]
     pub fn machine_defaults() -> Self {
-        Self::read_registry(windows_registry::LOCAL_MACHINE, MACHINE_DEFAULTS_KEY)
-            .map(|(s, _)| s)
-            .unwrap_or_default()
+        let values: Vec<(String, String)> = windows_registry::LOCAL_MACHINE
+            .open(MACHINE_DEFAULTS_KEY)
+            .ok()
+            .map(|key| {
+                key.values()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(name, value)| Some((name, registry_value_text(value)?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::layered_defaults(Self::machine_starter_kit(), values)
+    }
+
+    /// The machine-wide defaults as layers: the starter kit's settings (the built-in defaults
+    /// without a kit), then every `key = value` of `values` applied on top, so an explicit
+    /// machine value such as `MenuEnabled=0` (`MENU=0`) wins over the kit.
+    pub fn layered_defaults<K, V>(
+        kit: Option<&str>,
+        values: impl IntoIterator<Item = (K, V)>,
+    ) -> Self
+    where
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut s = kit.map(starter_kit_defaults).unwrap_or_default();
+        for (key, value) in values {
+            s.apply(key.as_ref(), value.as_ref());
+        }
+        s
     }
 
     /// The starter kit the installer was told to preselect (`KIT=<name>`), as one of
@@ -467,6 +492,90 @@ pub fn starter_kit_name(text: &str) -> Option<&'static str> {
         .into_iter()
         .find(|kit| kit.eq_ignore_ascii_case(text))
 }
+
+/// A registry value as the text [`Settings::apply`] parses: numbers in decimal, strings as is;
+/// `None` for other types.
+#[cfg(windows)]
+fn registry_value_text(value: windows_registry::Value) -> Option<String> {
+    match value.ty() {
+        windows_registry::Type::U32 => u32::try_from(value).ok().map(|n| n.to_string()),
+        _ => String::try_from(value).ok(),
+    }
+}
+
+/// Menu items each kit keeps; every other hideable item is hidden. `settings` is always kept.
+const PHOTOS_MENU: &[&str] = &[
+    "convert_into",
+    "resize",
+    "rotate",
+    "make_smaller",
+    "copy_text",
+    "combine",
+    "organise",
+    "image_info",
+];
+const PAPERWORK_MENU: &[&str] = &["convert_into", "make_smaller", "copy_text", "combine"];
+const DESIGN_MENU: &[&str] = &["convert_into", "resize", "copy", "set_as"];
+
+/// The settings a starter kit starts a user with (spec: UX review 4.2): the built-in defaults
+/// with `disabled_types` (every type Thumbwright handles whose family the kit does not list)
+/// and `hidden_menu_items` (every hideable menu item the kit does not keep) set, or the whole
+/// menu turned off. `kit` is matched like [`starter_kit_name`]; an unknown name, and
+/// `everything`, give the plain defaults.
+///
+/// | kit | families on | menu |
+/// |---|---|---|
+/// | `photos` | CameraRaw, Raster, Video | convert_into, resize, rotate, make_smaller, copy_text, combine, organise, image_info, settings |
+/// | `paperwork` | Document, Ebook (incl. CBZ/CBR), Raster | convert_into, make_smaller, copy_text, combine, settings |
+/// | `design` | Design, Raster | convert_into, resize, copy, set_as, settings |
+/// | `cad` | Design | off |
+/// | `thumbnails` | all | off |
+/// | `everything` | all | full |
+pub fn starter_kit_defaults(kit: &str) -> Settings {
+    let mut s = Settings::default();
+    let (families, menu): (&[Category], Option<&[&str]>) = match starter_kit_name(kit) {
+        Some("photos") => (
+            &[Category::CameraRaw, Category::Raster, Category::Video],
+            Some(PHOTOS_MENU),
+        ),
+        Some("paperwork") => (
+            &[Category::Document, Category::Ebook, Category::Raster],
+            Some(PAPERWORK_MENU),
+        ),
+        Some("design") => (&[Category::Design, Category::Raster], Some(DESIGN_MENU)),
+        Some("cad") => (&[Category::Design], None),
+        Some("thumbnails") => (ALL_FAMILIES, None),
+        _ => return s,
+    };
+    s.disabled_types = formats::all()
+        .iter()
+        .filter(|f| !families.contains(&f.category))
+        .filter(|f| !crate::decode::route::chain_for_ext(f.ext).is_empty())
+        .map(|f| f.ext.to_string())
+        .collect();
+    match menu {
+        Some(keep) => {
+            s.hidden_menu_items = MENU_ITEMS
+                .iter()
+                .filter(|i| i.hideable && !keep.contains(&i.id))
+                .map(|i| i.id.to_string())
+                .collect();
+        }
+        None => s.menu_enabled = false,
+    }
+    s
+}
+
+const ALL_FAMILIES: &[Category] = &[
+    Category::Raster,
+    Category::Design,
+    Category::CameraRaw,
+    Category::Document,
+    Category::Ebook,
+    Category::Video,
+    Category::Archive,
+    Category::Audio,
+];
 
 #[cfg(test)]
 mod tests {
@@ -749,5 +858,168 @@ mod tests {
         let (s, n) = filled.unwrap();
         assert_eq!(s, non_default());
         assert!(n > 0);
+    }
+
+    fn routable() -> Vec<&'static str> {
+        formats::all()
+            .iter()
+            .map(|f| f.ext)
+            .filter(|e| !crate::decode::route::chain_for_ext(e).is_empty())
+            .collect()
+    }
+
+    fn hidden(s: &Settings) -> Vec<&str> {
+        s.hidden_menu_items.iter().map(String::as_str).collect()
+    }
+
+    fn visible_items(s: &Settings) -> Vec<&'static str> {
+        MENU_ITEMS
+            .iter()
+            .map(|i| i.id)
+            .filter(|id| s.menu_item_visible(id))
+            .collect()
+    }
+
+    fn enabled_categories(s: &Settings) -> Vec<Category> {
+        ALL_FAMILIES
+            .iter()
+            .copied()
+            .filter(|c| {
+                formats::all()
+                    .iter()
+                    .filter(|f| {
+                        f.category == *c && !crate::decode::route::chain_for_ext(f.ext).is_empty()
+                    })
+                    .all(|f| s.type_enabled(f.ext))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_kit_name_has_a_shape_and_everything_is_the_default() {
+        assert_eq!(starter_kit_defaults("everything"), Settings::default());
+        assert_eq!(starter_kit_defaults("no-such-kit"), Settings::default());
+        assert_eq!(
+            starter_kit_defaults(" Photos "),
+            starter_kit_defaults("photos")
+        );
+        for kit in STARTER_KITS.into_iter().filter(|k| *k != "everything") {
+            assert_ne!(starter_kit_defaults(kit), Settings::default(), "{kit}");
+        }
+    }
+
+    #[test]
+    fn kit_menu_ids_all_exist_and_settings_stays() {
+        for keep in [PHOTOS_MENU, PAPERWORK_MENU, DESIGN_MENU] {
+            for id in keep {
+                assert!(
+                    MENU_ITEMS.iter().any(|i| i.id == *id),
+                    "unknown menu id {id}"
+                );
+            }
+        }
+        for kit in ["photos", "paperwork", "design"] {
+            let s = starter_kit_defaults(kit);
+            assert!(s.menu_enabled && s.menu_item_visible("settings"), "{kit}");
+            assert!(
+                s.hidden_menu_items
+                    .iter()
+                    .all(|h| MENU_ITEMS.iter().any(|i| i.id == h && i.hideable)),
+                "{kit}"
+            );
+        }
+    }
+
+    #[test]
+    fn photos_kit_keeps_raw_and_heic_and_drops_documents() {
+        let s = starter_kit_defaults("photos");
+        assert!(s.type_enabled("cr3") && s.type_enabled("heic") && s.type_enabled("png"));
+        assert!(s.type_enabled("mp4"));
+        assert!(!s.type_enabled("pdf") && !s.type_enabled("dwg") && !s.type_enabled("zip"));
+        assert_eq!(
+            enabled_categories(&s),
+            [Category::Raster, Category::CameraRaw, Category::Video]
+        );
+        assert_eq!(hidden(&s), ["copy", "set_as"]);
+        assert!(s.menu_enabled);
+    }
+
+    #[test]
+    fn paperwork_kit_is_documents_ebooks_comics_and_scans() {
+        let s = starter_kit_defaults("paperwork");
+        assert!(s.type_enabled("pdf") && s.type_enabled("epub"));
+        assert!(s.type_enabled("cbz") && s.type_enabled("cbr") && s.type_enabled("png"));
+        assert!(!s.type_enabled("cr3") && !s.type_enabled("dwg") && !s.type_enabled("mp4"));
+        assert_eq!(
+            visible_items(&s),
+            [
+                "convert_into",
+                "make_smaller",
+                "copy_text",
+                "combine",
+                "settings"
+            ]
+        );
+    }
+
+    #[test]
+    fn design_kit_is_design_and_raster() {
+        let s = starter_kit_defaults("design");
+        assert!(s.type_enabled("psd") && s.type_enabled("svg") && s.type_enabled("png"));
+        assert!(!s.type_enabled("pdf") && !s.type_enabled("cr3"));
+        assert_eq!(
+            visible_items(&s),
+            ["convert_into", "resize", "copy", "set_as", "settings"]
+        );
+    }
+
+    #[test]
+    fn cad_kit_is_design_thumbnails_with_the_menu_off() {
+        let s = starter_kit_defaults("cad");
+        assert!(!s.menu_enabled);
+        assert!(s.type_enabled("dwg") && s.type_enabled("dxf"));
+        assert!(!s.type_enabled("png") && !s.type_enabled("pdf"));
+        assert_eq!(enabled_categories(&s), [Category::Design]);
+        assert!(s.hidden_menu_items.is_empty());
+    }
+
+    #[test]
+    fn thumbnails_kit_turns_the_menu_off_and_every_routable_type_on() {
+        let s = starter_kit_defaults("thumbnails");
+        assert!(!s.menu_enabled);
+        assert!(s.disabled_types.is_empty());
+        assert!(routable().into_iter().all(|e| s.type_enabled(e)));
+        assert_eq!(enabled_categories(&s), ALL_FAMILIES);
+    }
+
+    #[test]
+    fn machine_values_are_laid_over_the_kit_and_menu_zero_wins() {
+        let none: [(&str, &str); 0] = [];
+        assert_eq!(Settings::layered_defaults(None, none), Settings::default());
+        assert_eq!(
+            Settings::layered_defaults(Some("photos"), none),
+            starter_kit_defaults("photos")
+        );
+        // MENU=0 plus KIT=photos: the kit's types stay, the menu is off.
+        let s = Settings::layered_defaults(
+            Some("photos"),
+            [("StarterKit", "photos"), ("MenuEnabled", "0")],
+        );
+        assert!(!s.menu_enabled);
+        assert_eq!(
+            s.disabled_types,
+            starter_kit_defaults("photos").disabled_types
+        );
+        assert_eq!(
+            s.hidden_menu_items,
+            starter_kit_defaults("photos").hidden_menu_items
+        );
+        // Any stored machine value wins over the kit, also an administrator's MenuEnabled=1
+        // over a kit that turns the menu off.
+        let off = Settings::layered_defaults(Some("thumbnails"), [("MenuEnabled", "1")]);
+        assert!(off.menu_enabled);
+        // An administrator's DisabledTypes replaces the kit's list.
+        let s = Settings::layered_defaults(Some("photos"), [("DisabledTypes", "png")]);
+        assert_eq!(s.disabled_types, ["png"]);
     }
 }

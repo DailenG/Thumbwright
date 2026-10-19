@@ -43,7 +43,13 @@ on-disk formats may still change.
   "Open Thumbwright Workbench"), a "Thumbwright Workbench" Start Menu shortcut, and silent
   presets: `msiexec /i Thumbwright-0.1.2-x64.msi /qn MENU=0` installs thumbnails only;
   `KIT=photos|paperwork|design|cad|thumbnails|everything` picks a Starter kit. Chocolatey:
-  `--params "/Menu:0 /Kit:photos"`. Silent installs show no UI.
+  `--params "/Menu:0 /Kit:photos"`. Silent installs show no UI. A kit is the first-run
+  default for users who have not saved settings: it turns off the file-type families it does
+  not need and hides the right-click items it does not use (Photos: RAW, images and video,
+  no Copy or Set as; Paperwork: documents, ebooks, comics and images, with Convert to, Make
+  smaller, Copy text and Combine; Design: design files and images, with Convert to, Resize,
+  Copy and Set as; CAD: design files, menu off; Thumbnails: every type, menu off;
+  Everything: no change). `MENU=0` still wins over a kit's menu.
 - New product icon, website and README.
 
 ### Fixed
