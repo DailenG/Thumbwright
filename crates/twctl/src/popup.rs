@@ -31,8 +31,12 @@ use windows::core::{PCSTR, PCWSTR, w};
 
 use crate::ops::Result;
 
-/// How long the popup waits for the shell's thumbnail before it opens without one.
-const PREVIEW_WAIT: Duration = Duration::from_millis(150);
+/// How long the popup waits for the shell's thumbnail before it opens without one. A cached
+/// thumbnail takes tens of milliseconds in a fresh process (more on a busy machine); a file the
+/// shell has not thumbnailed yet needs its handler to run, which can take a few hundred. A
+/// bitmap that arrives later cannot be shown (the menu is already sized), so it is dropped and
+/// the next popup finds it cached.
+const PREVIEW_WAIT: Duration = Duration::from_millis(400);
 const PREVIEW_EDGE: i32 = 128;
 
 /// `--at X,Y`: the screen position the popup opens at.
@@ -293,9 +297,10 @@ pub fn choose(
     files: &[PathBuf],
     at: (i32, i32),
 ) -> Result<Option<&'static Verb>> {
+    // Started before anything else so the shell's work overlaps the menu build.
+    let preview = (files.len() == 1 && settings.menu_preview).then(|| fetch_preview(&files[0]));
     crate::ui::dpi_aware();
     enable_dark_menus();
-    let preview = (files.len() == 1 && settings.menu_preview).then(|| fetch_preview(&files[0]));
     let entries = tree::shown(settings, &Selection::of(files));
     let mut popup = build(&entries, Some(&tree::header_text(files)))?;
     if let Some(rx) = preview

@@ -71,6 +71,9 @@ on-disk formats may still change.
   entry vanished; it now takes the first id and shows what fits.
 - Classic menu: the preview row broke dark mode (light preview background, white separator
   bars, invisible submenu arrows). The preview is now a themed item bitmap.
+- Windows 11 popup (`twctl menu`): the header row often had no preview. The popup gave the
+  shell 150 ms to hand over the thumbnail, which a file the shell had not thumbnailed yet (or
+  a busy machine) overran. It now waits up to 400 ms and starts the fetch first.
 - Labels containing `&` ("Rotate & flip") lost the character to a menu mnemonic.
 - `twctl doctor`: names Windows 11 by its build number, no longer says the cloud and
   embedded-preview settings do not exist, and reports how many values the settings store
