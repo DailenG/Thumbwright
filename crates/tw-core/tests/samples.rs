@@ -8,12 +8,16 @@
 //!   `image` crate and compared with what `raw::extract` returns. One small CC0 CRW is
 //!   committed; the larger set is read from `TW_SAMPLES` by an ignored test that
 //!   `scripts/fetch-samples.ps1` prepares.
+//! * `.vips`, `.blend`, `.pdn`: files written by libvips, Blender and Paint.NET themselves
+//!   (committed under `tests/fixtures/{vips,blend,pdn}`; provenance in the README), checked
+//!   for dimensions and known pixels. `.livp` and `.m2ts` need OS codecs and are covered
+//!   through the worker in `tw-shell/tests/real_files.rs`.
 
 use std::path::{Path, PathBuf};
 
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageFormat};
-use tw_core::decode::{jxl, raw};
+use tw_core::decode::{jxl, raw, route};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -276,4 +280,119 @@ fn real_raw_samples() {
         });
         check(&data, s);
     }
+}
+
+/// Decodes a committed fixture the way the worker would: through the extension's routed
+/// decoder chain (all stages in-process; none of these formats needs an OS codec).
+fn decode_fixture(rel: &str) -> DynamicImage {
+    let ext = Path::new(rel).extension().unwrap().to_str().unwrap();
+    let data = std::fs::read(fixtures().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+    let chain = route::chain_for_ext(ext);
+    assert!(!chain.is_empty(), "{ext} is not routed");
+    route::run_chain(chain, &data, ext, 256).unwrap_or_else(|e| panic!("{rel}: {e:?}"))
+}
+
+fn assert_near(img: &DynamicImage, x: u32, y: u32, want: [u8; 4], tol: u8, what: &str) {
+    let got = img.to_rgba8().get_pixel(x, y).0;
+    assert!(
+        got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= tol),
+        "{what}: pixel ({x},{y}) is {got:?}, expected {want:?} +-{tol}"
+    );
+}
+
+/// The 12x8 source image behind the `vips/` fixtures (`scripts/fixtures/make_vips_source.py`):
+/// a gradient with three pixels set to known values.
+fn vips_source_pixel(x: u32, y: u32) -> [u8; 3] {
+    match (x, y) {
+        (0, 0) => [255, 0, 0],
+        (11, 7) => [0, 0, 255],
+        (5, 3) => [10, 200, 30],
+        _ => [(x * 20) as u8, (y * 30) as u8, 128],
+    }
+}
+
+/// Real files written by `vips copy` (libvips 8.18.7). `rgb8` and `rgba8` are 8-bit sRGB
+/// (interpretation 22), `rgb16` is RGB16 (25) with the values scaled by 256.
+#[test]
+fn vips_rgb_files_written_by_libvips() {
+    for file in ["vips/rgb8.vips", "vips/rgb16.vips"] {
+        let img = decode_fixture(file);
+        assert_eq!((img.width(), img.height()), (12, 8), "{file}");
+        for y in 0..8 {
+            for x in 0..12 {
+                let [r, g, b] = vips_source_pixel(x, y);
+                assert_near(&img, x, y, [r, g, b, 255], 0, file);
+            }
+        }
+    }
+}
+
+/// 4-band sRGB: band 3 (alpha) holds a copy of the red band.
+#[test]
+fn vips_rgba_file_keeps_alpha() {
+    let img = decode_fixture("vips/rgba8.vips");
+    assert_eq!((img.width(), img.height()), (12, 8));
+    for y in 0..8 {
+        for x in 0..12 {
+            let [r, g, b] = vips_source_pixel(x, y);
+            assert_near(&img, x, y, [r, g, b, r], 0, "rgba8");
+        }
+    }
+}
+
+/// `vips colourspace ... b-w` (type 1, 8 bit) and `... grey16` (type 26, 16 bit) of the same
+/// source: the 16-bit file must decode to the same grey levels within rounding.
+#[test]
+fn vips_grey_files_written_by_libvips() {
+    let g8 = decode_fixture("vips/bw8.vips").to_luma8();
+    let g16 = decode_fixture("vips/grey16.vips").to_luma8();
+    assert_eq!((g8.width(), g8.height()), (12, 8));
+    assert_eq!((g16.width(), g16.height()), (12, 8));
+    // Pure red is 127 in libvips' luminance weighting, (20, 0, 128) is 35.
+    assert_eq!(g8.get_pixel(0, 0).0, [127]);
+    assert_eq!(g8.get_pixel(1, 0).0, [35]);
+    for (a, b) in g8.pixels().zip(g16.pixels()) {
+        assert!(a.0[0].abs_diff(b.0[0]) <= 1, "{a:?} vs {b:?}");
+    }
+}
+
+/// Saved by Blender 5.2.2 from a scene camera that frames a red cube with a grey cone
+/// above-left (`scripts/fixtures/make_blend.py`): a 128x128 thumbnail with a transparent
+/// background, stored bottom row first.
+fn check_blend_thumbnail(img: &DynamicImage) {
+    assert_eq!((img.width(), img.height()), (128, 128));
+    // Cube face, shaded red.
+    assert_near(img, 64, 64, [176, 54, 54, 255], 4, "cube");
+    assert_near(img, 64, 80, [175, 46, 46, 255], 4, "cube");
+    // The cone is grey and in the top-left corner: a vertical flip would put it at the
+    // bottom.
+    assert_near(img, 20, 5, [149, 151, 152, 255], 4, "cone");
+    assert_near(img, 20, 122, [0, 0, 0, 0], 0, "empty bottom-left");
+    // Transparent elsewhere.
+    for (x, y) in [(0, 0), (127, 127), (110, 10), (10, 60), (100, 100)] {
+        assert_eq!(img.to_rgba8().get_pixel(x, y).0[3], 0, "({x},{y})");
+    }
+}
+
+#[test]
+fn blend_thumbnail_of_a_real_blender_5_file() {
+    check_blend_thumbnail(&decode_fixture("blend/cube-cone.blend"));
+}
+
+/// The same scene saved with `compress=True` (Blender 5 writes zstd).
+#[test]
+fn blend_thumbnail_of_a_zstd_compressed_file() {
+    check_blend_thumbnail(&decode_fixture("blend/cube-cone-zstd.blend"));
+}
+
+/// Saved by Paint.NET 5.1.12 from an 800x600 image of four flat quadrants (red, green,
+/// blue, yellow); the `thumb` element holds a 256x192 palette PNG.
+#[test]
+fn pdn_thumbnail_of_a_real_paint_net_file() {
+    let img = decode_fixture("pdn/quadrants.pdn");
+    assert_eq!((img.width(), img.height()), (256, 192));
+    assert_near(&img, 20, 20, [255, 0, 0, 255], 0, "top-left");
+    assert_near(&img, 235, 20, [0, 255, 0, 255], 0, "top-right");
+    assert_near(&img, 20, 170, [0, 0, 255, 255], 0, "bottom-left");
+    assert_near(&img, 235, 170, [255, 255, 0, 255], 0, "bottom-right");
 }
