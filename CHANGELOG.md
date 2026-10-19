@@ -82,6 +82,15 @@ process.
 - A full hostile-input security review and its fixes are documented in
   `docs/history/REVIEW_FINDINGS.md`; the fixes are re-verified by tests and
   the live runs above.
+- The pre-public audit's resource-exhaustion findings are closed for the in-process
+  decoders: memory-abort paths (APK manifest strings, Aseprite cels, extreme
+  aspect ratios, `IStream` sizes that are declared but never delivered) now
+  fail cleanly; every identified quadratic loop (ARSC, EPUB spine, XML
+  entities, FB2, DXF, XMP/INDD/EPS, DWG/ICNS payloads, CLIP/SQLite, XCF,
+  RAW IFD walk) is bounded or linear; at most two overrunning decode threads
+  are tolerated per process before in-process work fails fast. Per-decode
+  accounting stays per-buffer inside the individual decoders, see
+  `docs/history/AUDIT_DECODE_HARDENING.md` for exactly what remains.
 
 ### Notes
 
