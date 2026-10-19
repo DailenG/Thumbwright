@@ -22,6 +22,8 @@ explorer.exe (in-proc) ── thumbwright_shell.dll ContextMenu ──spawn─�
 | `crates/tw-settings` | `thumbwright-settings.exe` | Settings window (`ui.rs`, raw Win32 controls via `win.rs`), applying settings and per-user registration toggles (`model.rs`), thumbnail-cache rebuild (`cache.rs`) |
 | `xtask` | dev tool | Dependency audit that generates `THIRD_PARTY_LICENSES.md` |
 
+`twctl --notify` feedback (menu invocations only): `feedback.rs` collects what a verb created (`feedback::created`) or copied (`feedback::confirm`) and, after the verb returned, `feedback::finish` selects the new files in Explorer (`win::reveal`, `SHOpenFolderAndSelectItems`, one call per folder), or shows a small auto-closing confirmation window near the cursor (clipboard-style verbs), or the error box. Per-file jobs (`batch` in `main.rs`) show a topmost progress window with Cancel once they run longer than ~1.5 s (~0.4 s for more than three files). Errors are rewritten into one plain sentence plus the technical detail by `friendly.rs`; Ctrl+C in the box copies the text.
+
 ## Invariants (I1-I8)
 
 These are binding on every change. If a change needs to break one, open an
