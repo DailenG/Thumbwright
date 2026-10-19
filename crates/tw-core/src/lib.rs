@@ -14,4 +14,6 @@ pub mod protocol;
 #[cfg(windows)]
 pub mod registration;
 #[cfg(windows)]
+pub mod spawn;
+#[cfg(windows)]
 pub mod worker;

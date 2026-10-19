@@ -3,8 +3,11 @@
 //! One worker process per request, and a worker never serves a second request. Input goes
 //! over an anonymous stdin pipe, the thumbnail comes back over stdout. The process is
 //! placed in a Job Object with a per-process committed-memory limit, a user-mode CPU-time
-//! limit, a one-process limit (no grandchildren), and kill-on-close; independently of
-//! those, a wall-clock watchdog terminates it when the budget expires.
+//! limit, a one-process limit (no grandchildren), kill-on-close and UI restrictions (no
+//! clipboard, global atoms, desktops, display or system-parameter changes, and no access to
+//! other processes' USER handles, audit U-1); independently of those, a wall-clock watchdog
+//! terminates it when the budget expires. The process is started by [`crate::spawn`], which
+//! hands it exactly its stdin, stdout and stderr and no other inherited handle (audit U-4).
 //!
 //! Process start-up (CreateProcess, loader, antivirus scan of the image) costs far more
 //! than decoding a small SVG or audio cover, so the shell may turn on pre-spawning
@@ -15,10 +18,7 @@
 //! off the request path.
 
 use std::io::{BufReader, BufWriter};
-use std::os::windows::io::AsRawHandle;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
@@ -27,11 +27,16 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME, JOB_OBJECT_UILIMIT,
+    JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
+    JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    TerminateJobObject,
 };
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+use crate::spawn::{self, Stdio};
 
 use crate::decode::route::Decoder;
 use crate::decode::{DecodeError, Result, Thumbnail};
@@ -44,12 +49,42 @@ struct Job(HANDLE);
 // thread-safe system call.
 unsafe impl Send for Job {}
 
+/// UI restrictions on the worker (audit U-1): it renders and decodes, it never needs the
+/// clipboard, another process's windows, desktops or system settings.
+pub(crate) const WORKER_UI_LIMITS: JOB_OBJECT_UILIMIT = JOB_OBJECT_UILIMIT(
+    JOB_OBJECT_UILIMIT_HANDLES.0
+        | JOB_OBJECT_UILIMIT_READCLIPBOARD.0
+        | JOB_OBJECT_UILIMIT_WRITECLIPBOARD.0
+        | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS.0
+        | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS.0
+        | JOB_OBJECT_UILIMIT_GLOBALATOMS.0
+        | JOB_OBJECT_UILIMIT_DESKTOP.0
+        | JOB_OBJECT_UILIMIT_EXITWINDOWS.0,
+);
+
 impl Job {
     fn new(memory_limit: u64) -> windows::core::Result<Self> {
         // SAFETY: anonymous job object; handle ownership moves into `Job`.
         let job = Job(unsafe { CreateJobObjectW(None, None)? });
+        job.set_ui_restrictions()?;
         job.set_memory_limit(memory_limit)?;
         Ok(job)
+    }
+
+    /// Applies [`WORKER_UI_LIMITS`]; set once, the limits do not vary per request.
+    fn set_ui_restrictions(&self) -> windows::core::Result<()> {
+        let info = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+            UIRestrictionsClass: WORKER_UI_LIMITS,
+        };
+        // SAFETY: `info` is a valid JOBOBJECT_BASIC_UI_RESTRICTIONS of the stated size.
+        unsafe {
+            SetInformationJobObject(
+                self.0,
+                JobObjectBasicUIRestrictions,
+                (&raw const info).cast(),
+                size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+            )
+        }
     }
 
     /// Applies every limit. Only the memory ceiling varies per request, so a pre-spawned
@@ -92,7 +127,7 @@ impl Drop for Job {
 
 /// A worker process inside its job that has not been sent a request yet.
 struct Worker {
-    child: Child,
+    child: spawn::Child,
     job: Job,
 }
 
@@ -100,15 +135,7 @@ impl Worker {
     fn spawn(exe: &Path, memory_limit: u64) -> Result<Self> {
         let job = Job::new(memory_limit)
             .map_err(|e| DecodeError::malformed(format!("job object: {e}")))?;
-        let mut child = Command::new(exe)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            // Normal priority on purpose: the wall-clock budget must measure decoding, not
-            // starvation behind busy normal-priority processes (a below-normal worker timed
-            // out on a fully loaded machine and the failure was then cached).
-            .creation_flags(CREATE_NO_WINDOW.0)
-            .spawn()
+        let child = spawn::spawn(exe, &[], Stdio::Piped, Stdio::Piped)
             .map_err(|e| DecodeError::malformed(format!("spawn worker: {e}")))?;
         SPAWNED.fetch_add(1, Ordering::Relaxed);
         // The worker blocks on stdin until the request arrives, so it cannot allocate or run
@@ -124,7 +151,7 @@ impl Worker {
     }
 
     /// Kills the process and waits for it to be gone.
-    fn kill(mut self) {
+    fn kill(self) {
         self.job.terminate();
         let _ = self.child.wait();
     }
@@ -212,7 +239,7 @@ fn take_idle(exe: &Path, now: Instant) -> Option<Worker> {
     for s in stale {
         s.worker.kill();
     }
-    let mut worker = taken?.worker;
+    let worker = taken?.worker;
     match worker.child.try_wait() {
         Ok(None) => Some(worker),
         _ => {
@@ -451,6 +478,127 @@ mod tests {
         assert_eq!(
             info.BasicLimitInformation.PerProcessUserTimeLimit,
             (limits::WORKER_CPU_TIME.as_nanos() / 100) as i64
+        );
+    }
+
+    fn ui_restrictions(job: &Job) -> JOB_OBJECT_UILIMIT {
+        use windows::Win32::System::JobObjects::QueryInformationJobObject;
+        let mut info = JOBOBJECT_BASIC_UI_RESTRICTIONS::default();
+        // SAFETY: valid job handle and a correctly sized out-struct.
+        unsafe {
+            QueryInformationJobObject(
+                Some(job.0),
+                JobObjectBasicUIRestrictions,
+                (&raw mut info).cast(),
+                size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+                None,
+            )
+            .unwrap();
+        }
+        info.UIRestrictionsClass
+    }
+
+    #[test]
+    fn every_worker_job_carries_the_ui_restrictions_and_keeps_them_when_retargeted() {
+        let job = Job::new(limits::WORKER_MEMORY_BYTES).unwrap();
+        assert_eq!(ui_restrictions(&job), WORKER_UI_LIMITS);
+        for f in [
+            JOB_OBJECT_UILIMIT_HANDLES,
+            JOB_OBJECT_UILIMIT_READCLIPBOARD,
+            JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+            JOB_OBJECT_UILIMIT_DESKTOP,
+        ] {
+            assert!(WORKER_UI_LIMITS.contains(f), "{f:?} missing");
+        }
+        job.set_memory_limit(limits::WORKER_MEMORY_BYTES + (1 << 20))
+            .unwrap();
+        assert_eq!(ui_restrictions(&job), WORKER_UI_LIMITS);
+    }
+
+    /// Env var that makes [`ui_probe_child`] do its work; its value is the parent's pid, and
+    /// the parent itself (the variable is process-wide) never acts on it.
+    const UI_PROBE_ENV: &str = "TW_WORKER_TEST_UI_PROBE";
+
+    /// Runs as the child of [`job_blocks_desktop_creation`]: waits for a line on stdin (so the
+    /// parent can place it in the job first), then reports whether it can create a desktop.
+    #[test]
+    fn ui_probe_child() {
+        let parent = std::env::var(UI_PROBE_ENV).ok();
+        if parent.is_none_or(|p| p == std::process::id().to_string()) {
+            return;
+        }
+        let mut go = String::new();
+        std::io::stdin().read_line(&mut go).unwrap();
+        use windows::Win32::System::StationsAndDesktops::{
+            CloseDesktop, CreateDesktopW, DESKTOP_CONTROL_FLAGS,
+        };
+        use windows::core::w;
+        // SAFETY: plain desktop calls; the desktop is closed again if it was created.
+        let created = unsafe {
+            CreateDesktopW(
+                w!("TwWorkerUiProbe"),
+                None,
+                None,
+                DESKTOP_CONTROL_FLAGS(0),
+                0x1000_0000, // GENERIC_ALL
+                None,
+            )
+        };
+        let ok = created.is_ok();
+        if let Ok(d) = created {
+            // SAFETY: we just created it.
+            let _ = unsafe { CloseDesktop(d) };
+        }
+        println!("UI desktop={ok}");
+    }
+
+    fn ui_probe(confined: bool) -> String {
+        use std::io::{BufRead, Write};
+        let exe = std::env::current_exe().unwrap();
+        let args: Vec<std::ffi::OsString> = [
+            "worker::tests::ui_probe_child",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ]
+        .iter()
+        .map(Into::into)
+        .collect();
+        // SAFETY: only this test and its child read the variable.
+        unsafe { std::env::set_var(UI_PROBE_ENV, std::process::id().to_string()) };
+        let mut child = spawn::spawn(&exe, &args, Stdio::Piped, Stdio::Piped).unwrap();
+        // Held to the end so the process stays inside the job until it has answered.
+        let job = Job::new(limits::WORKER_MEMORY_BYTES * 4).unwrap();
+        if confined {
+            // SAFETY: valid job and process handles.
+            unsafe { AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle())) }.unwrap();
+        }
+        writeln!(child.stdin.take().unwrap(), "go").unwrap();
+        let mut text = String::new();
+        for l in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
+            text.push_str(&l.unwrap());
+            text.push('\n');
+        }
+        let _ = child.wait();
+        drop(job);
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(UI_PROBE_ENV) };
+        text
+    }
+
+    #[test]
+    fn job_blocks_desktop_creation() {
+        let control = ui_probe(false);
+        if !control.contains("UI desktop=true") {
+            // No usable window station here (a service or a locked-down runner): the control
+            // cannot show the restriction doing anything.
+            eprintln!("desktops unavailable without a job; skipping:\n{control}");
+            return;
+        }
+        let confined = ui_probe(true);
+        assert!(
+            confined.contains("UI desktop=false"),
+            "a worker-style job must refuse desktop creation:\n{confined}"
         );
     }
 }
