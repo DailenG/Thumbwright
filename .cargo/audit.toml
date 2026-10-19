@@ -1,0 +1,12 @@
+# cargo-audit configuration (read by `cargo audit` in CI, .github/workflows/audit.yml).
+# Every exception needs a reason here and a line in SECURITY.md ("Known advisory exceptions").
+
+[advisories]
+ignore = [
+    # paste 1.0.15: "no longer maintained" (informational; no vulnerability). It is a
+    # proc-macro, so it runs only at compile time and nothing of it is in the shipped
+    # binaries. Pulled in by three independent upstream crates (lofty, pulp via exr via
+    # image, rav1e via ravif) that we do not control; replacing it means replacing or
+    # patching all three. Revisit when they move to a maintained fork.
+    "RUSTSEC-2024-0436",
+]

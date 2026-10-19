@@ -1,0 +1,45 @@
+name: Audit
+
+# RustSec advisory scan of Cargo.lock (audit P-7). Advisories are published against crates we
+# already depend on, so a green build today can need a bump tomorrow: the scan therefore runs on
+# a weekly schedule as well as when the dependency graph changes. cargo-audit comes from a
+# prebuilt binary (taiki-e/install-action) instead of `cargo install`, which would compile it
+# from source on every run (minutes); it needs no Rust toolchain of its own and runs on Linux
+# because it only reads Cargo.lock.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - ".cargo/audit.toml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - ".cargo/audit.toml"
+      - ".github/workflows/audit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-audit
+      # --deny warnings: unmaintained and yanked crates fail the job too. Accepted exceptions
+      # are listed, with reasons, in .cargo/audit.toml.
+      - name: cargo audit
+        run: cargo audit --deny warnings

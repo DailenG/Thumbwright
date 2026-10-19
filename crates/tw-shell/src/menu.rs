@@ -7,7 +7,6 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -26,7 +25,6 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Ole::{CF_HDROP, ReleaseStgMedium};
 use windows::Win32::System::Registry::HKEY;
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
@@ -1058,8 +1056,8 @@ const CMDLINE_BUDGET: usize = 30_000;
 pub(crate) fn launch(verb: &Verb, files: &[PathBuf], _hwnd: HWND) -> Result<()> {
     let started = Instant::now();
     let exe = crate::install_dir().join(ids::CTL_EXE_NAME);
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(verb.args).arg("--notify");
+    let mut args: Vec<OsString> = verb.args.iter().map(OsString::from).collect();
+    args.push("--notify".into());
     let total: usize = files.iter().map(|f| f.as_os_str().len() + 3).sum();
     if total > CMDLINE_BUDGET {
         let list = std::env::temp_dir().join(format!(
@@ -1078,14 +1076,19 @@ pub(crate) fn launch(verb: &Verb, files: &[PathBuf], _hwnd: HWND) -> Result<()> 
             .map_err(|_| E_FAIL)?;
         std::io::Write::write_all(&mut f, body.as_bytes()).map_err(|_| E_FAIL)?;
         drop(f);
-        cmd.arg("--files-from").arg(list);
+        args.push("--files-from".into());
+        args.push(list.into_os_string());
     } else {
-        cmd.args(files);
+        args.extend(files.iter().map(|f| f.as_os_str().to_owned()));
     }
-    let child = cmd
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .spawn()
-        .map_err(|_| E_FAIL)?;
+    // Audit U-4: twctl gets NUL for its three standard handles and no other inherited handle.
+    let child = tw_core::spawn::spawn(
+        &exe,
+        &args,
+        tw_core::spawn::Stdio::Null,
+        tw_core::spawn::Stdio::Null,
+    )
+    .map_err(|_| E_FAIL)?;
     log::verbose(Settings::load(&crate::install_dir()).verbose_log, || {
         let ext = files
             .first()

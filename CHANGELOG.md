@@ -5,6 +5,26 @@ Notable changes to Thumbwright. The format follows
 [SemVer](https://semver.org/) with a pre-1.0 caveat: until 1.0, interfaces and
 on-disk formats may still change.
 
+## [Unreleased]
+
+### Security
+
+- **MSI**: the install directory is now a private Windows Installer property
+  (`InstallFolder`, was the public `INSTALLFOLDER`), so `msiexec ... INSTALLFOLDER=...`
+  can no longer redirect the SYSTEM-run `regsvr32` or inject PowerShell into the package
+  actions; an install directory containing a single quote is refused (audit P-1, P-2).
+  `scripts/test-install.ps1 -DryRun` asserts this.
+- **Worker**: the Job Object now also carries UI restrictions (clipboard, desktop, display
+  settings, global atoms, system parameters, other processes' USER handles), and the worker
+  and the menu's `twctl` launch get exactly their three standard handles and no other
+  inherited handle (audit U-1, U-4).
+- **Release builds** remap the builder's cargo, rustup, profile and target paths out of the
+  binaries and verify it; `release.ps1` has no built-in signing-helper path (`TW_SIGN_HELPER`
+  or `-SignHelper`; `-CertThumbprint` is the reproducible route) (audit P-5, P-6).
+- **CI**: actions pinned by commit SHA, Dependabot for cargo and actions, a weekly and
+  on-change `cargo audit` job, job timeout and `--no-fail-fast` (audit P-7). The one accepted
+  advisory (`paste`, RUSTSEC-2024-0436) is documented in `SECURITY.md` (audit H-3).
+
 ## [0.1.0] - 2026-10-18
 
 First public release. Clean-room implementation of a Windows Explorer thumbnail
