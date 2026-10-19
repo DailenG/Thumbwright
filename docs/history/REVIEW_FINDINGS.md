@@ -1,6 +1,6 @@
 # Review Findings: Thumbwright
 
-Reviewed 2026-10-17 against `REVIEW_HANDOFF.md` and `FUNCTIONAL_SPEC.md`. Clean-room rules were followed: all reads, probes, fixtures and runtime state stayed inside `C:\CleanRoom\02_Build_Room`. Nothing was registered. HKLM was not touched. The only registry writes came from the existing test sandbox (`HKCU\Software\ThumbwrightTest-*`), which removes itself.
+Reviewed 2026-10-17 against `REVIEW_HANDOFF.md` and `FUNCTIONAL_SPEC.md`. Clean-room rules were followed: all reads, probes, fixtures and runtime state stayed inside the review workspace on the build-room machine. Nothing was registered. HKLM was not touched. The only registry writes came from the existing test sandbox (`HKCU\Software\ThumbwrightTest-*`), which removes itself.
 
 ## 1. Summary verdict
 

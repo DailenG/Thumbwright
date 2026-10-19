@@ -2,12 +2,12 @@
 
 > Historical document: the brief given to the independent reviewer in the build room, plus the integration notes added afterwards (section 4b). Review results: `REVIEW_FINDINGS.md` next to this file. Paths and toolchain notes describe the original build room.
 
-Workspace at the time: `C:\CleanRoom\02_Build_Room` (not a git repository; there is no history to diff).
+Workspace at the time: a private directory on the build-room machine (not a git repository; there is no history to diff).
 Size at the time: ~10.1k lines of Rust across 4 crates, 133 tests.
 
 ## 1. Clean-room rules (binding on the reviewer)
 
-1. Do not read, search or access files outside `C:\CleanRoom\02_Build_Room`.
+1. Do not read, search or access files outside the build-room workspace.
 2. Do not search the web or the file system for the reference product (identified in the private clean-room record) or its source.
 3. Allowed references: `./FUNCTIONAL_SPEC.md`, official Microsoft Win32/COM documentation, and docs/sources of permissively licensed Rust crates. Vendored crate sources are under `.toolchain/cargo/registry/src/*/`; prefer them.
 4. Report findings; do not rewrite large areas. Small, clearly-correct fixes are fine if each is listed in the report.

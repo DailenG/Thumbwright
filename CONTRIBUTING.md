@@ -24,7 +24,7 @@ from public observation only. To keep it that way:
   one appears, and it also rejects copyleft-only dependencies. If a format
   needs an OS codec (WIC, Media Foundation, Windows.Data.Pdf), it must decode
   in `tw-worker.exe`, never inside the shell surrogate (invariant I2 in
-  `docs/history/REVIEW_HANDOFF.md`).
+  `docs/ARCHITECTURE.md`).
 - **Hostile inputs come first.** Every decoder checks declared dimensions
   against a budget before allocating and counts every byte read against a cap
   (invariant I7). A new decoder without truncated-header and
@@ -32,8 +32,8 @@ from public observation only. To keep it that way:
 - **Registration must stay journaled and reversible.** Anything that writes to
   the registry goes through the engine in `tw-core/src/registration.rs`; there
   are no direct registry writes in features.
-- **Keep the invariants.** Section 3 of `docs/history/REVIEW_HANDOFF.md` lists
-  I1-I8. If a change needs to break one, open an issue first.
+- **Keep the invariants.** `docs/ARCHITECTURE.md` lists I1-I8. If a change
+  needs to break one, open an issue first.
 
 ## Development
 

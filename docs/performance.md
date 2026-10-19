@@ -10,7 +10,7 @@ file records the numbers, the decision for each, and how to reproduce them.
 | `Settings::load` on every `GetThumbnail` | 32 us (HKCU) to 54 us (INI) median; 0.1 % to 1.3 % of a typical in-proc thumbnail, 3.9 % of a 256 px icon | **No cache.** Not worth the stale-setting risk. |
 | One worker process per SVG / WIC / audio request | 20 ms process floor; SVG 24 ms vs 0.6 ms in-proc, MP3 cover 27 ms vs 0.9 ms | **Pre-spawned single-use workers** in the shell (still one request per process). SVG 24 -> 14 ms back to back, 6.5 ms when spaced; MP3 27 -> 16 / 8 ms. |
 | Whole stream read through a 1 MiB bounce buffer | 0.28 to 0.31 ms per call on files up to 250 KB (7 % of a 640x480 JPEG call, 23 % of an icon), 13 to 22x the cost of the read itself | **Read straight into the result `Vec`.** 13 to 21 us. |
-| `DynamicImage::thumbnail` for 24 MP -> 256 px | 29 to 34 ms (opaque 8-bit RGB) | **`fast_image_resize` Box filter for opaque 8-bit RGB and grey**: 5 ms, same quality (PSNR within 0.3 dB of before, against a Lanczos-3 reference). Alpha, 16-bit and float images keep `DynamicImage::thumbnail`. |
+| `DynamicImage::thumbnail` for 24 MP -> 256 px | 29 to 34 ms (opaque 8-bit RGB) | **`fast_image_resize` Box filter for opaque 8-bit RGB and grey**: 5 ms, same quality (PSNR within 0.3 dB of before, against a Lanczos-3 reference). 8-bit alpha images are premultiplied first, then Box-shrunk (issue #17). 16-bit images keep `DynamicImage::thumbnail`; float images are converted to 8-bit first. |
 | Peak memory of reading the whole stream | `file size + 1 MiB` (512 MiB file: 520.8 MiB peak working set) | **Unchanged**; the bounce chunk was the only overhead and is gone. |
 
 Stage totals for one in-process `GetThumbnail` (settings + read + decode + resize, medians,
@@ -190,7 +190,7 @@ Alpha (RGBA8 with transparent regions, 6000x4000):
 
 | Candidate | time | PSNR |
 |---|---|---|
-| `DynamicImage::thumbnail` (before; also shipped) | 27.6 ms | 19.35 dB |
+| `DynamicImage::thumbnail` (before the issue #17 fix) | 27.6 ms | 19.35 dB |
 | premultiply, then `DynamicImage::thumbnail` | 102.7 ms | 30.10 dB |
 | `fast_image_resize` Box | 57.1 ms | 30.69 dB |
 | `fast_image_resize` CatmullRom | 77.0 ms | 33.96 dB |
@@ -247,7 +247,7 @@ cap is unchanged. In the surrogate the file is held once; for worker-placed deco
 
 The live verification (#3) saw a first PDF thumbnail take 18.8 s and the first PNG, JPEG
 and SVG about 3.3 s. To check whether that is antivirus first-launch scanning, and whether
-Authenticode signing changes it, `C:\wt\live\coldstart.ps1` (local throwaway harness)
+Authenticode signing changes it, a local throwaway harness (not committed, so the numbers below are indicative and not reproducible from this repository)
 copied each build to a never-seen directory, registered it per user, killed the thumbnail
 surrogate, and timed `IThumbnailCache::GetThumbnail(WTS_FORCEEXTRACTION |
 WTS_EXTRACTDONOTCACHE, 256)` twice over the same four files: a 2-page PDF, a PNG, a 12 MP
@@ -283,13 +283,8 @@ serve one request only), or use a scaled JPEG decode for large JPEGs.
 
 ## Not acted on
 
-- **Alpha is averaged without premultiplying** in `DynamicImage::thumbnail`, so a
-  transparent region whose hidden colour differs from the visible one bleeds into edge
-  pixels (19.35 dB against the reference; 30.7 to 34 dB when premultiplied). It is a
-  quality defect, not a speed one, and every fix measured is slower on large RGBA images
-  (premultiply + thumbnail 103 ms; `fast_image_resize` 57 to 77 ms, against 28 ms). It
-  also costs memory: `fast_image_resize` keeps a full premultiplied copy of an RGBA
-  source. Worth a separate issue if transparent-logo thumbnails look fringed.
+- **Alpha premultiplication** was first listed here as a quality defect and left alone.
+  It was fixed under issue #17 (section 4, Decision), at the cost measured there.
 - **A pool of reused workers** was not considered: the issue is right that per-request
   isolation is a security property, and the measured gain is available without it.
 

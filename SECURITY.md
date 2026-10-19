@@ -32,7 +32,7 @@ differently:
 
 The full review that established this, and the hostile-input findings and
 their fixes, are in `docs/history/REVIEW_FINDINGS.md`. The invariants the code
-must keep are I1-I8 in `docs/history/REVIEW_HANDOFF.md` section 3; anyone
+must keep are I1-I8 in `docs/ARCHITECTURE.md`; anyone
 changing decoders, the worker protocol, or registration must keep them.
 
 ## What is intentionally not defended
