@@ -28,6 +28,10 @@ const NO_INDEX: u32 = 0xFFFF_FFFF;
 const MAX_CHUNKS: usize = 1 << 20;
 /// Attributes read from one element.
 const MAX_ATTRIBUTES: usize = 256;
+/// Start elements and attributes kept from one AXML document. A launcher-icon lookup needs
+/// the `<application>` element near the top; real manifests have a few hundred elements.
+const MAX_ELEMENTS: usize = 1 << 16;
+const MAX_TOTAL_ATTRIBUTES: usize = 1 << 18;
 /// Longest string decoded from a pool (UTF-16 units / bytes).
 const MAX_STRING: usize = 4096;
 
@@ -104,7 +108,9 @@ impl<'a> Pool<'a> {
         })
     }
 
-    fn get(&self, i: usize) -> Option<String> {
+    /// Where string `i` starts and how many units it declares (UTF-16 units, or bytes in a
+    /// UTF-8 pool), clamped to [`MAX_STRING`].
+    fn locate(&self, i: usize) -> Option<(usize, usize)> {
         if i >= self.count {
             return None;
         }
@@ -124,8 +130,7 @@ impl<'a> Pool<'a> {
             at += n;
             let (len, n) = skip(at)?;
             at += n;
-            let bytes = self.chunk.get(at..at.checked_add(len.min(MAX_STRING))?)?;
-            Some(String::from_utf8_lossy(bytes).into_owned())
+            Some((at, len.min(MAX_STRING)))
         } else {
             let mut len = usize::from(le16(self.chunk, at)?);
             at += 2;
@@ -133,7 +138,17 @@ impl<'a> Pool<'a> {
                 len = ((len & 0x7fff) << 16) | usize::from(le16(self.chunk, at)?);
                 at += 2;
             }
-            let end = at.checked_add(len.min(MAX_STRING).checked_mul(2)?)?;
+            Some((at, len.min(MAX_STRING)))
+        }
+    }
+
+    fn get(&self, i: usize) -> Option<String> {
+        let (at, len) = self.locate(i)?;
+        if self.utf8 {
+            let bytes = self.chunk.get(at..at.checked_add(len)?)?;
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        } else {
+            let end = at.checked_add(len.checked_mul(2)?)?;
             let units: Vec<u16> = self
                 .chunk
                 .get(at..end)?
@@ -143,6 +158,17 @@ impl<'a> Pool<'a> {
                 .map(|c| u16::from_le_bytes(*c))
                 .collect();
             Some(String::from_utf16_lossy(&units))
+        }
+    }
+
+    /// Whether string `i` equals `s`, without materialising a string that is longer than `s`
+    /// (a hostile document may point every name at a 4096-unit string).
+    fn is(&self, i: usize, s: &str) -> bool {
+        // A string never has more UTF-16 units than UTF-8 bytes, so a longer declared length
+        // cannot be equal.
+        match self.locate(i) {
+            Some((_, len)) => len <= s.len() && self.get(i).is_some_and(|v| v == s),
+            None => false,
         }
     }
 }
@@ -161,9 +187,19 @@ pub enum Ref {
     Color(u32),
 }
 
+/// An attribute value as stored while parsing. String values keep their pool index and are
+/// only decoded for the one or two attributes a caller asks for: decoding them all would
+/// turn each 20-byte attribute record into up to 4096 characters of heap.
+#[derive(Clone, Copy)]
+enum AttrValue {
+    Str(usize),
+    Res(u32),
+    Color(u32),
+}
+
 struct Attr {
     name: usize,
-    value: Ref,
+    value: AttrValue,
 }
 
 /// A binary XML document reduced to what is needed: the start elements, with their
@@ -185,6 +221,7 @@ impl<'a> Axml<'a> {
         let body = data.get(header..total.min(data.len()))?;
         let mut pool = None;
         let mut res_map = Vec::new();
+        let mut total_attrs = 0usize;
         let mut elements = Vec::new();
         for c in chunks(body) {
             match c.kind {
@@ -206,7 +243,13 @@ impl<'a> Axml<'a> {
                     let attr_start = usize::from(le16(b, 8)?);
                     let attr_size = usize::from(le16(b, 10)?).max(20);
                     let count = usize::from(le16(b, 12)?).min(MAX_ATTRIBUTES);
-                    let mut attrs = Vec::new();
+                    if elements.len() >= MAX_ELEMENTS
+                        || total_attrs.saturating_add(count) > MAX_TOTAL_ATTRIBUTES
+                    {
+                        // Hostile or absurd: use what was read.
+                        break;
+                    }
+                    let mut attrs = Vec::with_capacity(count);
                     for i in 0..count {
                         let at = attr_start.checked_add(i.checked_mul(attr_size)?)?;
                         let Some(a) = b.get(at..at.checked_add(20)?) else {
@@ -217,23 +260,24 @@ impl<'a> Axml<'a> {
                         let data_type = *a.get(15)?;
                         let value = le32(a, 16)?;
                         let value = match data_type {
-                            TYPE_REFERENCE => Ref::Res(value),
+                            TYPE_REFERENCE => AttrValue::Res(value),
                             TYPE_STRING => {
                                 let idx = if raw != NO_INDEX { raw } else { value };
-                                match pool
-                                    .as_ref()
-                                    .and_then(|p| p.get(usize::try_from(idx).ok()?))
+                                match usize::try_from(idx)
+                                    .ok()
+                                    .filter(|&i| pool.as_ref().is_some_and(|p| i < p.count))
                                 {
-                                    Some(s) => Ref::Path(s),
+                                    Some(i) => AttrValue::Str(i),
                                     None => continue,
                                 }
                             }
-                            TYPE_INT_COLOR_ARGB8 => Ref::Color(value),
-                            TYPE_INT_COLOR_RGB8 => Ref::Color(value | 0xFF00_0000),
+                            TYPE_INT_COLOR_ARGB8 => AttrValue::Color(value),
+                            TYPE_INT_COLOR_RGB8 => AttrValue::Color(value | 0xFF00_0000),
                             _ => continue,
                         };
                         attrs.push(Attr { name, value });
                     }
+                    total_attrs += attrs.len();
                     elements.push((name, attrs));
                 }
                 _ => {}
@@ -246,8 +290,9 @@ impl<'a> Axml<'a> {
         })
     }
 
-    fn name(&self, idx: usize) -> Option<String> {
-        self.pool.get(idx)
+    /// Whether string `idx` of the pool is `s`.
+    fn name_is(&self, idx: usize, s: &str) -> bool {
+        self.pool.is(idx, s)
     }
 
     /// Whether attribute-name string `idx` is the framework attribute `id` (by resource
@@ -255,15 +300,17 @@ impl<'a> Axml<'a> {
     fn is_attr(&self, idx: usize, id: u32, name: &str) -> bool {
         match self.res_map.get(idx) {
             Some(&r) if r != 0 => r == id,
-            _ => self.name(idx).is_some_and(|n| n == name),
+            _ => self.name_is(idx, name),
         }
     }
 
     fn attr(&self, attrs: &[Attr], id: u32, name: &str) -> Option<Ref> {
-        attrs
-            .iter()
-            .find(|a| self.is_attr(a.name, id, name))
-            .map(|a| a.value.clone())
+        let a = attrs.iter().find(|a| self.is_attr(a.name, id, name))?;
+        match a.value {
+            AttrValue::Str(i) => self.pool.get(i).map(Ref::Path),
+            AttrValue::Res(r) => Some(Ref::Res(r)),
+            AttrValue::Color(c) => Some(Ref::Color(c)),
+        }
     }
 }
 
@@ -275,7 +322,7 @@ pub fn manifest_icons(manifest: &[u8]) -> Vec<Ref> {
     let Some((_, attrs)) = x
         .elements
         .iter()
-        .find(|(n, _)| x.name(*n).is_some_and(|n| n == "application"))
+        .find(|(n, _)| x.name_is(*n, "application"))
     else {
         return Vec::new();
     };
@@ -291,14 +338,14 @@ pub fn manifest_icons(manifest: &[u8]) -> Vec<Ref> {
 /// `(foreground, background)` drawables of an `<adaptive-icon>` document.
 pub fn adaptive_layers(xml: &[u8]) -> Option<(Option<Ref>, Option<Ref>)> {
     let x = Axml::parse(xml)?;
-    let root = x.name(x.elements.first()?.0)?;
-    if root != "adaptive-icon" {
+    let root = x.elements.first()?.0;
+    if !x.name_is(root, "adaptive-icon") {
         return None;
     }
     let layer = |tag: &str| {
         x.elements
             .iter()
-            .find(|(n, _)| x.name(*n).is_some_and(|n| n == tag))
+            .find(|(n, _)| x.name_is(*n, tag))
             .and_then(|(_, attrs)| x.attr(attrs, ATTR_DRAWABLE, "drawable"))
     };
     Some((layer("foreground"), layer("background")))
@@ -375,6 +422,9 @@ impl<'a> Table<'a> {
         let wanted = usize::try_from(entry).ok()?;
         let offset = if flags & 0x01 != 0 {
             // Sparse: (index, offset / 4) pairs of u16, sorted by index.
+            // A count the chunk cannot hold is clamped: every pair read past the end of
+            // the chunk would fail anyway, and `entryCount` is a free 32-bit field.
+            let count = count.min(b.len().saturating_sub(t.header) / 4);
             (0..count).find_map(|i| {
                 let at = t.header.checked_add(i.checked_mul(4)?)?;
                 (usize::from(le16(b, at)?) == wanted)
@@ -748,6 +798,70 @@ pub(in crate::decode) mod tests {
                 density: 240,
                 value: Value::Reference(0x7f02_0007)
             }]
+        );
+    }
+
+    /// DA-1: every 20-byte attribute pointing at a 4096-character pool string used to become
+    /// an owned 4 KiB `String` during parsing (about 205x amplification).
+    #[test]
+    fn many_string_attributes_do_not_amplify() {
+        let long = "x".repeat(MAX_STRING);
+        let strings = ["icon", "application", "res/x.png", long.as_str()];
+        let flood: Vec<Vec<u8>> = (0..100)
+            .map(|_| {
+                let attrs: Vec<Vec<u8>> = (0..256)
+                    .map(|_| attr(0, NO_INDEX, TYPE_STRING, 3))
+                    .collect();
+                element(0, &attrs)
+            })
+            .collect();
+        let mut elements = vec![element(1, &[attr(0, NO_INDEX, TYPE_STRING, 2)])];
+        elements.extend(flood);
+        let m = xml(&strings, &[], &elements, false);
+        let (icons, usage) = crate::testalloc::measure(|| manifest_icons(&m));
+        // The wanted attribute is still resolved, from the pool, on demand.
+        assert_eq!(icons, vec![Ref::Path("res/x.png".into())]);
+        // 25,600 attributes x 4 KiB would be 100 MiB; the parse keeps indices only.
+        assert!(usage.peak < 4 << 20, "peak {} bytes", usage.peak);
+    }
+
+    /// DA-1: the number of retained elements and attributes is bounded whatever the input.
+    #[test]
+    fn axml_retention_is_capped() {
+        let strings = ["icon", "application", "res/x.png"];
+        let one = element(0, &[attr(0, NO_INDEX, TYPE_STRING, 2)]);
+        let elements: Vec<Vec<u8>> = std::iter::repeat_n(one, 70_000).collect();
+        let m = xml(&strings, &[], &elements, false);
+        let x = Axml::parse(&m).expect("parses");
+        assert_eq!(x.elements.len(), 1 << 16);
+    }
+
+    /// DA-3: a sparse type claiming 2^32 - 1 entries used to loop 4.3e9 times per chunk.
+    #[test]
+    fn sparse_entry_count_is_clamped() {
+        let patched = |entries: &[(u16, u8, u32)]| {
+            let mut c = type_chunk(2, 0, entries, true);
+            c[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+            c
+        };
+        let t = table(
+            &["res/a.png"],
+            0x7f,
+            &[
+                patched(&[(1, TYPE_STRING, 0)]),
+                patched(&[(1, TYPE_STRING, 0)]),
+            ],
+        );
+        let table = Table::parse(&t).unwrap();
+        let start = std::time::Instant::now();
+        // Present entries are still found (once per chunk), absent ones end the scan at the
+        // end of the chunk instead of after 2^32 iterations.
+        assert_eq!(table.lookup(0x7f02_0001).len(), 2);
+        assert!(table.lookup(0x7f02_0005).is_empty());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "sparse scan took {:?}",
+            start.elapsed()
         );
     }
 }
