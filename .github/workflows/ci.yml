@@ -1,9 +1,20 @@
 name: CI
 
+# Runs on Linux only, to keep Windows runner minutes free. The Windows build, clippy and the full
+# test suite are part of the maintainer's local gate before every push (CONTRIBUTING.md, "Checks
+# before a push"); they need the MSVC target, which the hosted Linux image cannot link.
+# The Windows job below is manual-only (workflow_dispatch): run it for release candidates.
+
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: "Also run the full Windows build and test suite"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,25 +27,38 @@ env:
   CARGO_TERM_COLOR: always
 
 # Third-party actions are pinned to a full commit SHA (a tag can be moved); the version in the
-# trailing comment is what Dependabot (.github/dependabot.yml) bumps. The runner image is pinned
-# to a named Windows Server release instead of `windows-latest`, so a new image never changes the
-# toolchain under a green build unannounced; move it deliberately.
+# trailing comment is what Dependabot (.github/dependabot.yml) bumps.
 jobs:
-  check:
+  portable:
+    name: Format and dependency policy (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rust-toolchain.toml pins the channel and the Windows target; the license audit resolves
+      # the dependency graph for x86_64-pc-windows-msvc through `cargo metadata`, which needs no
+      # linker, so it runs on Linux.
+      - name: Toolchain
+        run: rustup show active-toolchain
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Dependency policy (permissive licenses, no native code)
+        run: cargo --locked xtask licenses --check
+
+  windows:
+    name: Windows build and tests (manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.windows
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # rust-toolchain.toml pins the channel, components and target; rustup installs it on first use.
       - name: Toolchain
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Dependency policy (permissive licenses, no native code)
-        run: cargo --locked xtask licenses --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
