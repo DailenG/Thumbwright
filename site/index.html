@@ -260,7 +260,7 @@ h3{font-size:1.3rem;line-height:1.22;letter-spacing:-.006em;margin:0 0 8px}
 .sugg button,.famlist button{font:600 14px/1 var(--mono);padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);cursor:pointer}
 .sugg button:hover,.famlist button:hover{border-color:var(--accent)}
 .hint{color:var(--muted);font-size:.95rem;margin:0}
-.fams{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:26px}
+.fams{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:26px}
 .fam{text-align:left;font:inherit;color:var(--fg);padding:14px 16px;border-radius:14px;border:1px solid var(--line);background:var(--bg);cursor:pointer;display:grid;gap:4px;transition:border-color .15s,background .15s}
 .fam:hover{border-color:var(--accent)}
 .fam[aria-pressed=true]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,var(--bg))}
@@ -344,7 +344,6 @@ footer a:hover{color:var(--fg)}
   .cards,.opts{grid-template-columns:minmax(0,1fr)}
   .card .vis{height:210px}
   .grid4{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .fams{grid-template-columns:repeat(2,minmax(0,1fr))}
   .strip{grid-template-columns:repeat(2,minmax(0,1fr))}
   .split{grid-template-columns:minmax(0,1fr)}
   .split.flip .shot{order:0}
@@ -361,6 +360,10 @@ footer a:hover{color:var(--fg)}
 @media (max-width:620px){
   body{font-size:16px}
   .wrap{width:calc(100% - 36px)}
+  .fams{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .fam{padding:11px 10px}
+  .fam b{font-size:1.25rem}
+  .fam span{font-size:.8rem}
   .win .body{grid-template-columns:minmax(0,1fr)}
   .win .side,.win .srch,.win .cmd span:nth-child(n+4){display:none}
   .files{grid-template-columns:repeat(4,minmax(0,1fr));gap:12px 6px}
