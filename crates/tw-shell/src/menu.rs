@@ -77,12 +77,11 @@ pub(crate) struct ContextMenu {
     files: RefCell<Vec<PathBuf>>,
     /// Verbs in command-offset order; `None` for non-command slots (the root).
     commands: RefCell<Vec<Option<&'static Verb>>>,
-    /// The submenu whose first row is the preview header, until the bitmap is attached.
+    /// The submenu whose first row is the header's text row, until the thumbnail row is
+    /// inserted above it.
     preview_menu: Cell<Option<HMENU>>,
     preview: RefCell<Option<Preview>>,
-    /// The header's text, for the row that replaces it once the thumbnail is there.
-    header_text: RefCell<String>,
-    /// The composed header row, once the thumbnail is on it. The menu does not own it.
+    /// The composed thumbnail row, once it is on the menu. The menu does not own it.
     header_bitmap: RefCell<Option<HeaderBitmap>>,
     _module: ModuleRef,
 }
@@ -94,7 +93,6 @@ impl ContextMenu {
             commands: RefCell::new(Vec::new()),
             preview_menu: Cell::new(None),
             preview: RefCell::new(None),
-            header_text: RefCell::new(String::new()),
             header_bitmap: RefCell::new(None),
             _module: ModuleRef::new(),
         }
@@ -302,11 +300,11 @@ unsafe fn add_separator(menu: HMENU, pos: u32) -> Result<()> {
 }
 
 /// The first row of the submenu: the file's name and size, with no command (a click does
-/// nothing). A plain themed item, so the menu keeps its dark theme. It is deliberately not
-/// disabled: a themed menu draws a disabled row's bitmap greyed out, and the preview should
-/// keep its colours. When the thumbnail arrives the row is replaced by a bitmap row that shows
-/// the thumbnail with this text next to it (`tw_core::menu_header`): an item bitmap on this
-/// row would widen the bitmap column of every row of the menu.
+/// nothing). A plain themed item, so the menu keeps its dark theme and every screen reader
+/// reads it. It is deliberately not disabled: a themed menu draws a disabled row's bitmap
+/// greyed out, and the preview should keep its colours. When the thumbnail arrives, a bitmap
+/// row with only the picture is inserted above this row (`tw_core::menu_header`): an item
+/// bitmap on this row would widen the bitmap column of every row of the menu.
 unsafe fn add_header(menu: HMENU, pos: u32, text: &str) -> Result<()> {
     let mut text = wide(&tree::menu_text(text));
     let mut info = item(MFT_STRING);
@@ -421,7 +419,6 @@ impl ContextMenu_Impl {
             fill(&mut b, sub, &entries, &mut pos, true)?;
             add_string(hmenu, index, ids::PRODUCT_NAME, Some(root_id), Some(sub))?;
         }
-        *self.header_text.borrow_mut() = header_text;
         Ok(commands.len() as u32)
     }
 
@@ -520,11 +517,12 @@ impl ContextMenu_Impl {
         p.bitmap
     }
 
-    /// The shell is about to show `menu`: when it is the submenu, replace its header row by
-    /// one that shows the thumbnail with the file's name and size beside it. The thumbnail is
-    /// premultiplied 32-bpp (what the shell's thumbnail cache hands out); the row is composed
-    /// from it (`tw_core::menu_header`), and the menu does not own the result: the menu object
-    /// frees it, like the thumbnail.
+    /// The shell is about to show `menu`: when it is the submenu, insert a row that shows the
+    /// thumbnail above the header's text row, which stays. The thumbnail is premultiplied
+    /// 32-bpp (what the shell's thumbnail cache hands out); the row is composed from it
+    /// (`tw_core::menu_header`), and the menu does not own the result: the menu object frees
+    /// it, like the thumbnail. Command ids and the verb ordinals do not depend on positions,
+    /// so nothing else moves.
     fn handle_msg(&self, msg: u32, wparam: WPARAM) -> Result<bool> {
         if msg != WM_INITMENUPOPUP {
             return Ok(false);
@@ -536,17 +534,15 @@ impl ContextMenu_Impl {
             return Ok(false);
         }
         self.preview_menu.set(None);
+        let dpi = menu_header::system_dpi();
         if let Some(thumbnail) = self.preview_bitmap()
-            && let Some(row) = menu_header::compose(
-                &self.header_text.borrow(),
-                thumbnail,
-                menu_header::system_dpi(),
-            )
+            && let Some(row) =
+                menu_header::compose(thumbnail, dpi, menu_header::widest_row(sub, dpi))
         {
-            // SAFETY: `sub` is the live submenu the shell is initialising; row 0 is the header.
-            // The row is detached when the menu object is dropped, which the shell does after
-            // it has destroyed the menu.
-            if unsafe { row.attach(sub) }.is_ok() {
+            // SAFETY: `sub` is the live submenu the shell is initialising. The row is freed
+            // when the menu object is dropped, which the shell does after it has destroyed
+            // the menu.
+            if unsafe { insert(sub, 0, &row.item_info()) }.is_ok() {
                 *self.header_bitmap.borrow_mut() = Some(row);
             }
         }

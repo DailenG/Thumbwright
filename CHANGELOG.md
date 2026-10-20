@@ -17,12 +17,12 @@ on-disk formats may still change.
 - **The Windows 11 right-click popup opens without waiting for the file's preview.** It used
   to hold back until Windows handed over the thumbnail, so it appeared after about 125 to
   140 ms; it now appears after about 80 to 95 ms (median of warm runs on the development
-  machine, from starting `twctl` to the menu on screen). The header shows the file name and
-  size with an empty box at once, and the thumbnail is drawn into the box a few tens of
-  milliseconds later. The header is now always as tall as the largest thumbnail, so a wide
-  picture is centred in the box instead of the header shrinking to fit it. For a file
-  Windows has no thumbnail for (a text file, say) the box shows the file's icon, centred, so
-  the menu never changes size or moves after it opens.
+  machine, from starting `twctl` to the menu on screen). The file name and size are in the
+  menu at once, with an empty box for the thumbnail above them, and the thumbnail is drawn
+  into the box a few tens of milliseconds later. The box is always as tall as the largest
+  thumbnail, so a wide picture is centred in it instead of the menu shrinking to fit it. For
+  a file Windows has no thumbnail for (a text file, say) the box shows the file's icon,
+  centred, so the menu never changes size or moves after it opens.
 
 ### Fixed
 
@@ -30,10 +30,10 @@ on-disk formats may still change.
   every item was pushed right to where the thumbnail ended, in the Windows 11 popup and in the
   classic menu's Thumbwright submenu. The cause: the thumbnail was attached as the header's
   menu bitmap, and Windows reserves one bitmap column of that width for every row. The header
-  is now a single picture of the thumbnail with the file name and size beside it, in the
-  menu's own font and light or dark colours, so items start at the normal left edge and the
-  menu keeps its Windows look. Screen readers still read the header (file name and size),
-  through an MSAA dynamic annotation. Without a thumbnail the header is an ordinary text row.
+  is now two rows: the thumbnail on its own row, and under it an ordinary text row with the
+  file name and size. Items start at the normal left edge, the thumbnail lines up with them,
+  and the menu keeps its Windows look in light and dark. The name and size are native menu
+  text, so screen readers read them, with or without a thumbnail.
 - **"Build thumbnails for this folder" is on the Windows 11 menu** ([#26]), for a folder and
   for a folder's background. Windows 11 shows only packaged verbs at the top level, and the
   folder entry was a classic handler only, so it was hidden under "Show more options". It is

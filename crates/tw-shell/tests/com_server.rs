@@ -25,9 +25,9 @@ use windows::Win32::UI::Shell::{
     WTSAT_ARGB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemInfoW, GetMenuStringW, GetSubMenu,
-    MENUITEMINFOW, MF_BYPOSITION, MFT_BITMAP, MFT_OWNERDRAW, MIIM_BITMAP, MIIM_FTYPE, MIIM_TYPE,
-    WM_INITMENUPOPUP,
+    CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemID, GetMenuItemInfoW,
+    GetMenuStringW, GetSubMenu, MENUITEMINFOW, MF_BYPOSITION, MFT_BITMAP, MFT_OWNERDRAW,
+    MIIM_BITMAP, MIIM_FTYPE, MIIM_TYPE, WM_INITMENUPOPUP,
 };
 use windows::core::{GUID, HRESULT, HSTRING, Interface, PSTR};
 
@@ -539,11 +539,12 @@ fn context_menu_tree_for_single_png() {
     }
 }
 
-/// Opening the submenu turns the header row into a bitmap row: the thumbnail with the file's
-/// name and size beside it. No row carries an item bitmap, because that would widen the bitmap
-/// column and push every row's text right.
+/// Opening the submenu inserts a bitmap row with only the thumbnail above the header's text
+/// row, which stays an ordinary text row (the name and size every screen reader reads). No row
+/// carries an item bitmap, because that would widen the bitmap column and push every row's
+/// text right, and every command id still names its verb.
 #[test]
-fn opening_the_submenu_attaches_the_preview_bitmap() {
+fn opening_the_submenu_inserts_the_thumbnail_row_above_the_text_row() {
     let s = Scratch::new("menu-preview");
     let path = s.file(
         "pic.png",
@@ -554,6 +555,8 @@ fn opening_the_submenu_attaches_the_preview_bitmap() {
     unsafe {
         let sub = GetSubMenu(hmenu, 0);
         let rows_before = GetMenuItemCount(Some(sub));
+        let header_text = label(sub, 0);
+        assert!(header_text.starts_with("pic.png  "), "{header_text:?}");
         assert_eq!(item_info(sub, 0, MIIM_FTYPE).fType.0 & MFT_BITMAP.0, 0);
         menu.cast::<IContextMenu2>()
             .unwrap()
@@ -563,17 +566,21 @@ fn opening_the_submenu_attaches_the_preview_bitmap() {
                 windows::Win32::Foundation::LPARAM(0),
             )
             .unwrap();
-        assert_eq!(GetMenuItemCount(Some(sub)), rows_before, "same rows");
-        let header = item_info(sub, 0, MIIM_TYPE);
         assert_eq!(
-            header.fType.0 & MFT_BITMAP.0,
-            MFT_BITMAP.0,
-            "the header row is a bitmap row"
+            GetMenuItemCount(Some(sub)),
+            rows_before + 1,
+            "one row added"
         );
-        let bitmap = HBITMAP(header.dwTypeData.0.cast());
+        let thumbnail_row = item_info(sub, 0, MIIM_TYPE);
+        assert_eq!(
+            thumbnail_row.fType.0 & MFT_BITMAP.0,
+            MFT_BITMAP.0,
+            "the first row is a bitmap row"
+        );
+        let bitmap = HBITMAP(thumbnail_row.dwTypeData.0.cast());
         assert!(
             !bitmap.is_invalid(),
-            "the header row carries the composed bitmap"
+            "the first row carries the composed bitmap"
         );
         let mut bm = windows::Win32::Graphics::Gdi::BITMAP::default();
         GetObjectW(
@@ -586,30 +593,69 @@ fn opening_the_submenu_attaches_the_preview_bitmap() {
             "premultiplied 32-bpp, blended with its alpha"
         );
         // The 64 px thumbnail is kept as is (never enlarged), with padding above and below
-        // and the text to its right.
+        // and no text in it. The row is as wide as the widest text row, so the menu draws it
+        // one to one instead of stretching it.
+        let widest = tw_core::menu_header::widest_row(sub, tw_core::menu_header::system_dpi());
+        assert!(widest > 64, "{widest}");
+        assert_eq!(bm.bmWidth, widest, "{}x{}", bm.bmWidth, bm.bmHeight);
         assert!(
-            bm.bmHeight.abs() > 64 && bm.bmHeight.abs() <= 128 + 32,
+            bm.bmHeight.abs() > 64 && bm.bmHeight.abs() <= 64 + 32,
             "{}x{}",
             bm.bmWidth,
             bm.bmHeight
         );
-        assert!(bm.bmWidth > 64, "room for the text: {}", bm.bmWidth);
+        // The text row is still there, right under the picture, a plain string item.
+        let text_row = item_info(sub, 1, MIIM_TYPE);
+        assert_eq!(text_row.fType.0 & MFT_BITMAP.0, 0);
+        assert_eq!(label(sub, 1), header_text);
         // No other row has an item bitmap: nothing pushes the text of the rows to the right.
-        for i in 1..rows_before as u32 {
+        for i in 1..=rows_before as u32 {
             assert!(
                 item_info(sub, i, MIIM_BITMAP).hbmpItem.is_invalid(),
                 "row {i} has an item bitmap"
             );
         }
-        // Another menu's init does nothing; opening again keeps the row.
-        menu.cast::<IContextMenu2>()
-            .unwrap()
-            .HandleMenuMsg(
-                WM_INITMENUPOPUP,
-                windows::Win32::Foundation::WPARAM(hmenu.0 as usize),
-                windows::Win32::Foundation::LPARAM(0),
+        // Command ids index verbs, not positions: every command row still runs its own verb.
+        let verbs = tw_core::menu::all_verbs();
+        let mut checked = 0;
+        for i in 0..=rows_before {
+            let id = GetMenuItemID(sub, i);
+            if id == 0 || id == u32::MAX {
+                continue;
+            }
+            let mut buf = [0u16; 64];
+            menu.GetCommandString(
+                id as usize - 1,
+                GCS_VERBW,
+                None,
+                PSTR(buf.as_mut_ptr().cast()),
+                buf.len() as u32,
             )
             .unwrap();
+            let name = String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap()]);
+            let verb = verbs.iter().find(|v| v.name == name).expect("a known verb");
+            assert_eq!(
+                label(sub, i),
+                tw_core::menu::menu_text(verb.label),
+                "row {i}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "{checked} command rows");
+        // Another menu's init does nothing; opening the submenu again adds no second row.
+        let init = |m: windows::Win32::UI::WindowsAndMessaging::HMENU| {
+            menu.cast::<IContextMenu2>()
+                .unwrap()
+                .HandleMenuMsg(
+                    WM_INITMENUPOPUP,
+                    windows::Win32::Foundation::WPARAM(m.0 as usize),
+                    windows::Win32::Foundation::LPARAM(0),
+                )
+                .unwrap();
+        };
+        init(hmenu);
+        init(sub);
+        assert_eq!(GetMenuItemCount(Some(sub)), rows_before + 1);
         drop(menu);
         let _ = DestroyMenu(hmenu);
     }
