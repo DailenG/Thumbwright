@@ -121,7 +121,9 @@ if ($installedExtensions -notmatch ('(?m)^\s*WixToolset\.UI\.wixext\s+' + [regex
 # -pdbtype none: no .wixpdb next to the MSI (dist\ must hold only shippable files).
 $iconFile = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\icons\thumbwright.ico')).Path
 $licenseRtf = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'license-summary.rtf')).Path
-$wixArgs = @('build', '-arch', 'x64', '-pdbtype', 'none', '-ext', $uiExtension, '-d', "Version=$Version", '-d', "PackageName=$packageName", '-d', "SourceDir=$SourceDir", '-d', "IconFile=$iconFile", '-d', "LicenseRtf=$licenseRtf")
+$dialogBmp = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'dialog.bmp')).Path
+$bannerBmp = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'banner.bmp')).Path
+$wixArgs = @('build', '-arch', 'x64', '-pdbtype', 'none', '-ext', $uiExtension, '-d', "Version=$Version", '-d', "PackageName=$packageName", '-d', "SourceDir=$SourceDir", '-d', "IconFile=$iconFile", '-d', "LicenseRtf=$licenseRtf", '-d', "DialogBmp=$dialogBmp", '-d', "BannerBmp=$bannerBmp")
 $settingsPresent = Test-Path -LiteralPath (Join-Path $SourceDir 'thumbwright-settings.exe')
 if ($settingsPresent -and -not $NoSettings) {
     $wixArgs += @('-d', 'IncludeSettings=1')
