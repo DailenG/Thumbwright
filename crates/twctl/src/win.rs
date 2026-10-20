@@ -16,6 +16,7 @@ use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, Glo
 use windows::Win32::UI::Shell::{
     DESKTOP_WALLPAPER_POSITION, DWPOS_CENTER, DWPOS_FILL, DWPOS_FIT, DWPOS_SPAN, DWPOS_STRETCH,
     DWPOS_TILE, DesktopWallpaper, IDesktopWallpaper, ILCreateFromPathW, ILFindLastID, ILFree,
+    SHCNE_CREATE, SHCNE_UPDATEITEM, SHCNF_FLUSH, SHCNF_PATHW, SHChangeNotify,
     SHOpenFolderAndSelectItems,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -73,6 +74,9 @@ pub fn reveal(paths: &[PathBuf]) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         for (folder, files) in groups {
+            for f in &files {
+                announce(f);
+            }
             let folder_id = ILCreateFromPathW(&HSTRING::from(folder.as_os_str()));
             let full: Vec<_> = files
                 .iter()
@@ -91,6 +95,21 @@ pub fn reveal(paths: &[PathBuf]) {
             }
             ILFree(Some(folder_id));
         }
+    }
+}
+
+/// Tells the shell that `path` exists now, before a window is asked to select it. Explorer
+/// learns of a new file from the file system's change notification, which reaches an open
+/// folder window after a delay; a window that has not yet processed the file (or still
+/// holds a just-deleted file of the same name) cannot select it and clears its selection.
+/// A flushed create-then-update notice makes the shell list the file at once.
+fn announce(path: &Path) {
+    let wide = HSTRING::from(path.as_os_str());
+    let item = Some(PCWSTR(wide.as_ptr()).0.cast());
+    // SAFETY: `wide` is a NUL-terminated path that outlives both calls.
+    unsafe {
+        SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW | SHCNF_FLUSH, item, None);
+        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, item, None);
     }
 }
 
