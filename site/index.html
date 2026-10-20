@@ -168,7 +168,16 @@ h1 .hl{background:linear-gradient(transparent 66%,color-mix(in srgb,var(--accent
 .f .ic svg{width:58%;height:auto}
 .f .nm{font-size:12px;text-align:center;line-height:1.25;color:var(--w-fg);max-width:100%;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
 .handle{position:absolute;top:0;bottom:0;left:var(--cut);width:3px;margin-left:-1.5px;background:var(--accent);box-shadow:0 0 0 1px rgba(0,0,0,.25),0 0 22px color-mix(in srgb,var(--accent) 70%,transparent);pointer-events:none;z-index:3}
-.handle::after{content:"";position:absolute;top:50%;left:50%;width:34px;height:34px;margin:-17px 0 0 -17px;border-radius:50%;background:var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 34 34'%3E%3Cpath d='M13 11l-6 6 6 6M21 11l6 6-6 6' fill='none' stroke='%23121417' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/100% no-repeat;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+.handle::after{content:"";position:absolute;top:50%;left:50%;width:34px;height:34px;margin:-17px 0 0 -17px;border-radius:50%;background:var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 34 34'%3E%3Cpath d='M13 11l-6 6 6 6M21 11l6 6-6 6' fill='none' stroke='%23121417' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/100% no-repeat;box-shadow:0 4px 14px rgba(0,0,0,.4);transition:transform .15s}
+/* draggable divider (enhanced by script; without it the pills alone drive --cut) */
+.js .pane{cursor:ew-resize;touch-action:pan-y;-webkit-user-select:none;user-select:none}
+.js .pane img{-webkit-user-drag:none}
+.js .handle{pointer-events:auto;outline:none}
+.js .handle::before{content:"";position:absolute;top:0;bottom:0;left:-14px;right:-14px}
+.js .handle:hover::after,.pane.dragging .handle::after{transform:scale(1.12)}
+.js .handle:focus-visible::after{box-shadow:0 0 0 3px var(--bg),0 0 0 6px var(--link),0 4px 14px rgba(0,0,0,.4)}
+.pane.touched{animation:none}
+.pane.dragging{transition:none}
 .tag{position:absolute;top:10px;z-index:2;font:700 11px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;padding:6px 9px;border-radius:7px;pointer-events:none}
 .tag.b{left:12px;background:var(--w-field);color:var(--w-mut)}
 .tag.a{right:12px;background:var(--accent);color:var(--accent-ink)}
@@ -714,6 +723,80 @@ choco upgrade thumbwright</pre>
   if (track && track.firstElementChild && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     track.appendChild(track.firstElementChild.cloneNode(true));
   }
+
+  /* ---- before/after: drag the divider (mouse, touch, pen) or use the arrow keys ---- */
+  (function () {
+    var pane = document.querySelector(".ba .pane"), handle = pane && pane.querySelector(".handle");
+    if (!pane || !handle) return;
+    var radios = document.querySelectorAll(".ba input[name=ba]");
+    var byPct = { 100: "ba-before", 50: "ba-split", 0: "ba-after" };
+    function current() { return parseFloat(getComputedStyle(pane).getPropertyValue("--cut")) || 0; }
+    function announce(pct) {
+      handle.setAttribute("aria-valuenow", String(Math.round(pct)));
+      handle.setAttribute("aria-valuetext", Math.round(pct) + "% without Thumbwright");
+    }
+    function set(pct) {
+      pct = Math.max(0, Math.min(100, Math.round(pct * 10) / 10));
+      pane.style.setProperty("--cut", pct + "%");
+      pane.classList.add("touched");
+      announce(pct);
+      /* keep the pills honest: light the matching one, or none in between */
+      var id = byPct[pct];
+      Array.prototype.forEach.call(radios, function (r) { r.checked = r.id === id; });
+    }
+    handle.removeAttribute("aria-hidden");
+    handle.setAttribute("role", "slider");
+    handle.setAttribute("tabindex", "0");
+    handle.setAttribute("aria-label", "Divider: drag to compare without and with Thumbwright");
+    handle.setAttribute("aria-valuemin", "0");
+    handle.setAttribute("aria-valuemax", "100");
+    announce(50);
+
+    var dragging = false;
+    function at(e) { var r = pane.getBoundingClientRect(); return (e.clientX - r.left) / r.width * 100; }
+    pane.addEventListener("pointerdown", function (e) {
+      if (e.button !== 0) return;
+      dragging = true;
+      pane.setPointerCapture(e.pointerId);
+      pane.classList.add("dragging");
+      set(at(e));
+      e.preventDefault();
+    });
+    pane.addEventListener("pointermove", function (e) { if (dragging) set(at(e)); });
+    function end(e) {
+      if (!dragging) return;
+      dragging = false;
+      pane.classList.remove("dragging");
+      if (pane.hasPointerCapture(e.pointerId)) pane.releasePointerCapture(e.pointerId);
+      handle.focus({ preventScroll: true });
+    }
+    pane.addEventListener("pointerup", end);
+    pane.addEventListener("pointercancel", end);
+    pane.addEventListener("dragstart", function (e) { e.preventDefault(); });
+
+    handle.addEventListener("keydown", function (e) {
+      var step = e.shiftKey ? 10 : 2, v = current(), next = null;
+      if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = v - step;
+      else if (e.key === "ArrowRight" || e.key === "ArrowUp") next = v + step;
+      else if (e.key === "PageDown") next = v - 25;
+      else if (e.key === "PageUp") next = v + 25;
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = 100;
+      if (next === null) return;
+      e.preventDefault();
+      pane.classList.add("dragging");
+      set(next);
+      requestAnimationFrame(function () { pane.classList.remove("dragging"); });
+    });
+
+    /* a pill click hands control back to the CSS rules, with their animated sweep */
+    Array.prototype.forEach.call(radios, function (r) {
+      r.addEventListener("change", function () {
+        pane.style.removeProperty("--cut");
+        announce(r.id === "ba-before" ? 100 : r.id === "ba-after" ? 0 : 50);
+      });
+    });
+  })();
 
   /* ---- copy buttons ---- */
   Array.prototype.forEach.call(document.querySelectorAll("[data-copy]"), function (b) {
