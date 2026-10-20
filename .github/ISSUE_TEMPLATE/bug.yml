@@ -22,7 +22,7 @@ body:
     attributes:
       label: Thumbwright version
       description: "Run `twctl --version`, or look in Settings > Apps > Installed apps."
-      placeholder: "0.1.3"
+      placeholder: "0.1.4"
     validations:
       required: true
   - type: dropdown

@@ -7,6 +7,8 @@ on-disk formats may still change.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-20
+
 ### Changed
 
 - App, extension and game packages have their own **Package** family instead of being listed

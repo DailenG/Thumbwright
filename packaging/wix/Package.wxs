@@ -4,7 +4,7 @@
 
   Build (normally via scripts/release.ps1 or packaging/wix/build-msi.ps1, which also makes sure the
   WixToolset.UI.wixext extension is available):
-    wix build -arch x64 -ext WixToolset.UI.wixext -d Version=0.1.3 -d PackageName=Thumbwright.ShellExtension -d SourceDir=dist -d IconFile=packaging\icons\thumbwright.ico -d LicenseRtf=packaging\wix\license-summary.rtf -d DialogBmp=packaging\wix\dialog.bmp -d BannerBmp=packaging\wix\banner.bmp [-d IncludeSettings=1] Package.wxs -o out.msi
+    wix build -arch x64 -ext WixToolset.UI.wixext -d Version=0.1.4 -d PackageName=Thumbwright.ShellExtension -d SourceDir=dist -d IconFile=packaging\icons\thumbwright.ico -d LicenseRtf=packaging\wix\license-summary.rtf -d DialogBmp=packaging\wix\dialog.bmp -d BannerBmp=packaging\wix\banner.bmp [-d IncludeSettings=1] Package.wxs -o out.msi
 
   Defines:
     Version          MSI ProductVersion, major.minor.build (Windows Installer ignores a 4th field).

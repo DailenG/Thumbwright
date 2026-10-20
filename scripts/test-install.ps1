@@ -87,7 +87,7 @@
 
 .EXAMPLE
     # elevated
-    .\scripts\test-install.ps1 -Msi .\dist\Thumbwright-0.1.3-x64.msi
+    .\scripts\test-install.ps1 -Msi .\dist\Thumbwright-0.1.4-x64.msi
 #>
 [CmdletBinding()]
 param(

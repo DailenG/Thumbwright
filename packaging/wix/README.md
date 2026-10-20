@@ -24,7 +24,7 @@ Two public, secure properties preset the first run for users who have not saved 
 | `KIT=<name>` | `photos`, `paperwork`, `design`, `cad`, `thumbnails`, `everything` (case-insensitive; default none) | `Software\Thumbwright\Defaults\StarterKit` = the kit name | The Workbench first run preselects this starter kit. |
 
 ```
-msiexec /i Thumbwright-0.1.3-x64.msi /qn MENU=0 KIT=photos
+msiexec /i Thumbwright-0.1.4-x64.msi /qn MENU=0 KIT=photos
 choco install thumbwright --params "'/Menu:0 /Kit:photos'"
 ```
 

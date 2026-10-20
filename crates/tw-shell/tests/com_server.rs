@@ -539,6 +539,28 @@ fn context_menu_tree_for_single_png() {
     }
 }
 
+/// Asks the shell for `path`'s thumbnail once and waits for it, so the menu's own request in
+/// a test is a cache hit. The menu waits only a few hundred milliseconds for a thumbnail (a
+/// bounded preview, by design), and a machine running the whole workspace's tests at once can
+/// need longer for the first extraction.
+fn warm_thumbnail(path: &Path) {
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::UI::Shell::{IShellItemImageFactory, SIIGBF_THUMBNAILONLY};
+    // SAFETY: shell item APIs on this thread; the bitmap is freed here.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(
+            &HSTRING::from(path.as_os_str()),
+            None,
+        ) else {
+            return;
+        };
+        if let Ok(bitmap) = item.GetImage(SIZE { cx: 128, cy: 128 }, SIIGBF_THUMBNAILONLY) {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        }
+    }
+}
+
 /// Opening the submenu inserts a bitmap row with only the thumbnail above the header's text
 /// row, which stays an ordinary text row (the name and size every screen reader reads). No row
 /// carries an item bitmap, because that would widen the bitmap column and push every row's
@@ -550,6 +572,7 @@ fn opening_the_submenu_inserts_the_thumbnail_row_above_the_text_row() {
         "pic.png",
         &png(&RgbaImage::from_pixel(64, 64, Rgba([200, 30, 30, 255]))),
     );
+    warm_thumbnail(&path);
     let (menu, hmenu, _) = menu_for(&path);
     // SAFETY: inspecting and messaging a menu we own.
     unsafe {

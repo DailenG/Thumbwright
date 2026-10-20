@@ -35,7 +35,7 @@ if ($msiProperties.Count -gt 0) {
 $packageArgs = @{
     packageName    = $env:ChocolateyPackageName
     fileType       = 'msi'
-    file64         = Join-Path $toolsDir 'Thumbwright-0.1.3-x64.msi'
+    file64         = Join-Path $toolsDir 'Thumbwright-0.1.4-x64.msi'
     softwareName   = 'Thumbwright'
     silentArgs     = $silentArgs
     validExitCodes = @(0, 3010, 1641)
