@@ -32,8 +32,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, CreatePopupMenu, DestroyMenu, HMENU, InsertMenuItemW,
-    MENUITEMINFOW, MFT_SEPARATOR, MFT_STRING, MIIM_BITMAP, MIIM_FTYPE, MIIM_ID, MIIM_STRING,
-    MIIM_SUBMENU, SetMenuItemInfoW, WM_INITMENUPOPUP,
+    MENUITEMINFOW, MFT_SEPARATOR, MFT_STRING, MIIM_FTYPE, MIIM_ID, MIIM_STRING, MIIM_SUBMENU,
+    SetMenuItemInfoW, WM_INITMENUPOPUP,
 };
 use windows::core::{HRESULT, PCWSTR, PSTR, PWSTR, Ref, Result, implement};
 
@@ -41,12 +41,12 @@ use tw_core::config::Settings;
 use tw_core::ids;
 use tw_core::log;
 use tw_core::menu::{self as tree, FOLDER_VERB, Selection, Shown, Verb};
+use tw_core::menu_header::{self, HeaderBitmap};
 
 use crate::ModuleRef;
 
 /// `CMINVOKECOMMANDINFOEX` carries valid wide fields when this flag is set.
 const CMIC_MASK_UNICODE: u32 = 0x0000_4000;
-const PREVIEW_EDGE: i32 = 128;
 /// How long opening the submenu may wait for the shell's thumbnail.
 const PREVIEW_WAIT: Duration = Duration::from_millis(300);
 
@@ -80,6 +80,10 @@ pub(crate) struct ContextMenu {
     /// The submenu whose first row is the preview header, until the bitmap is attached.
     preview_menu: Cell<Option<HMENU>>,
     preview: RefCell<Option<Preview>>,
+    /// The header's text, for the row that replaces it once the thumbnail is there.
+    header_text: RefCell<String>,
+    /// The composed header row, once the thumbnail is on it. The menu does not own it.
+    header_bitmap: RefCell<Option<HeaderBitmap>>,
     _module: ModuleRef,
 }
 
@@ -90,6 +94,8 @@ impl ContextMenu {
             commands: RefCell::new(Vec::new()),
             preview_menu: Cell::new(None),
             preview: RefCell::new(None),
+            header_text: RefCell::new(String::new()),
+            header_bitmap: RefCell::new(None),
             _module: ModuleRef::new(),
         }
     }
@@ -298,7 +304,9 @@ unsafe fn add_separator(menu: HMENU, pos: u32) -> Result<()> {
 /// The first row of the submenu: the file's name and size, with no command (a click does
 /// nothing). A plain themed item, so the menu keeps its dark theme. It is deliberately not
 /// disabled: a themed menu draws a disabled row's bitmap greyed out, and the preview should
-/// keep its colours. The preview bitmap is attached to it later.
+/// keep its colours. When the thumbnail arrives the row is replaced by a bitmap row that shows
+/// the thumbnail with this text next to it (`tw_core::menu_header`): an item bitmap on this
+/// row would widen the bitmap column of every row of the menu.
 unsafe fn add_header(menu: HMENU, pos: u32, text: &str) -> Result<()> {
     let mut text = wide(&tree::menu_text(text));
     let mut info = item(MFT_STRING);
@@ -384,6 +392,8 @@ impl ContextMenu_Impl {
         let mut commands = self.commands.borrow_mut();
         commands.clear();
         self.preview_menu.set(None);
+        *self.header_bitmap.borrow_mut() = None;
+        let header_text = tree::header_text(&files);
         let mut b = Builder {
             id_first,
             id_last,
@@ -402,7 +412,7 @@ impl ContextMenu_Impl {
             let sub = CreatePopupMenu()?;
             let mut pos = 0u32;
             // File name and size, always; the thumbnail joins it when the shell has one.
-            add_header(sub, pos, &tree::header_text(&files))?;
+            add_header(sub, pos, &header_text)?;
             pos += 1;
             if fetch_preview {
                 self.preview_menu.set(Some(sub));
@@ -411,6 +421,7 @@ impl ContextMenu_Impl {
             fill(&mut b, sub, &entries, &mut pos, true)?;
             add_string(hmenu, index, ids::PRODUCT_NAME, Some(root_id), Some(sub))?;
         }
+        *self.header_text.borrow_mut() = header_text;
         Ok(commands.len() as u32)
     }
 
@@ -453,26 +464,19 @@ impl ContextMenu_Impl {
         let shared: Shared = Arc::default();
         let theirs = Arc::clone(&shared);
         let path = wide(&file.to_string_lossy());
+        let edge = menu_header::thumbnail_edge(menu_header::system_dpi());
         let handle = std::thread::Builder::new()
             .name("tw-menu-preview".into())
             .spawn(move || {
                 // SAFETY: STA for shell item APIs on this thread; balanced uninit.
                 unsafe {
                     let inited = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
-                    // No BIGGERSIZEOK: the bitmap is used as is, so it must fit the edge.
+                    // No BIGGERSIZEOK: the bitmap is composed as is, so it must fit the edge.
                     let bmp = SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(
                         PCWSTR(path.as_ptr()),
                         None,
                     )
-                    .and_then(|f| {
-                        f.GetImage(
-                            SIZE {
-                                cx: PREVIEW_EDGE,
-                                cy: PREVIEW_EDGE,
-                            },
-                            SIIGBF_THUMBNAILONLY,
-                        )
-                    });
+                    .and_then(|f| f.GetImage(SIZE { cx: edge, cy: edge }, SIIGBF_THUMBNAILONLY));
                     let mut slot = lock(&theirs);
                     if let Ok(b) = bmp {
                         if slot.abandoned {
@@ -516,10 +520,11 @@ impl ContextMenu_Impl {
         p.bitmap
     }
 
-    /// The shell is about to show `menu`: when it is the submenu, put the thumbnail on its
-    /// header row. The bitmap is premultiplied 32-bpp (what the shell's thumbnail cache
-    /// hands out), which a themed menu item draws with its alpha, dark mode included. The
-    /// menu does not own it; the preview frees it with the menu object.
+    /// The shell is about to show `menu`: when it is the submenu, replace its header row by
+    /// one that shows the thumbnail with the file's name and size beside it. The thumbnail is
+    /// premultiplied 32-bpp (what the shell's thumbnail cache hands out); the row is composed
+    /// from it (`tw_core::menu_header`), and the menu does not own the result: the menu object
+    /// frees it, like the thumbnail.
     fn handle_msg(&self, msg: u32, wparam: WPARAM) -> Result<bool> {
         if msg != WM_INITMENUPOPUP {
             return Ok(false);
@@ -531,15 +536,17 @@ impl ContextMenu_Impl {
             return Ok(false);
         }
         self.preview_menu.set(None);
-        if let Some(bitmap) = self.preview_bitmap() {
-            let info = MENUITEMINFOW {
-                cbSize: size_of::<MENUITEMINFOW>() as u32,
-                fMask: MIIM_BITMAP,
-                hbmpItem: bitmap,
-                ..Default::default()
-            };
+        if let Some(thumbnail) = self.preview_bitmap()
+            && let Some(row) = menu_header::compose(
+                &self.header_text.borrow(),
+                thumbnail,
+                menu_header::system_dpi(),
+            )
+        {
             // SAFETY: `sub` is the live submenu the shell is initialising; row 0 is the header.
-            let _ = unsafe { SetMenuItemInfoW(sub, 0, true, &info) };
+            if unsafe { SetMenuItemInfoW(sub, 0, true, &row.item_info()) }.is_ok() {
+                *self.header_bitmap.borrow_mut() = Some(row);
+            }
         }
         Ok(false)
     }

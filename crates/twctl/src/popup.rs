@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use tw_core::config::Settings;
 use tw_core::menu::{self as tree, Selection, Shown, Verb};
+use tw_core::menu_header::{self, HeaderBitmap};
 use windows::Win32::Foundation::{HWND, SIZE};
 use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP, HGDIOBJ};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
@@ -23,9 +24,9 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DestroyMenu, DestroyWindow, GetCursorPos, HMENU,
-    MENUITEMINFOW, MF_POPUP, MF_SEPARATOR, MF_STRING, MIIM_BITMAP, PostMessageW,
-    SetForegroundWindow, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_NULL, WS_EX_TOOLWINDOW, WS_POPUP,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, SetForegroundWindow, SetMenuItemInfoW,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WINDOW_STYLE, WM_NULL,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{PCSTR, PCWSTR, w};
 
@@ -37,7 +38,6 @@ use crate::ops::Result;
 /// bitmap that arrives later cannot be shown (the menu is already sized), so it is dropped and
 /// the next popup finds it cached.
 const PREVIEW_WAIT: Duration = Duration::from_millis(400);
-const PREVIEW_EDGE: i32 = 128;
 
 /// `--at X,Y`: the screen position the popup opens at.
 pub fn parse_at(s: &str) -> Result<(i32, i32)> {
@@ -53,18 +53,17 @@ pub fn parse_at(s: &str) -> Result<(i32, i32)> {
 pub struct Popup {
     pub menu: HMENU,
     pub verbs: Vec<&'static Verb>,
-    bitmap: Option<HBITMAP>,
+    /// The header row's text, which the thumbnail row repeats as its own text.
+    header: Option<String>,
+    /// The composed header row, once the thumbnail is on it. The menu does not own it.
+    bitmap: Option<HeaderBitmap>,
 }
 
 impl Drop for Popup {
     fn drop(&mut self) {
-        // SAFETY: the menu (and its submenus) and the bitmap are owned by this popup.
-        unsafe {
-            let _ = DestroyMenu(self.menu);
-            if let Some(b) = self.bitmap.take() {
-                let _ = DeleteObject(HGDIOBJ(b.0));
-            }
-        }
+        // SAFETY: the menu (and its submenus) is owned by this popup; the bitmap it showed
+        // is freed after it, as a field.
+        let _ = unsafe { DestroyMenu(self.menu) };
     }
 }
 
@@ -141,13 +140,15 @@ fn separator_before(menu: HMENU, count: &mut u32, due: &mut bool) -> Result<()> 
 
 /// Builds the popup for `entries`, with `header` as its first row. The header has no command,
 /// so a click on it just closes the popup. It is not disabled: a themed menu draws a disabled
-/// row's bitmap greyed out, and the preview should keep its colours.
+/// row's bitmap greyed out, and the preview should keep its colours. With a thumbnail the row
+/// becomes a bitmap item (see `Popup::set_preview` and `tw_core::menu_header`).
 pub fn build(entries: &[Shown], header: Option<&str>) -> Result<Popup> {
     // SAFETY: a fresh popup menu, owned by the returned `Popup`.
     let menu = unsafe { CreatePopupMenu() }.map_err(winerr)?;
     let mut popup = Popup {
         menu,
         verbs: Vec::new(),
+        header: header.map(str::to_owned),
         bitmap: None,
     };
     let mut count = 0;
@@ -175,20 +176,22 @@ pub fn build(entries: &[Shown], header: Option<&str>) -> Result<Popup> {
 }
 
 impl Popup {
-    /// Puts `bitmap` (premultiplied 32-bpp, owned by the popup from now on) on the header row.
-    fn set_preview(&mut self, bitmap: HBITMAP) {
-        let info = MENUITEMINFOW {
-            cbSize: size_of::<MENUITEMINFOW>() as u32,
-            fMask: MIIM_BITMAP,
-            hbmpItem: bitmap,
-            ..Default::default()
+    /// Replaces the header row by one that shows `thumbnail` (premultiplied 32-bpp, freed here)
+    /// with the header text to its right. The row is sized when the menu opens, so this is
+    /// done before it is shown.
+    fn set_preview(&mut self, thumbnail: HBITMAP) {
+        let composed = self
+            .header
+            .as_deref()
+            .and_then(|text| menu_header::compose(text, thumbnail, menu_header::system_dpi()));
+        // SAFETY: the thumbnail is ours and was selected nowhere; composing copied it.
+        let _ = unsafe { DeleteObject(HGDIOBJ(thumbnail.0)) };
+        let Some(bitmap) = composed else {
+            return;
         };
-        // SAFETY: valid menu; row 0 is the header.
-        if unsafe { SetMenuItemInfoW(self.menu, 0, true, &info) }.is_ok() {
+        // SAFETY: valid menu; row 0 is the header, and the bitmap outlives the menu.
+        if unsafe { SetMenuItemInfoW(self.menu, 0, true, &bitmap.item_info()) }.is_ok() {
             self.bitmap = Some(bitmap);
-        } else {
-            // SAFETY: not attached, so still ours to free.
-            let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
         }
     }
 }
@@ -197,6 +200,7 @@ impl Popup {
 /// handle, or never. A late arrival is freed by the worker.
 fn fetch_preview(file: &std::path::Path) -> mpsc::Receiver<isize> {
     let (tx, rx) = mpsc::channel();
+    let edge = menu_header::thumbnail_edge(menu_header::system_dpi());
     let path: Vec<u16> = file
         .to_string_lossy()
         .encode_utf16()
@@ -212,15 +216,7 @@ fn fetch_preview(file: &std::path::Path) -> mpsc::Receiver<isize> {
                     PCWSTR(path.as_ptr()),
                     None,
                 )
-                .and_then(|f| {
-                    f.GetImage(
-                        SIZE {
-                            cx: PREVIEW_EDGE,
-                            cy: PREVIEW_EDGE,
-                        },
-                        SIIGBF_THUMBNAILONLY,
-                    )
-                });
+                .and_then(|f| f.GetImage(SIZE { cx: edge, cy: edge }, SIIGBF_THUMBNAILONLY));
                 if let Ok(b) = bmp
                     && tx.send(b.0 as isize).is_err()
                 {
@@ -297,9 +293,10 @@ pub fn choose(
     files: &[PathBuf],
     at: (i32, i32),
 ) -> Result<Option<&'static Verb>> {
-    // Started before anything else so the shell's work overlaps the menu build.
-    let preview = (files.len() == 1 && settings.menu_preview).then(|| fetch_preview(&files[0]));
+    // The DPI first, as the thumbnail is asked for at the size the screen shows it; then
+    // before anything else, so the shell's work overlaps the menu build.
     crate::ui::dpi_aware();
+    let preview = (files.len() == 1 && settings.menu_preview).then(|| fetch_preview(&files[0]));
     enable_dark_menus();
     let entries = tree::shown(settings, &Selection::of(files));
     let mut popup = build(&entries, Some(&tree::header_text(files)))?;
@@ -334,7 +331,10 @@ pub fn choose(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::UI::WindowsAndMessaging::{GetMenuItemCount, GetMenuItemID, GetSubMenu};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetMenuItemCount, GetMenuItemID, GetMenuItemInfoW, GetSubMenu, MENU_ITEM_MASK,
+        MENUITEMINFOW, MFT_BITMAP, MFT_OWNERDRAW, MFT_STRING, MIIM_BITMAP, MIIM_FTYPE,
+    };
 
     fn menu_for(files: &[&str], settings: &Settings) -> Popup {
         let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
@@ -417,6 +417,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn row_type(menu: HMENU, pos: u32, mask: MENU_ITEM_MASK) -> MENUITEMINFOW {
+        let mut info = MENUITEMINFOW {
+            cbSize: size_of::<MENUITEMINFOW>() as u32,
+            fMask: mask,
+            ..Default::default()
+        };
+        // SAFETY: reading one row of a live menu owned by the test.
+        unsafe { GetMenuItemInfoW(menu, pos, true, &mut info) }.unwrap();
+        info
+    }
+
+    #[test]
+    fn a_thumbnail_turns_the_header_into_a_bitmap_row_and_leaves_the_others_alone() {
+        use windows::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS,
+        };
+        let mut p = menu_for(&["a.png"], &Settings::default());
+        assert_eq!(row_type(p.menu, 0, MIIM_FTYPE).fType, MFT_STRING);
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: 64,
+                biHeight: -40,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        // SAFETY: a fresh DIB section, handed to the popup, which frees it.
+        let thumbnail =
+            unsafe { CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) }.unwrap();
+        p.set_preview(thumbnail);
+        assert!(
+            p.bitmap.is_some(),
+            "the composed row is kept for the menu's life"
+        );
+        assert_eq!(row_type(p.menu, 0, MIIM_FTYPE).fType, MFT_BITMAP);
+        assert_eq!(rows(p.menu), 16, "same rows as before");
+        // The other rows are plain text rows with no bitmap of their own, so none of them is
+        // pushed right by a shared bitmap column.
+        for i in 1..16 {
+            let row = row_type(p.menu, i, MIIM_FTYPE | MIIM_BITMAP);
+            assert!(row.hbmpItem.is_invalid(), "row {i} has no item bitmap");
+            assert_eq!(
+                row.fType.0 & MFT_OWNERDRAW.0,
+                0,
+                "row {i} is not owner-drawn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_thumbnail_without_a_header_is_dropped() {
+        let mut p = build(&[], None).unwrap();
+        assert!(p.header.is_none());
+        // SAFETY: a 1x1 bitmap handed over to be freed.
+        p.set_preview(unsafe { windows::Win32::Graphics::Gdi::CreateBitmap(1, 1, 1, 32, None) });
+        assert!(p.bitmap.is_none());
     }
 
     #[test]

@@ -26,7 +26,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemInfoW, GetMenuStringW, GetSubMenu,
-    MENUITEMINFOW, MF_BYPOSITION, MFT_OWNERDRAW, MIIM_BITMAP, MIIM_FTYPE, WM_INITMENUPOPUP,
+    MENUITEMINFOW, MF_BYPOSITION, MFT_BITMAP, MFT_OWNERDRAW, MIIM_BITMAP, MIIM_FTYPE, MIIM_TYPE,
+    WM_INITMENUPOPUP,
 };
 use windows::core::{GUID, HRESULT, HSTRING, Interface, PSTR};
 
@@ -538,7 +539,9 @@ fn context_menu_tree_for_single_png() {
     }
 }
 
-/// Opening the submenu puts the file's thumbnail on the header row as a plain item bitmap.
+/// Opening the submenu turns the header row into a bitmap row: the thumbnail with the file's
+/// name and size beside it. No row carries an item bitmap, because that would widen the bitmap
+/// column and push every row's text right.
 #[test]
 fn opening_the_submenu_attaches_the_preview_bitmap() {
     let s = Scratch::new("menu-preview");
@@ -550,7 +553,8 @@ fn opening_the_submenu_attaches_the_preview_bitmap() {
     // SAFETY: inspecting and messaging a menu we own.
     unsafe {
         let sub = GetSubMenu(hmenu, 0);
-        assert!(item_info(sub, 0, MIIM_BITMAP).hbmpItem.is_invalid());
+        let rows_before = GetMenuItemCount(Some(sub));
+        assert_eq!(item_info(sub, 0, MIIM_FTYPE).fType.0 & MFT_BITMAP.0, 0);
         menu.cast::<IContextMenu2>()
             .unwrap()
             .HandleMenuMsg(
@@ -559,8 +563,18 @@ fn opening_the_submenu_attaches_the_preview_bitmap() {
                 windows::Win32::Foundation::LPARAM(0),
             )
             .unwrap();
-        let bitmap = item_info(sub, 0, MIIM_BITMAP).hbmpItem;
-        assert!(!bitmap.is_invalid(), "the header row carries the thumbnail");
+        assert_eq!(GetMenuItemCount(Some(sub)), rows_before, "same rows");
+        let header = item_info(sub, 0, MIIM_TYPE);
+        assert_eq!(
+            header.fType.0 & MFT_BITMAP.0,
+            MFT_BITMAP.0,
+            "the header row is a bitmap row"
+        );
+        let bitmap = HBITMAP(header.dwTypeData.0.cast());
+        assert!(
+            !bitmap.is_invalid(),
+            "the header row carries the composed bitmap"
+        );
         let mut bm = windows::Win32::Graphics::Gdi::BITMAP::default();
         GetObjectW(
             HGDIOBJ(bitmap.0),
@@ -569,15 +583,25 @@ fn opening_the_submenu_attaches_the_preview_bitmap() {
         );
         assert_eq!(
             bm.bmBitsPixel, 32,
-            "premultiplied 32-bpp, drawn with its alpha"
+            "premultiplied 32-bpp, blended with its alpha"
         );
+        // The 64 px thumbnail is kept as is (never enlarged), with padding above and below
+        // and the text to its right.
         assert!(
-            bm.bmWidth <= 128 && bm.bmHeight.abs() <= 128,
+            bm.bmHeight.abs() > 64 && bm.bmHeight.abs() <= 128 + 32,
             "{}x{}",
             bm.bmWidth,
             bm.bmHeight
         );
-        // Another menu's init does nothing; opening again keeps the bitmap.
+        assert!(bm.bmWidth > 64, "room for the text: {}", bm.bmWidth);
+        // No other row has an item bitmap: nothing pushes the text of the rows to the right.
+        for i in 1..rows_before as u32 {
+            assert!(
+                item_info(sub, i, MIIM_BITMAP).hbmpItem.is_invalid(),
+                "row {i} has an item bitmap"
+            );
+        }
+        // Another menu's init does nothing; opening again keeps the row.
         menu.cast::<IContextMenu2>()
             .unwrap()
             .HandleMenuMsg(

@@ -23,6 +23,13 @@ on-disk formats may still change.
   only) never appeared. It is now also a packaged verb (`Directory` and `Directory\Background`).
   Where the package is registered the classic folder entry steps aside, as the file menu
   already does, because Windows copies the packaged verb into "Show more options".
+- **The menu's preview no longer pushes every row to the right.** The thumbnail sat on the
+  header row as a menu item bitmap, and a native menu sizes one bitmap column for all rows
+  from the widest one, so each row's text started where the thumbnail ended (the Windows 11
+  popup, and the classic menu's Thumbwright submenu the same way). The header is now one
+  bitmap row that shows the thumbnail with the file name and size beside it, drawn in the menu
+  font and colours (light and dark), so the rows below start at the normal left edge and the
+  menu keeps its Windows theme. A header without a thumbnail stays an ordinary text row.
 
 ## [0.1.3] - 2026-10-19
 

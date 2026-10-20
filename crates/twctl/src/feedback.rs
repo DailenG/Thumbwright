@@ -214,14 +214,6 @@ fn rgb(r: u32, g: u32, b: u32) -> COLORREF {
     COLORREF(r | (g << 8) | (b << 16))
 }
 
-/// Apps use the dark theme (Settings > Personalization > Colors).
-fn dark_mode() -> bool {
-    windows_registry::CURRENT_USER
-        .open(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
-        .and_then(|k| k.get_u32("AppsUseLightTheme"))
-        .is_ok_and(|v| v == 0)
-}
-
 fn to_wide(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
@@ -345,7 +337,7 @@ pub fn confirm_window(text: &str) {
         *c.borrow_mut() = Some(ConfirmState {
             text: wide,
             font,
-            dark: dark_mode(),
+            dark: tw_core::menu_header::dark_mode(),
         });
     });
     // SAFETY: a popup window on this thread, destroyed by its own procedure.
