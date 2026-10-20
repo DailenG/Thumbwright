@@ -160,6 +160,7 @@ h1 .hl{background:linear-gradient(transparent 66%,color-mix(in srgb,var(--accent
 .ba:has(#ba-after:checked) .pane{--cut:0%;animation:none}
 @keyframes sweep{from{--cut:100%}}
 .layer{padding:16px 14px 18px}
+.layer.before{clip-path:inset(0 calc(100% - var(--cut)) 0 0)}
 .layer.after{position:absolute;inset:0;background:var(--w-bg);clip-path:inset(0 0 0 var(--cut))}
 .files{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px 10px;list-style:none;margin:0;padding:0}
 .f{display:flex;flex-direction:column;align-items:center;gap:7px;min-width:0}
