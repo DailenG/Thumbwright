@@ -14,6 +14,15 @@ on-disk formats may still change.
   and Minecraft Bedrock packs, add-ons, worlds and world templates. `twctl formats`, the
   website's format browser and the README count them separately. The `design` and `cad`
   starter kits no longer turn on these types; `thumbnails` and `everything` still do.
+- **The Windows 11 right-click popup opens without waiting for the file's preview.** It used
+  to hold back until Windows handed over the thumbnail, so it appeared after about 125 to
+  140 ms; it now appears after about 80 to 95 ms (median of warm runs on the development
+  machine, from starting `twctl` to the menu on screen). The header shows the file name and
+  size with an empty box at once, and the thumbnail is drawn into the box a few tens of
+  milliseconds later. The header is now always as tall as the largest thumbnail, so a wide
+  picture is centred in the box instead of the header shrinking to fit it. For a file
+  Windows has no thumbnail for (a text file, say) the header turns back into an ordinary
+  text row as soon as that is known.
 
 ### Fixed
 

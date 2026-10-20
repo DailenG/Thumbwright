@@ -155,6 +155,29 @@ impl HeaderBitmap {
         Ok(())
     }
 
+    /// Makes row 0 of `menu` show this bitmap instead of `previous`, which `attach` put there
+    /// (the menu may be open: the caller repaints it). The accessible name moves to this
+    /// bitmap without being cleared and set again, so `previous` can be dropped afterwards.
+    ///
+    /// # Safety
+    /// As [`HeaderBitmap::attach`]; `previous` must be attached to `menu` and is dropped by the
+    /// caller only after this returns.
+    pub unsafe fn replace(
+        &self,
+        menu: HMENU,
+        previous: &HeaderBitmap,
+    ) -> windows::core::Result<()> {
+        // SAFETY: per the contract.
+        unsafe { SetMenuItemInfoW(menu, 0, true, &self.item_info()) }?;
+        if previous.attached.take() == Some(menu) {
+            self.attached.set(Some(menu));
+        } else {
+            // SAFETY: per the contract.
+            unsafe { self.attach(menu) }?;
+        }
+        Ok(())
+    }
+
     /// Removes the name annotation from the menu this was attached to. Call before destroying
     /// the menu: annotations are keyed by menu handle, and handles are reused.
     pub fn detach(&self) {
@@ -215,14 +238,64 @@ fn fit((w, h): (i32, i32), dpi: u32) -> (i32, i32) {
     ((w * edge / long).max(1), (h * edge / long).max(1))
 }
 
+/// Where a thumbnail goes in a header row, and what part of its bitmap to draw.
+struct Thumb {
+    bitmap: HBITMAP,
+    source: (i32, i32),
+    /// Offset inside the thumbnail box (below the top padding), and the size drawn.
+    at: (i32, i32),
+    size: (i32, i32),
+}
+
 /// Composes the header row: `thumbnail` (premultiplied 32-bpp, the shell's own thumbnail
 /// bitmap, left to the caller) with `label` to its right, vertically centred, at `dpi`. The
-/// thumbnail starts at the left edge of the item area, where the other rows' text starts.
+/// thumbnail starts at the left edge of the item area, where the other rows' text starts. The
+/// row is as tall as the thumbnail it shows.
 /// `None` when the bitmap is unusable or a GDI object cannot be created.
 pub fn compose(label: &str, thumbnail: HBITMAP, dpi: u32) -> Option<HeaderBitmap> {
     let dpi = dpi.max(96);
     let source = bitmap_size(thumbnail)?;
-    let (dw, dh) = fit(source, dpi);
+    let size = fit(source, dpi);
+    let thumb = Thumb {
+        bitmap: thumbnail,
+        source,
+        at: (0, 0),
+        size,
+    };
+    compose_row(label, size, Some(&thumb), dpi)
+}
+
+/// Like [`compose`], but the row's size does not depend on the thumbnail: it reserves the
+/// full `thumbnail_edge` square for it, so a row composed without a thumbnail (`None`: the box
+/// stays empty, the label is drawn) and the row composed once it has arrived are the same size,
+/// and the text sits in the same place. The thumbnail is at the left edge of the box, centred
+/// vertically in it. `None` when a bitmap is unusable or a GDI object cannot be created.
+pub fn compose_boxed(label: &str, thumbnail: Option<HBITMAP>, dpi: u32) -> Option<HeaderBitmap> {
+    let dpi = dpi.max(96);
+    let edge = thumbnail_edge(dpi);
+    let thumb = match thumbnail {
+        Some(bitmap) => {
+            let source = bitmap_size(bitmap)?;
+            let size = fit(source, dpi);
+            Some(Thumb {
+                bitmap,
+                source,
+                at: (0, (edge - size.1).max(0) / 2),
+                size,
+            })
+        }
+        None => None,
+    };
+    compose_row(label, (edge, edge), thumb.as_ref(), dpi)
+}
+
+/// The row of `label` with a thumbnail box of `thumb_box` (and `thumb` in it, if any).
+fn compose_row(
+    label: &str,
+    thumb_box: (i32, i32),
+    thumb: Option<&Thumb>,
+    dpi: u32,
+) -> Option<HeaderBitmap> {
     let font = menu_font(dpi);
     let mut text: Vec<u16> = label.encode_utf16().collect();
     let (gap, pad_v) = (scale(GAP, dpi), scale(PAD_V, dpi));
@@ -238,16 +311,7 @@ pub fn compose(label: &str, thumbnail: HBITMAP, dpi: u32) -> Option<HeaderBitmap
     let result = unsafe {
         let screen = GetDC(None);
         let dc = CreateCompatibleDC(Some(screen));
-        let result = compose_in(
-            dc,
-            &mut text,
-            thumbnail,
-            source,
-            (dw, dh),
-            font,
-            (gap, pad_v),
-            fg,
-        );
+        let result = compose_in(dc, &mut text, thumb_box, thumb, font, (gap, pad_v), fg);
         let _ = DeleteDC(dc);
         ReleaseDC(None, screen);
         let _ = DeleteObject(HGDIOBJ(font.0));
@@ -260,18 +324,16 @@ pub fn compose(label: &str, thumbnail: HBITMAP, dpi: u32) -> Option<HeaderBitmap
     })
 }
 
-/// The drawing of [`compose`] on the memory device context `dc`.
+/// The drawing of [`compose_row`] on the memory device context `dc`.
 ///
 /// # Safety
-/// `dc` must be a live memory device context, `thumbnail` a live bitmap not selected into one,
-/// and `font` a live font.
-#[allow(clippy::too_many_arguments)]
+/// `dc` must be a live memory device context, the thumbnail (if any) a live bitmap not selected
+/// into one, and `font` a live font.
 unsafe fn compose_in(
     dc: HDC,
     text: &mut [u16],
-    thumbnail: HBITMAP,
-    source: (i32, i32),
-    (dw, dh): (i32, i32),
+    (bw, bh): (i32, i32),
+    thumb: Option<&Thumb>,
     font: HFONT,
     (gap, pad_v): (i32, i32),
     fg: (u8, u8, u8),
@@ -288,7 +350,7 @@ unsafe fn compose_in(
             DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX | DT_LEFT,
         );
         let (tw, th) = (extent.right - extent.left, extent.bottom - extent.top);
-        let (width, height) = (dw + gap + tw + gap, dh + 2 * pad_v);
+        let (width, height) = (bw + gap + tw + gap, bh + 2 * pad_v);
 
         // The DIB: top-down 32-bpp, zeroed by the system (transparent black).
         let info = BITMAPINFO {
@@ -319,9 +381,9 @@ unsafe fn compose_in(
         // lighter weight that matches the menu's own text; white on black looks bold)...
         let top = (height - th) / 2;
         let mut area = RECT {
-            left: dw + gap,
+            left: bw + gap,
             top,
-            right: dw + gap + tw,
+            right: bw + gap + tw,
             bottom: top + th,
         };
         let pixels = std::slice::from_raw_parts_mut(bits.cast::<u32>(), (width * height) as usize);
@@ -353,22 +415,38 @@ unsafe fn compose_in(
         }
 
         // The thumbnail, blended with its own alpha over the transparent pixels.
-        let src = CreateCompatibleDC(Some(dc));
-        let previous_thumbnail = SelectObject(src, HGDIOBJ(thumbnail.0));
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        let blended = AlphaBlend(dc, 0, pad_v, dw, dh, src, 0, 0, source.0, source.1, blend);
-        SelectObject(src, previous_thumbnail);
-        let _ = DeleteDC(src);
+        let mut blended = true;
+        if let Some(t) = thumb {
+            let src = CreateCompatibleDC(Some(dc));
+            let previous_thumbnail = SelectObject(src, HGDIOBJ(t.bitmap.0));
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+            blended = AlphaBlend(
+                dc,
+                t.at.0,
+                pad_v + t.at.1,
+                t.size.0,
+                t.size.1,
+                src,
+                0,
+                0,
+                t.source.0,
+                t.source.1,
+                blend,
+            )
+            .as_bool();
+            SelectObject(src, previous_thumbnail);
+            let _ = DeleteDC(src);
+        }
         let _ = GdiFlush();
 
         SelectObject(dc, previous_bitmap);
         SelectObject(dc, previous_font);
-        if !blended.as_bool() {
+        if !blended {
             let _ = DeleteObject(HGDIOBJ(dib.0));
             return None;
         }
@@ -470,6 +548,91 @@ mod tests {
     #[test]
     fn an_unusable_thumbnail_composes_nothing() {
         assert!(compose("a", HBITMAP::default(), 96).is_none());
+    }
+
+    /// Every pixel of `bitmap`, row by row.
+    fn pixels(bitmap: &HeaderBitmap) -> Vec<u32> {
+        use windows::Win32::Graphics::Gdi::GetBitmapBits;
+        let (w, h) = bitmap.size();
+        let mut bits = vec![0u32; (w * h) as usize];
+        // SAFETY: the buffer holds `w * h` 32-bit pixels, the bitmap's whole content.
+        unsafe {
+            GetBitmapBits(
+                bitmap.bitmap,
+                (bits.len() * 4) as i32,
+                bits.as_mut_ptr().cast(),
+            );
+        }
+        bits
+    }
+
+    #[test]
+    fn a_boxed_row_has_the_same_size_with_or_without_its_thumbnail() {
+        let empty = compose_boxed("photo.png  12 KB", None, 96).expect("composes");
+        let (w, h) = empty.size();
+        assert_eq!(h, 128 + 2 * PAD_V, "the whole edge box is reserved");
+        assert!(w > 128 + 2 * GAP, "room for the text: {w}");
+        let at = |bits: &[u32], x: i32, y: i32| bits[(y * w + x) as usize];
+        let empty_bits = pixels(&empty);
+        // The box is empty (transparent) and the label is drawn right of it.
+        assert!((0..128).all(|x| (0..h).all(|y| at(&empty_bits, x, y) == 0)));
+        let inked = |bits: &[u32]| {
+            (128 + GAP..w)
+                .flat_map(|x| (0..h).map(move |y| (x, y)))
+                .any(|(x, y)| at(bits, x, y) >> 24 != 0)
+        };
+        assert!(inked(&empty_bits), "the label is drawn without a thumbnail");
+
+        // A wide thumbnail, centred vertically in the box, at its left edge.
+        let thumb = solid(200, 100, 0xFF20_4060);
+        let full = compose_boxed("photo.png  12 KB", Some(thumb), 96).expect("composes");
+        assert_eq!(full.size(), (w, h), "the swap does not resize the row");
+        let full_bits = pixels(&full);
+        let top = PAD_V + (128 - 64) / 2;
+        assert_eq!(at(&full_bits, 0, top), 0xFF20_4060);
+        assert_eq!(at(&full_bits, 127, top + 63), 0xFF20_4060);
+        assert_eq!(at(&full_bits, 50, top - 1), 0, "empty above the thumbnail");
+        assert_eq!(at(&full_bits, 50, top + 64), 0, "and below it");
+        assert!(inked(&full_bits));
+        // The text is in the same place in both.
+        for y in 0..h {
+            for x in 128 + GAP..w {
+                assert_eq!(
+                    at(&empty_bits, x, y),
+                    at(&full_bits, x, y),
+                    "text pixel {x},{y}"
+                );
+            }
+        }
+        // SAFETY: created above, not selected anywhere.
+        let _ = unsafe { DeleteObject(HGDIOBJ(thumb.0)) };
+    }
+
+    #[test]
+    fn replacing_moves_the_name_to_the_new_bitmap() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AppendMenuW, CreatePopupMenu, DestroyMenu, GetMenuItemInfoW, MF_STRING,
+        };
+        let first = compose_boxed("name.png  1 KB", None, 96).expect("composes");
+        let second = compose_boxed("name.png  1 KB", None, 96).expect("composes");
+        // SAFETY: a fresh menu owned by this test, detached before it is destroyed.
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            AppendMenuW(menu, MF_STRING, 0, &HSTRING::from("name.png  1 KB")).unwrap();
+            first.attach(menu).expect("row 0 takes the bitmap");
+            second.replace(menu, &first).expect("row 0 takes the next");
+            assert!(first.attached.get().is_none());
+            assert_eq!(second.attached.get(), Some(menu));
+            let mut info = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_TYPE,
+                ..Default::default()
+            };
+            GetMenuItemInfoW(menu, 0, true, &mut info).unwrap();
+            assert_eq!(info.dwTypeData.0 as usize, second.bitmap.0 as usize);
+            second.detach();
+            let _ = DestroyMenu(menu);
+        }
     }
 
     #[test]
