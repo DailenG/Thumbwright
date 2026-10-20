@@ -489,8 +489,9 @@ function Test-SettingsExeHasNoIdentity {
 }
 
 # Inspects a sparse package file without installing it: identity, the executable that carries it,
-# external-content flag, and that the verb and the COM class behind it use CLSID_EXPLORER_COMMAND
-# from crates\tw-core\src\ids.rs. Returns Name, Publisher, Executable and Signed.
+# external-content flag, and that the verbs and the COM classes behind them use
+# CLSID_EXPLORER_COMMAND (files, Type=*) and CLSID_FOLDER_COMMAND (Directory and
+# Directory\Background) from crates\tw-core\src\ids.rs. Returns Name, Publisher, Executable and Signed.
 function Test-SparsePackageFile {
     param([string]$Path, [string]$Label)
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -511,10 +512,11 @@ function Test-SparsePackageFile {
     $ns.AddNamespace('com', 'http://schemas.microsoft.com/appx/manifest/com/windows10')
     $identity = $manifest.SelectSingleNode('/m:Package/m:Identity', $ns)
     $application = $manifest.SelectSingleNode('/m:Package/m:Applications/m:Application', $ns)
-    $verb = $manifest.SelectSingleNode('//desktop5:Verb', $ns)
-    $class = $manifest.SelectSingleNode('//com:Class', $ns)
+    $verb = $manifest.SelectSingleNode("//desktop5:ItemType[@Type='*']/desktop5:Verb", $ns)
     $external = $manifest.SelectSingleNode('/m:Package/m:Properties/uap10:AllowExternalContent', $ns)
-    $explorerCommand = ((Get-ProductClasses | Where-Object { $_.Const -eq 'CLSID_EXPLORER_COMMAND' }).Clsid).Trim('{', '}')
+    $productClasses = Get-ProductClasses
+    $explorerCommand = (($productClasses | Where-Object { $_.Const -eq 'CLSID_EXPLORER_COMMAND' }).Clsid).Trim('{', '}')
+    $folderCommand = (($productClasses | Where-Object { $_.Const -eq 'CLSID_FOLDER_COMMAND' }).Clsid).Trim('{', '}')
 
     Assert-Check "[$Label] package is a sparse package (AllowExternalContent, no payload besides assets)" (
         ($null -ne $external -and $external.InnerText -eq 'true') -and
@@ -523,10 +525,18 @@ function Test-SparsePackageFile {
         $identity.Name -match '^[A-Za-z0-9][A-Za-z0-9.\-]+$' -and $identity.Publisher -like 'CN=*') "$($identity.Name) / $($identity.Publisher)"
     Assert-Check "[$Label] package Application is thumbwright-settings.exe (shipped by the MSI; carries no identity itself)" (
         $null -ne $application -and $application.Executable -eq 'thumbwright-settings.exe')
-    Assert-Check "[$Label] explorer verb uses CLSID_EXPLORER_COMMAND $explorerCommand" (
+    Assert-Check "[$Label] file verb 'Thumbwright' on Type=* uses CLSID_EXPLORER_COMMAND $explorerCommand" (
         $null -ne $verb -and $verb.Clsid -eq $explorerCommand)
-    Assert-Check "[$Label] COM surrogate class is CLSID_EXPLORER_COMMAND in thumbwright_shell.dll (STA)" (
-        $null -ne $class -and $class.Id -eq $explorerCommand -and $class.Path -eq 'thumbwright_shell.dll' -and $class.ThreadingModel -eq 'STA')
+    foreach ($type in 'Directory', 'Directory\Background') {
+        $folderVerb = $manifest.SelectSingleNode("//desktop5:ItemType[@Type='$type']/desktop5:Verb", $ns)
+        Assert-Check "[$Label] folder verb 'ThumbwrightBuild' on Type=$type uses CLSID_FOLDER_COMMAND $folderCommand" (
+            $null -ne $folderVerb -and $folderVerb.Id -eq 'ThumbwrightBuild' -and $folderVerb.Clsid -eq $folderCommand)
+    }
+    foreach ($class in @(@('CLSID_EXPLORER_COMMAND', $explorerCommand), @('CLSID_FOLDER_COMMAND', $folderCommand))) {
+        $node = $manifest.SelectSingleNode("//com:Class[@Id='$($class[1])']", $ns)
+        Assert-Check "[$Label] COM surrogate class is $($class[0]) in thumbwright_shell.dll (STA)" (
+            $null -ne $node -and $node.Path -eq 'thumbwright_shell.dll' -and $node.ThreadingModel -eq 'STA')
+    }
     $pris = @($entries | Where-Object { $_ -like '*.pri' })
     Assert-Check "[$Label] package indexes its logos (one resources.pri, scaled and target-size Square44x44Logo)" (
         ($pris.Count -eq 1 -and $pris[0] -eq 'resources.pri') -and

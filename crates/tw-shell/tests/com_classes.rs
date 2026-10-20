@@ -6,14 +6,15 @@
 
 use std::ffi::c_void;
 use std::io::Cursor;
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use image::{ImageFormat, Rgba, RgbaImage};
 use windows::Win32::Foundation::{
-    COLORREF, E_FAIL, E_NOINTERFACE, E_NOTIMPL, HMODULE, HWND, LPARAM, RECT, STG_E_ACCESSDENIED,
-    WPARAM,
+    COLORREF, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, HMODULE, HWND, LPARAM, LRESULT, RECT,
+    STG_E_ACCESSDENIED, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetPixel, HGDIOBJ,
@@ -24,26 +25,34 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
-    COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, IClassFactory, IDataObject, IStream,
-    STGM_READ, STGM_READWRITE,
+    COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, IBindCtx, IClassFactory, IDataObject,
+    IServiceProvider, IServiceProvider_Impl, IStream, STGM_READ, STGM_READWRITE,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-use windows::Win32::System::Ole::{IObjectWithSite, IOleWindow};
+use windows::Win32::System::Ole::{
+    IObjectWithSite, IOleWindow, IOleWindow_Impl, OLEMENUGROUPWIDTHS,
+};
+use windows::Win32::UI::Controls::TBBUTTON;
+use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::PropertiesSystem::{
     IInitializeWithFile, IInitializeWithStream, IPropertyStore,
 };
 use windows::Win32::UI::Shell::{
-    BHID_DataObject, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, ECF_DEFAULT, ECF_HASSUBCOMMANDS,
-    ECS_ENABLED, ECS_HIDDEN, IContextMenu, IExplorerCommand, IInitializeWithItem, IPreviewHandler,
-    IShellExtInit, IShellItem, IShellItemArray, IThumbnailProvider, SHCreateItemFromParsingName,
-    SHCreateMemStream, SHCreateShellItemArrayFromShellItem, SHCreateStreamOnFileEx, WTS_ALPHATYPE,
-    WTSAT_ARGB,
+    BHID_DataObject, BHID_SFObject, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, ECF_DEFAULT,
+    ECF_HASSUBCOMMANDS, ECS_ENABLED, ECS_HIDDEN, IContextMenu, IExplorerCommand,
+    IInitializeWithItem, IPreviewHandler, IShellBrowser, IShellBrowser_Impl, IShellExtInit,
+    IShellFolder, IShellItem, IShellItemArray, IShellView, IThumbnailProvider, SFV_CREATE,
+    SHCreateItemFromParsingName, SHCreateMemStream, SHCreateShellFolderView,
+    SHCreateShellItemArrayFromShellItem, SHCreateStreamOnFileEx, SID_STopLevelBrowser,
+    WTS_ALPHATYPE, WTSAT_ARGB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, DispatchMessageW, IsWindow, MSG, PM_REMOVE, PeekMessageW,
-    SendMessageW, WM_PRINTCLIENT, WS_POPUP,
+    CreateWindowExW, DestroyWindow, DispatchMessageW, HMENU, IsWindow, MSG, PM_REMOVE,
+    PeekMessageW, SendMessageW, WM_PRINTCLIENT, WS_POPUP,
 };
-use windows::core::{GUID, HRESULT, HSTRING, Interface, PCWSTR, PWSTR, w};
+use windows::core::{
+    BOOL, GUID, HRESULT, HSTRING, IUnknown, Interface, PCWSTR, PWSTR, Ref, implement, w,
+};
 
 use tw_core::ids;
 
@@ -801,12 +810,290 @@ fn explorer_command_hides_for_unsupported_files() {
     );
 }
 
+// ---------------------------------------------------------------- modern folder menu
+
+/// A folder view like the one the shell has over `dir`: the real `IShellView` of the
+/// file-system folder (it answers `IFolderView::GetFolder` without a window).
+fn folder_view_of(dir: &Path) -> IShellView {
+    // SAFETY: binds a shell item of an existing directory to its folder object and wraps it
+    // in a default view; the folder reference moved into `SFV_CREATE` is released by the view.
+    unsafe {
+        let folder: IShellFolder = shell_item(dir)
+            .BindToHandler(None::<&IBindCtx>, &BHID_SFObject)
+            .unwrap();
+        let create = SFV_CREATE {
+            cbSize: size_of::<SFV_CREATE>() as u32,
+            pshf: ManuallyDrop::new(Some(folder)),
+            ..Default::default()
+        };
+        SHCreateShellFolderView(&create).unwrap()
+    }
+}
+
+/// The top-level browser of the site Explorer gives a command: only `IShellBrowser`'s
+/// `QueryActiveShellView` is used.
+#[implement(IShellBrowser)]
+struct FakeBrowser {
+    view: IShellView,
+}
+
+impl IOleWindow_Impl for FakeBrowser_Impl {
+    fn GetWindow(&self) -> windows::core::Result<HWND> {
+        Err(E_NOTIMPL.into())
+    }
+    fn ContextSensitiveHelp(&self, _enter: BOOL) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+impl IShellBrowser_Impl for FakeBrowser_Impl {
+    fn InsertMenusSB(&self, _: HMENU, _: *mut OLEMENUGROUPWIDTHS) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn SetMenuSB(&self, _: HMENU, _: isize, _: HWND) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn RemoveMenusSB(&self, _: HMENU) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn SetStatusTextSB(&self, _: &PCWSTR) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn EnableModelessSB(&self, _: BOOL) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn TranslateAcceleratorSB(&self, _: *const MSG, _: u16) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn BrowseObject(&self, _: *const ITEMIDLIST, _: u32) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetViewStateStream(&self, _: u32) -> windows::core::Result<IStream> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetControlWindow(&self, _: u32) -> windows::core::Result<HWND> {
+        Err(E_NOTIMPL.into())
+    }
+    fn SendControlMsg(
+        &self,
+        _: u32,
+        _: u32,
+        _: WPARAM,
+        _: LPARAM,
+        _: *mut LRESULT,
+    ) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn QueryActiveShellView(&self) -> windows::core::Result<IShellView> {
+        Ok(self.view.clone())
+    }
+    fn OnViewWindowActive(&self, _: Ref<IShellView>) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn SetToolbarItems(&self, _: *const TBBUTTON, _: u32, _: u32) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+/// What Explorer sets as the site of a command: a service provider that hands out the
+/// top-level browser (and nothing else).
+#[implement(IServiceProvider)]
+struct FakeSite {
+    browser: IShellBrowser,
+}
+
+impl IServiceProvider_Impl for FakeSite_Impl {
+    fn QueryService(
+        &self,
+        service: *const GUID,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> windows::core::Result<()> {
+        // SAFETY: the shell's calling convention: valid pointers.
+        unsafe {
+            if *service != SID_STopLevelBrowser {
+                return Err(E_NOINTERFACE.into());
+            }
+            self.browser.query(riid, ppv).ok()
+        }
+    }
+}
+
+/// A site showing `dir`, as Explorer gives the folder-background command.
+fn site_showing(dir: &Path) -> IServiceProvider {
+    let browser: IShellBrowser = FakeBrowser {
+        view: folder_view_of(dir),
+    }
+    .into();
+    FakeSite { browser }.into()
+}
+
+fn set_site(command: &IExplorerCommand, site: Option<&IServiceProvider>) {
+    // SAFETY: plain COM call.
+    unsafe {
+        command
+            .cast::<IObjectWithSite>()
+            .unwrap()
+            .SetSite(site.map(|s| s.cast::<IUnknown>().unwrap()).as_ref())
+            .unwrap();
+    }
+}
+
+#[test]
+fn folder_command_is_one_leaf_titled_like_the_classic_folder_entry() {
+    let _settings = Settings::set("");
+    let s = Scratch::new("fcmd");
+    let items = items_for(&s.0);
+    let cmd: IExplorerCommand = create(ids::CLSID_FOLDER_COMMAND);
+    // SAFETY: plain COM calls.
+    unsafe {
+        assert_eq!(title(&cmd, &items), tw_core::menu::FOLDER_VERB.label);
+        assert_eq!(cmd.GetFlags().unwrap() as i32, ECF_DEFAULT.0);
+        assert_eq!(
+            cmd.EnumSubCommands().err().map(|e| e.code()),
+            Some(E_NOTIMPL),
+            "no subcommands"
+        );
+        assert_eq!(
+            cmd.GetCanonicalName().unwrap(),
+            GUID::from_u128(ids::CLSID_FOLDER_COMMAND.guid)
+        );
+        let icon = lpwstr_to_string(cmd.GetIcon(&items).unwrap());
+        let (path, index) = icon.rsplit_once(',').unwrap();
+        assert_eq!(index, "-1", "{icon}");
+        assert!(
+            Path::new(path).ends_with(ids::SHELL_DLL_NAME) && Path::new(path).is_file(),
+            "{icon}"
+        );
+    }
+}
+
+#[test]
+fn folder_command_state_follows_the_folder_setting() {
+    let s = Scratch::new("fcmd-state");
+    let items = items_for(&s.0);
+    let cmd: IExplorerCommand = create(ids::CLSID_FOLDER_COMMAND);
+    let state = |body: &str| {
+        let _settings = Settings::set(body);
+        // SAFETY: plain COM call.
+        unsafe { cmd.GetState(&items, false) }.unwrap()
+    };
+    assert_eq!(state(""), ECS_ENABLED.0 as u32);
+    assert_eq!(state("MenuBuildHere=0"), ECS_HIDDEN.0 as u32);
+    assert_eq!(state("MenuEnabled=0"), ECS_HIDDEN.0 as u32);
+}
+
+#[test]
+fn folder_command_hides_for_files() {
+    let _settings = Settings::set("");
+    let s = Scratch::new("fcmd-file");
+    let png = s.file("pic.png", &red_png(8, 8));
+    let items = items_for(&png);
+    let cmd: IExplorerCommand = create(ids::CLSID_FOLDER_COMMAND);
+    // SAFETY: plain COM call.
+    assert_eq!(
+        unsafe { cmd.GetState(&items, false) }.unwrap(),
+        ECS_HIDDEN.0 as u32
+    );
+}
+
+#[test]
+fn folder_command_site_round_trips() {
+    let cmd: IExplorerCommand = create(ids::CLSID_FOLDER_COMMAND);
+    let site = cmd.cast::<IObjectWithSite>().unwrap();
+    let marker = mem_stream(b"site");
+    // SAFETY: plain COM calls.
+    unsafe {
+        assert!(site.GetSite::<IStream>().is_err(), "no site yet");
+        site.SetSite(&marker).unwrap();
+        assert_eq!(site.GetSite::<IStream>().unwrap().as_raw(), marker.as_raw());
+        site.SetSite(None::<&IUnknown>).unwrap();
+        assert!(site.GetSite::<IStream>().is_err());
+    }
+}
+
+#[test]
+fn folder_background_without_a_usable_site_is_hidden_and_refuses_to_run() {
+    let _settings = Settings::set("");
+    let cmd: IExplorerCommand = create(ids::CLSID_FOLDER_COMMAND);
+    let none = None::<&IShellItemArray>;
+    // SAFETY: plain COM calls.
+    unsafe {
+        // No items and no site.
+        assert_eq!(cmd.GetState(none, false).unwrap(), ECS_HIDDEN.0 as u32);
+        assert_eq!(
+            cmd.Invoke(none, None::<&IBindCtx>).err().map(|e| e.code()),
+            Some(E_INVALIDARG)
+        );
+        // A site that is no service provider.
+        let marker = mem_stream(b"site");
+        cmd.cast::<IObjectWithSite>()
+            .unwrap()
+            .SetSite(&marker)
+            .unwrap();
+        assert_eq!(cmd.GetState(none, false).unwrap(), ECS_HIDDEN.0 as u32);
+    }
+}
+
+#[test]
+fn folder_background_resolves_the_folder_from_the_site() {
+    let _settings = Settings::set("VerboseLog=1");
+    let s = Scratch::new("fcmd-bg");
+    let cmd: IExplorerCommand = create(ids::CLSID_FOLDER_COMMAND);
+    set_site(&cmd, Some(&site_showing(&s.0)));
+    let none = None::<&IShellItemArray>;
+    let log_before = log_len();
+    // SAFETY: plain COM calls; Invoke launches the stand-in `twctl.exe` (the worker).
+    unsafe {
+        assert_eq!(cmd.GetState(none, false).unwrap(), ECS_ENABLED.0 as u32);
+        cmd.Invoke(none, None::<&IBindCtx>).unwrap();
+    }
+    let log = log_since(log_before);
+    let lines = trace_lines(&log);
+    assert_eq!(lines.len(), 1, "{log}");
+    for part in ["class=menu", "verb=tw.prebuild", "files=1", "twctl_pid="] {
+        assert!(
+            lines[0].contains(part),
+            "{part:?} missing from {}",
+            lines[0]
+        );
+    }
+    // Without the site there is nothing to resolve: hidden again.
+    set_site(&cmd, None);
+    assert_eq!(
+        unsafe { cmd.GetState(none, false) }.unwrap(),
+        ECS_HIDDEN.0 as u32
+    );
+}
+
+#[test]
+fn folder_command_listed_items_win_over_the_site() {
+    let _settings = Settings::set("");
+    let s = Scratch::new("fcmd-items");
+    let png = s.file("pic.png", &red_png(8, 8));
+    let cmd: IExplorerCommand = create(ids::CLSID_FOLDER_COMMAND);
+    set_site(&cmd, Some(&site_showing(&s.0)));
+    // SAFETY: plain COM call.
+    unsafe {
+        // The site shows a folder, but the listed item is a file: the list decides.
+        assert_eq!(
+            cmd.GetState(&items_for(&png), false).unwrap(),
+            ECS_HIDDEN.0 as u32
+        );
+        assert_eq!(
+            cmd.GetState(&items_for(&s.0), false).unwrap(),
+            ECS_ENABLED.0 as u32
+        );
+    }
+}
+
 #[test]
 fn every_new_class_is_creatable() {
     drop(create::<IThumbnailProvider>(ids::CLSID_CLOUD_THUMBNAIL));
     drop(create::<IPreviewHandler>(ids::CLSID_PREVIEW));
     drop(create::<IPropertyStore>(ids::CLSID_PROPERTY));
     drop(create::<IExplorerCommand>(ids::CLSID_EXPLORER_COMMAND));
+    drop(create::<IExplorerCommand>(ids::CLSID_FOLDER_COMMAND));
 }
 
 // ---------------------------------------------------------------- VerboseLog (issue #20)

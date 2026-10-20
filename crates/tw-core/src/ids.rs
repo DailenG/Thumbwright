@@ -59,6 +59,12 @@ pub const CLSID_EXPLORER_COMMAND: ClassId = ClassId {
     display_name: "Thumbwright Explorer Command",
 };
 
+/// The Windows 11 folder / folder-background entry ("Build thumbnails for this folder").
+pub const CLSID_FOLDER_COMMAND: ClassId = ClassId {
+    guid: 0xB6F27D1C_E207_46CB_9721_280E153CB999,
+    display_name: "Thumbwright Folder Command",
+};
+
 /// AppID for the cloud class; empty `DllSurrogate` selects the system default surrogate.
 pub const APPID_CLOUD: u128 = 0x217B6D50_AA2D_4FB9_9714_0B6DA8D290A4;
 
@@ -87,6 +93,7 @@ mod tests {
             CLSID_PREVIEW.guid,
             CLSID_PROPERTY.guid,
             CLSID_EXPLORER_COMMAND.guid,
+            CLSID_FOLDER_COMMAND.guid,
             APPID_CLOUD,
         ];
         for (i, g) in all.iter().enumerate() {

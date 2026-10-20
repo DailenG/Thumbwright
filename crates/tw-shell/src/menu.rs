@@ -196,7 +196,7 @@ fn dropped_files(data: &IDataObject) -> Result<Vec<PathBuf>> {
 }
 
 /// File-system path of a folder item-id list (long paths included).
-fn folder_path(pidl: *const ITEMIDLIST) -> Result<PathBuf> {
+pub(crate) fn folder_path(pidl: *const ITEMIDLIST) -> Result<PathBuf> {
     let mut buf = vec![0u16; 32_768];
     // SAFETY: `pidl` is the shell's folder PIDL (non-null, checked by the caller) and `buf`
     // holds the character count passed.
@@ -228,7 +228,7 @@ pub(crate) fn menu_applies(files: &[PathBuf], settings: &Settings) -> bool {
 
 /// A selection made only of folders (the `Directory` handler), or the folder background
 /// (the shell passes the folder itself): the menu then offers only "Build thumbnails".
-fn folder_selection(files: &[PathBuf]) -> bool {
+pub(crate) fn folder_selection(files: &[PathBuf]) -> bool {
     !files.is_empty() && files.iter().all(|f| f.is_dir())
 }
 
@@ -414,8 +414,11 @@ impl ContextMenu_Impl {
         Ok(commands.len() as u32)
     }
 
-    /// The folder menu: one entry that prebuilds the Explorer thumbnail cache. The packaged
-    /// entry covers files only, so this one stays on Windows 11.
+    /// The folder menu: one entry that prebuilds the Explorer thumbnail cache. Where the
+    /// packaged `FolderCommand` is shown (Windows 11 with the package registered) it is the
+    /// entry, and Windows copies it into this classic menu ("Show more options"), so a
+    /// classic entry here would be its twin: it appears only where the package does not
+    /// (Windows 10, no package).
     fn build_folder(
         &self,
         hmenu: HMENU,
@@ -425,7 +428,10 @@ impl ContextMenu_Impl {
         settings: &Settings,
         _folders: &[PathBuf],
     ) -> Result<u32> {
-        if !settings.menu_enabled || !settings.menu_build_here {
+        if !settings.menu_enabled
+            || !settings.menu_build_here
+            || tree::classic_root_suppressed_now()
+        {
             return Ok(0);
         }
         let mut commands = self.commands.borrow_mut();

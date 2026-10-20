@@ -97,7 +97,7 @@ same keys are honoured by the shell DLL and `twctl`.
 
 ### Settings store: why the settings window has no package identity
 
-The Windows 11 menu verb needs a sparse MSIX package (`packaging/msix`), and the package
+The Windows 11 menu verbs need a sparse MSIX package (`packaging/msix`), and the package
 must name an `Application` executable. `thumbwright-settings.exe` is that executable, but
 it deliberately does **not** embed the `<msix>` identity element in its manifest, so it
 always runs unpackaged.

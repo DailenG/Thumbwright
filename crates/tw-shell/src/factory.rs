@@ -18,16 +18,18 @@ pub(crate) enum Kind {
     Preview,
     Property,
     ExplorerCommand,
+    FolderCommand,
 }
 
 impl Kind {
-    const ALL: [(ClassId, Kind); 6] = [
+    const ALL: [(ClassId, Kind); 7] = [
         (ids::CLSID_THUMBNAIL, Kind::Thumbnail),
         (ids::CLSID_CONTEXT_MENU, Kind::ContextMenu),
         (ids::CLSID_CLOUD_THUMBNAIL, Kind::CloudThumbnail),
         (ids::CLSID_PREVIEW, Kind::Preview),
         (ids::CLSID_PROPERTY, Kind::Property),
         (ids::CLSID_EXPLORER_COMMAND, Kind::ExplorerCommand),
+        (ids::CLSID_FOLDER_COMMAND, Kind::FolderCommand),
     ];
 
     pub(crate) fn from_clsid(clsid: &GUID) -> Option<Self> {
@@ -75,6 +77,7 @@ impl IClassFactory_Impl for ClassFactory_Impl {
             Kind::Preview => crate::preview::PreviewHandler::new().into(),
             Kind::Property => crate::property::PropertyHandler::new().into(),
             Kind::ExplorerCommand => crate::explorer_command::ExplorerCommand::new().into(),
+            Kind::FolderCommand => crate::explorer_command::FolderCommand::new().into(),
         };
         // SAFETY: riid/ppv valid per the COM contract.
         unsafe { object.query(riid, ppv).ok() }

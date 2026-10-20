@@ -72,17 +72,18 @@ function Get-WorkspaceVersion {
     return $Matches[1]
 }
 
-# The manifest CLSID comes from the Rust source so the two cannot drift apart.
-function Get-ExplorerCommandClsid {
+# The manifest CLSIDs come from the Rust source so the two cannot drift apart.
+function Get-ProductClsid {
+    param([Parameter(Mandatory)][ValidatePattern('^CLSID_[A-Z_]+$')][string]$Const)
     $ids = Join-Path $repoRoot 'crates\tw-core\src\ids.rs'
     $text = Get-Content -LiteralPath $ids -Raw
-    $pattern = 'CLSID_EXPLORER_COMMAND:\s*ClassId\s*=\s*ClassId\s*\{\s*guid:\s*0x([0-9A-Fa-f_]+)'
+    $pattern = $Const + ':\s*ClassId\s*=\s*ClassId\s*\{\s*guid:\s*0x([0-9A-Fa-f_]+)'
     if ($text -notmatch $pattern) {
-        throw "CLSID_EXPLORER_COMMAND not found in $ids"
+        throw "$Const not found in $ids"
     }
     $hex = $Matches[1].Replace('_', '')
     if ($hex.Length -ne 32) {
-        throw "CLSID_EXPLORER_COMMAND is not a 128-bit value: $hex"
+        throw "$Const is not a 128-bit value: $hex"
     }
     return ('{0}-{1}-{2}-{3}-{4}' -f $hex.Substring(0, 8), $hex.Substring(8, 4),
         $hex.Substring(12, 4), $hex.Substring(16, 4), $hex.Substring(20, 12)).ToUpperInvariant()
@@ -116,7 +117,8 @@ $tokens = @{
     '@PUBLISHER@'              = [System.Security.SecurityElement]::Escape($Publisher)
     '@PUBLISHER_DISPLAY_NAME@' = [System.Security.SecurityElement]::Escape($PublisherDisplayName)
     '@VERSION@'                = $Version
-    '@EXPLORER_COMMAND_CLSID@' = Get-ExplorerCommandClsid
+    '@EXPLORER_COMMAND_CLSID@' = Get-ProductClsid 'CLSID_EXPLORER_COMMAND'
+    '@FOLDER_COMMAND_CLSID@'   = Get-ProductClsid 'CLSID_FOLDER_COMMAND'
     '@SHELL_DLL@'              = 'thumbwright_shell.dll'
     '@APP_EXE@'                = 'thumbwright-settings.exe'
 }

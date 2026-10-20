@@ -24,6 +24,7 @@
     @PUBLISHER_DISPLAY_NAME@  shown in Settings
     @VERSION@                 four-part version, from the workspace version
     @EXPLORER_COMMAND_CLSID@  CLSID_EXPLORER_COMMAND, read from crates/tw-core/src/ids.rs
+    @FOLDER_COMMAND_CLSID@    CLSID_FOLDER_COMMAND, read from crates/tw-core/src/ids.rs
     @SHELL_DLL@               thumbwright_shell.dll
     @APP_EXE@                 thumbwright-settings.exe, the executable that carries identity
 -->
@@ -76,20 +77,31 @@
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png" />
       <Extensions>
-        <!-- The verb. GetState decides per selection whether it shows (supported types,
-             settings), so it is declared for every file type. -->
+        <!-- The verbs. Windows 11 lists only packaged verbs at the top level of the menu, so
+             each entry needs one. GetState decides per selection whether it shows (supported
+             types, settings), so the file verb is declared for every file type. The folder
+             verb ("Build thumbnails for this folder") is declared for folders and for the
+             folder background; its GetState hides it for anything that is not a file-system
+             folder. -->
         <desktop4:Extension Category="windows.fileExplorerContextMenus">
           <desktop4:FileExplorerContextMenus>
             <desktop5:ItemType Type="*">
               <desktop5:Verb Id="Thumbwright" Clsid="@EXPLORER_COMMAND_CLSID@" />
             </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="ThumbwrightBuild" Clsid="@FOLDER_COMMAND_CLSID@" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory\Background">
+              <desktop5:Verb Id="ThumbwrightBuild" Clsid="@FOLDER_COMMAND_CLSID@" />
+            </desktop5:ItemType>
           </desktop4:FileExplorerContextMenus>
         </desktop4:Extension>
-        <!-- The COM class behind the verb, loaded from the external location. -->
+        <!-- The COM classes behind the verbs, loaded from the external location. -->
         <com:Extension Category="windows.comServer">
           <com:ComServer>
             <com:SurrogateServer DisplayName="Thumbwright modern context menu">
               <com:Class Id="@EXPLORER_COMMAND_CLSID@" Path="@SHELL_DLL@" ThreadingModel="STA" />
+              <com:Class Id="@FOLDER_COMMAND_CLSID@" Path="@SHELL_DLL@" ThreadingModel="STA" />
             </com:SurrogateServer>
           </com:ComServer>
         </com:Extension>

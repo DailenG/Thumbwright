@@ -15,6 +15,15 @@ on-disk formats may still change.
   website's format browser and the README count them separately. The `design` and `cad`
   starter kits no longer turn on these types; `thumbnails` and `everything` still do.
 
+### Fixed
+
+- **"Build thumbnails for this folder" now shows on the Windows 11 right-click menu** of a
+  folder and of a folder's background. Windows 11 lists only packaged verbs at the top level
+  and files classic handlers under "Show more options", so the folder entry (a classic handler
+  only) never appeared. It is now also a packaged verb (`Directory` and `Directory\Background`).
+  Where the package is registered the classic folder entry steps aside, as the file menu
+  already does, because Windows copies the packaged verb into "Show more options".
+
 ## [0.1.3] - 2026-10-19
 
 ### Changed
