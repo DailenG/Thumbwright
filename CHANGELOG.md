@@ -34,6 +34,19 @@ on-disk formats may still change.
   output replaced a file deleted moments earlier, the window had not yet caught up and cleared
   its selection instead. Thumbwright now tells the shell about the new file (a flushed
   `SHChangeNotify`) before asking Explorer to select it; 10 of 10 runs selected it.
+- **"Build thumbnails for this folder" no longer ends in a box you must click OK on.** It now
+  behaves like the other menu actions: a progress window with Cancel when the folder takes a
+  while ("Building thumbnails for 40 files... 2 of 40"), then a short confirmation that closes
+  on its own ("Thumbnails ready for 40 files"). Only a failure still opens a message box.
+- **Every Thumbwright window shows the Thumbwright icon in its title bar**, not just in the
+  taskbar: progress windows, prompts (for example "Rename with pattern"), text windows and
+  message boxes in both `twctl` and Workbench. Their title bars follow dark mode like
+  Workbench's.
+- **Window layout:** the progress window's right margin was cut off by the window frame, and
+  the rename prompt had uneven margins, a grey box behind its label and an old system font.
+  Both are now laid out inside the window's client area with even margins, in Segoe UI.
+  Workbench's message boxes say "Thumbwright Workbench" instead of the old name "Thumbwright
+  Settings".
 
 [#26]: https://github.com/DailenG/Thumbwright/issues/26
 [#27]: https://github.com/DailenG/Thumbwright/issues/27

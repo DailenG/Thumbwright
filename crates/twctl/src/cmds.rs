@@ -145,11 +145,25 @@ fn prebuild_cmd(cli: &Cli, settings: &Settings) -> Result<String> {
             .min(16),
     };
     let (files, skipped) = prebuild::collect(&inputs, cli.flag("--recurse"), settings)?;
-    let mut summary = prebuild::warm(&files, &sizes, cli.flag("--rebuild-all"), jobs);
+    // From the folder menu: a progress window with Cancel on long runs, then a short
+    // auto-closing confirmation, like every other menu verb. Failures still get the message
+    // box (main's feedback::finish shows the Err).
+    let progress = feedback::Progress::new(files.len());
+    let show = feedback::notify();
+    let mut summary = std::thread::scope(|s| {
+        let window = show
+            .then(|| s.spawn(|| feedback::progress_window("Building thumbnails for", &progress)));
+        let summary = prebuild::warm(&files, &sizes, cli.flag("--rebuild-all"), jobs, &progress);
+        progress.finish();
+        if let Some(w) = window {
+            let _ = w.join();
+        }
+        summary
+    });
     summary.skipped = skipped;
     let text = summary.text(&sizes);
-    if cli.flag("--notify") && summary.failed < summary.extracted + summary.already_cached {
-        win::message(&text, false);
+    if summary.failed < summary.extracted + summary.already_cached {
+        feedback::confirm(summary.confirmation(progress.cancelled()));
     }
     if summary.failed > 0 && summary.extracted + summary.already_cached == 0 {
         return Err(format!(

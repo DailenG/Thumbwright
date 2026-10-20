@@ -12,6 +12,8 @@ pub mod menu;
 #[cfg(windows)]
 pub mod menu_header;
 #[cfg(windows)]
+pub mod message_box;
+#[cfg(windows)]
 pub mod pipeline;
 pub mod protocol;
 #[cfg(windows)]

@@ -4,28 +4,94 @@
 use std::cell::RefCell;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, DEFAULT_GUI_FONT, GetStockObject, HBRUSH, HFONT, UpdateWindow,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET,
+    GetSysColorBrush, HBRUSH, HDC, HFONT, OUT_DEFAULT_PRECIS, SetBkMode, TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
-use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem};
+use windows::Win32::UI::HiDpi::{
+    AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GetClientRect,
-    GetMessageW, GetWindowTextLengthW, GetWindowTextW, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW,
-    LoadCursorW, MSG, MoveWindow, PostQuitMessage, RegisterClassW, SW_SHOW, SendMessageW,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_USER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    GetMessageW, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, HICON, IDC_ARROW,
+    IDCANCEL, IDOK, IMAGE_ICON, IsDialogMessageW, LR_DEFAULTCOLOR, LR_SHARED, LoadCursorW,
+    LoadImageW, MSG, MoveWindow, PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON,
+    SM_CYICON, SM_CYSMICON, SW_SHOW, SendMessageW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_SETFOCUS, WM_SETFONT,
+    WM_SIZE, WM_USER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
+    WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
 /// Opts the process into per-monitor DPI awareness (first call wins; failure is harmless).
 pub fn dpi_aware() {
     // SAFETY: no pointers; fails harmlessly when awareness was already set.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+}
+
+/// Outer window size whose client area is `cw` x `ch` for `style`/`ex` at the system DPI,
+/// so content laid out in client coordinates keeps its margins on every side.
+pub fn window_size_for_client(
+    cw: i32,
+    ch: i32,
+    style: WINDOW_STYLE,
+    ex: WINDOW_EX_STYLE,
+) -> (i32, i32) {
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: cw,
+        bottom: ch,
+    };
+    // SAFETY: valid in/out rectangle; no other pointers.
+    let ok = unsafe { AdjustWindowRectExForDpi(&mut r, style, false, ex, GetDpiForSystem()) };
+    if ok.is_ok() {
+        (r.right - r.left, r.bottom - r.top)
+    } else {
+        (cw, ch + scale(32))
+    }
+}
+
+/// The product icon (resource id 1, linked by build.rs) at the given size, or a null handle.
+/// The taskbar takes the exe's icon on its own; the caption only shows what the window class
+/// (or WM_SETICON) supplies, so every titled window must set it.
+pub fn product_icon(small: bool) -> HICON {
+    let (cx, cy) = if small {
+        (SM_CXSMICON, SM_CYSMICON)
+    } else {
+        (SM_CXICON, SM_CYICON)
+    };
+    // SAFETY: loads an icon resource of this module; shared, process-owned handle.
+    unsafe {
+        LoadImageW(
+            Some(module()),
+            PCWSTR(std::ptr::without_provenance(1)),
+            IMAGE_ICON,
+            GetSystemMetrics(cx),
+            GetSystemMetrics(cy),
+            LR_DEFAULTCOLOR | LR_SHARED,
+        )
+        .map_or(HICON::default(), |h| HICON(h.0))
+    }
+}
+
+/// Title bar in the apps' dark or light mode, like Workbench.
+pub fn themed_caption(hwnd: HWND) {
+    let dark = BOOL::from(tw_core::menu_header::dark_mode());
+    // SAFETY: documented DWM attribute on our own window; the value is a BOOL of the stated size.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            std::ptr::from_ref(&dark).cast(),
+            size_of::<BOOL>() as u32,
+        )
+    };
 }
 
 fn scale(px: i32) -> i32 {
@@ -34,9 +100,43 @@ fn scale(px: i32) -> i32 {
     px * dpi / 96
 }
 
-fn font() -> HFONT {
-    // SAFETY: stock objects are process-global and never freed.
-    HFONT(unsafe { GetStockObject(DEFAULT_GUI_FONT) }.0)
+/// Segoe UI at about 9 pt (system DPI), the font of every twctl window. Created on first use;
+/// never freed (the process is short-lived). Stored as `isize` because `HFONT` is not `Sync`.
+static FONT: std::sync::LazyLock<isize> = std::sync::LazyLock::new(|| {
+    // SAFETY: plain GDI font creation with a valid face name.
+    unsafe {
+        CreateFontW(
+            -scale(14),
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            0,
+            w!("Segoe UI"),
+        )
+    }
+    .0 as isize
+});
+
+pub fn font() -> HFONT {
+    HFONT(*FONT as *mut _)
+}
+
+/// `WM_CTLCOLORSTATIC` answer: labels drawn on the window colour instead of the grey
+/// dialog face.
+pub fn static_on_window(wparam: WPARAM) -> LRESULT {
+    // SAFETY: the static control's DC passed by the system; stock brush.
+    unsafe {
+        SetBkMode(HDC(wparam.0 as *mut _), TRANSPARENT);
+        LRESULT(GetSysColorBrush(COLOR_WINDOW).0 as isize)
+    }
 }
 
 fn module() -> windows::Win32::Foundation::HINSTANCE {
@@ -100,18 +200,27 @@ fn read_text(edit: HWND) -> String {
     }
 }
 
-fn register(class: PCWSTR, proc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT) {
-    // SAFETY: a plain window class; registering twice fails harmlessly.
+/// Registers a plain twctl window class with the product icon (caption and Alt+Tab); a class
+/// without one shows the generic window icon in the title bar. Registering twice fails
+/// harmlessly.
+pub fn register(
+    class: PCWSTR,
+    proc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+) {
+    // SAFETY: a plain window class whose procedure and name are 'static.
     unsafe {
-        let wc = WNDCLASSW {
+        let wc = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(proc),
             hInstance: module(),
             lpszClassName: class,
+            hIcon: product_icon(false),
+            hIconSm: product_icon(true),
             hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as isize as *mut _),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             ..Default::default()
         };
-        RegisterClassW(&wc);
+        RegisterClassExW(&wc);
     }
 }
 
@@ -149,6 +258,7 @@ unsafe extern "system" fn prompt_proc(
 ) -> LRESULT {
     match msg {
         DM_GETDEFID => LRESULT(((DC_HASDEFID << 16) | IDOK.0 as u32) as isize),
+        WM_CTLCOLORSTATIC => static_on_window(wparam),
         WM_COMMAND => {
             match (wparam.0 & 0xFFFF) as i32 {
                 x if x == IDOK.0 => {
@@ -187,18 +297,21 @@ pub fn prompt(title: &str, label: &str, default: &str) -> Option<String> {
     dpi_aware();
     let class = w!("ThumbwrightPrompt");
     register(class, prompt_proc);
-    let (cw, ch) = (scale(440), scale(150));
+    // Client-area layout: 12 px margins on every side, buttons right-aligned.
+    let (cw, ch) = (scale(424), scale(112));
+    let style = WS_CAPTION | WS_SYSMENU;
+    let (ww, wh) = window_size_for_client(cw, ch, style, WINDOW_EX_STYLE(0));
     // SAFETY: a top-level dialog-like window; children are created below.
     let hwnd = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class,
             &HSTRING::from(title),
-            WS_CAPTION | WS_SYSMENU,
+            style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            cw,
-            ch,
+            ww,
+            wh,
             None,
             None,
             Some(module()),
@@ -206,8 +319,11 @@ pub fn prompt(title: &str, label: &str, default: &str) -> Option<String> {
         )
     }
     .ok()?;
+    themed_caption(hwnd);
     let m = scale(12);
-    let inner = cw - 2 * m - scale(16);
+    let inner = cw - 2 * m;
+    let (bw, bh, gap) = (scale(80), scale(26), scale(8));
+    let by = ch - m - bh;
     let _ = child(hwnd, w!("STATIC"), label, 0, 0, (m, m, inner, scale(20)), 0);
     let edit = child(
         hwnd,
@@ -224,12 +340,7 @@ pub fn prompt(title: &str, label: &str, default: &str) -> Option<String> {
         "OK",
         WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32,
         0,
-        (
-            cw - 2 * scale(84) - m - scale(24),
-            scale(78),
-            scale(80),
-            scale(26),
-        ),
+        (cw - m - 2 * bw - gap, by, bw, bh),
         IDOK.0,
     );
     let _ = child(
@@ -238,12 +349,7 @@ pub fn prompt(title: &str, label: &str, default: &str) -> Option<String> {
         "Cancel",
         WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
         0,
-        (
-            cw - scale(84) - m - scale(16),
-            scale(78),
-            scale(80),
-            scale(26),
-        ),
+        (cw - m - bw, by, bw, bh),
         IDCANCEL.0,
     );
     PROMPT.with(|p| *p.borrow_mut() = PromptState { edit, answer: None });
@@ -324,6 +430,7 @@ pub fn text_window(title: &str, text: &str) {
         )
     };
     let Ok(hwnd) = hwnd else { return };
+    themed_caption(hwnd);
     // EDIT controls want CRLF line breaks.
     let body = text.replace("\r\n", "\n").replace('\n', "\r\n");
     let edit = child(

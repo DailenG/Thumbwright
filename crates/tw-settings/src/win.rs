@@ -10,8 +10,7 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, GetWindowTextW, IDYES, MB_DEFBUTTON2, MB_ICONERROR,
-    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, MessageBoxW, SendMessageW, SetWindowTextW,
-    WM_SETFONT,
+    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO, SendMessageW, SetWindowTextW, WM_SETFONT,
 };
 use windows::core::PCWSTR;
 
@@ -49,21 +48,14 @@ pub fn is_checked(h: HWND) -> bool {
     send(h, BM_GETCHECK, 0, 0) == 1
 }
 
-/// A custom message box owned by `owner` with the product caption.
+/// A message box owned by `owner`, captioned with the window's name and showing the product
+/// icon in its title bar.
 fn message_box(
     owner: HWND,
     text: &str,
     style: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE,
 ) -> bool {
-    // SAFETY: valid owner and NUL-terminated strings that outlive the call.
-    unsafe {
-        MessageBoxW(
-            Some(owner),
-            PCWSTR(wide(text).as_ptr()),
-            PCWSTR(wide("Thumbwright Settings").as_ptr()),
-            style,
-        ) == IDYES
-    }
+    tw_core::message_box::show(Some(owner), text, "Thumbwright Workbench", style) == IDYES
 }
 
 pub fn info(owner: HWND, text: &str) {

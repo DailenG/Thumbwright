@@ -21,7 +21,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, HWND_MESSAGE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-    MB_SETFOREGROUND, MessageBoxW, WINDOW_EX_STYLE, WINDOW_STYLE,
+    MB_SETFOREGROUND, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -58,8 +58,7 @@ pub fn message(text: &str, error: bool) {
     } else {
         (text.to_owned(), MB_OK | MB_ICONINFORMATION)
     };
-    // SAFETY: owner-less message box with valid strings.
-    unsafe { MessageBoxW(None, &HSTRING::from(body), w!("Thumbwright"), style) };
+    tw_core::message_box::show(None, &body, "Thumbwright", style);
 }
 
 /// Opens Explorer on the folder of each path with the path selected (one window per

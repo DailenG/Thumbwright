@@ -14,25 +14,22 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW,
-    CreateSolidBrush, DEFAULT_CHARSET, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetMonitorInfoW,
-    GetSysColorBrush, HBRUSH, HFONT, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MonitorFromPoint, OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+    DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetMonitorInfoW, HFONT, HGDIOBJ,
+    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetCursorPos, GetMessageW, GetSystemMetrics, HMENU, HWND_TOPMOST, IDC_ARROW, IDCANCEL,
-    KillTimer, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
-    SW_SHOWNORMAL, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
-    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WA_INACTIVE,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_PAINT, WM_RBUTTONDOWN, WM_SETFONT,
-    WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetCursorPos, GetMessageW, GetSystemMetrics, HMENU, HWND_TOPMOST, IDCANCEL, KillTimer, MSG,
+    PostQuitMessage, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW,
+    ShowWindow, TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_PAINT, WM_RBUTTONDOWN, WM_SETFONT, WM_TIMER, WS_BORDER, WS_CAPTION, WS_CHILD,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -141,42 +138,8 @@ fn scale(px: i32) -> i32 {
     px * dpi / 96
 }
 
-/// Segoe UI at roughly 9 pt (never freed: the process is short-lived).
 fn font() -> HFONT {
-    // SAFETY: plain GDI font creation with a valid face name.
-    unsafe {
-        CreateFontW(
-            -scale(14),
-            0,
-            0,
-            0,
-            400,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            0,
-            w!("Segoe UI"),
-        )
-    }
-}
-
-fn register(class: PCWSTR, proc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT) {
-    // SAFETY: a plain window class; registering twice fails harmlessly.
-    unsafe {
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(proc),
-            hInstance: module(),
-            lpszClassName: class,
-            hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as isize as *mut _),
-            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            ..Default::default()
-        };
-        RegisterClassW(&wc);
-    }
+    ui::font()
 }
 
 /// Shows `hwnd` on top and takes the foreground. SWP_SHOWWINDOW makes it visible even when
@@ -325,7 +288,7 @@ fn text_width(text: &[u16], font: HFONT) -> i32 {
 /// on Esc. Returns when it is gone.
 pub fn confirm_window(text: &str) {
     ui::dpi_aware();
-    register(CONFIRM_CLASS, confirm_proc);
+    ui::register(CONFIRM_CLASS, confirm_proc);
     let font = font();
     let wide = to_wide(text);
     let (width, height) = (
@@ -537,16 +500,7 @@ unsafe extern "system" fn progress_proc(
             }
             LRESULT(0)
         }
-        WM_CTLCOLORSTATIC => {
-            // SAFETY: the static control's DC passed by the system; stock brush.
-            unsafe {
-                SetBkMode(
-                    windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _),
-                    TRANSPARENT,
-                );
-                LRESULT(GetSysColorBrush(COLOR_WINDOW).0 as isize)
-            }
-        }
+        WM_CTLCOLORSTATIC => ui::static_on_window(wparam),
         WM_TIMER => {
             let mut close = false;
             PROGRESS.with(|p| {
@@ -629,9 +583,13 @@ pub fn progress_window(verb: &str, progress: &Arc<Progress>) {
         return;
     }
     ui::dpi_aware();
-    register(PROGRESS_CLASS, progress_proc);
+    ui::register(PROGRESS_CLASS, progress_proc);
     let font = font();
+    // (cw, ch) is the client area; the window is sized around it so the 16 px margins hold on
+    // both sides (sizing the whole window to cw clipped the right margin by the frame width).
     let (cw, ch) = (scale(380), scale(if progress.total > 1 { 100 } else { 66 }));
+    let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    let (ww, wh) = ui::window_size_for_client(cw, ch, style, WS_EX_TOPMOST);
     // SAFETY: a captioned popup window with a label and (for several files) a button.
     unsafe {
         let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
@@ -639,11 +597,11 @@ pub fn progress_window(verb: &str, progress: &Arc<Progress>) {
             WS_EX_TOPMOST,
             PROGRESS_CLASS,
             w!("Thumbwright"),
-            WS_POPUP | WS_CAPTION | WS_SYSMENU,
-            (sw - cw) / 2,
-            (sh - ch) / 3,
-            cw,
-            ch + scale(32),
+            style,
+            (sw - ww) / 2,
+            (sh - wh) / 3,
+            ww,
+            wh,
             None,
             None,
             Some(module()),
@@ -651,6 +609,7 @@ pub fn progress_window(verb: &str, progress: &Arc<Progress>) {
         ) else {
             return;
         };
+        ui::themed_caption(hwnd);
         let text = progress_text(verb, progress.total, progress.done());
         let label = control(
             hwnd,

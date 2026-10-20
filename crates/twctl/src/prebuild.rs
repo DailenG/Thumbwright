@@ -31,7 +31,12 @@ pub struct Summary {
     pub files: usize,
     pub extracted: usize,
     pub already_cached: usize,
+    /// File-size pairs that failed.
     pub failed: usize,
+    /// Files with at least one failed size.
+    pub failed_files: usize,
+    /// Files processed before the run ended (fewer than `files` after Cancel).
+    pub done: usize,
     pub skipped: usize,
     pub samples: Vec<String>,
 }
@@ -50,6 +55,25 @@ impl Summary {
         );
         for f in &self.samples {
             s.push_str(&format!("\n  failed: {f}"));
+        }
+        s
+    }
+
+    /// One-line outcome for the auto-closing confirmation after the folder-menu entry.
+    pub fn confirmation(&self, cancelled: bool) -> String {
+        let ready = self.done.saturating_sub(self.failed_files);
+        let mut s = if cancelled {
+            format!(
+                "Stopped: thumbnails ready for {ready} of {} files",
+                self.files
+            )
+        } else if ready == 1 {
+            "Thumbnails ready for 1 file".to_string()
+        } else {
+            format!("Thumbnails ready for {ready} files")
+        };
+        if self.failed_files > 0 {
+            s.push_str(&format!(" ({} failed)", self.failed_files));
         }
         s
     }
@@ -154,12 +178,21 @@ fn warm_one(cache: &IThumbnailCache, path: &Path, size: u32, rebuild: bool) -> R
     Ok(Warmed::Extracted)
 }
 
-/// Warms the cache for `files` at every size, on `jobs` threads.
-pub fn warm(files: &[PathBuf], sizes: &[u32], rebuild_all: bool, jobs: usize) -> Summary {
+/// Warms the cache for `files` at every size, on `jobs` threads. `progress` counts files and
+/// stops the workers before their next file once Cancel was pressed.
+pub fn warm(
+    files: &[PathBuf],
+    sizes: &[u32],
+    rebuild_all: bool,
+    jobs: usize,
+    progress: &crate::feedback::Progress,
+) -> Summary {
     let next = AtomicUsize::new(0);
     let extracted = AtomicUsize::new(0);
     let cached = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
+    let failed_files = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
     let samples = Mutex::new(Vec::new());
     let workers = jobs.clamp(1, files.len().max(1));
     std::thread::scope(|s| {
@@ -171,8 +204,12 @@ pub fn warm(files: &[PathBuf], sizes: &[u32], rebuild_all: bool, jobs: usize) ->
                 let cache: windows::core::Result<IThumbnailCache> =
                     unsafe { CoCreateInstance(&LocalThumbnailCache, None, CLSCTX_INPROC_SERVER) };
                 loop {
+                    if progress.cancelled() {
+                        break;
+                    }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(file) = files.get(i) else { break };
+                    let mut file_failed = false;
                     for &size in sizes {
                         let result = match &cache {
                             Ok(c) => warm_one(c, file, size, rebuild_all),
@@ -183,6 +220,7 @@ pub fn warm(files: &[PathBuf], sizes: &[u32], rebuild_all: bool, jobs: usize) ->
                             Ok(Warmed::Extracted) => extracted.fetch_add(1, Ordering::Relaxed),
                             Err(e) => {
                                 failed.fetch_add(1, Ordering::Relaxed);
+                                file_failed = true;
                                 if let Ok(mut s) = samples.lock()
                                     && s.len() < SAMPLE_FAILURES
                                 {
@@ -192,6 +230,11 @@ pub fn warm(files: &[PathBuf], sizes: &[u32], rebuild_all: bool, jobs: usize) ->
                             }
                         };
                     }
+                    if file_failed {
+                        failed_files.fetch_add(1, Ordering::Relaxed);
+                    }
+                    done.fetch_add(1, Ordering::Relaxed);
+                    progress.step();
                 }
                 if inited {
                     // SAFETY: balances the successful CoInitializeEx above.
@@ -205,6 +248,8 @@ pub fn warm(files: &[PathBuf], sizes: &[u32], rebuild_all: bool, jobs: usize) ->
         extracted: extracted.into_inner(),
         already_cached: cached.into_inner(),
         failed: failed.into_inner(),
+        failed_files: failed_files.into_inner(),
+        done: done.into_inner(),
         skipped: 0,
         samples: samples.into_inner().unwrap_or_default(),
     }
@@ -220,6 +265,35 @@ mod tests {
         assert!(parse_sizes("8").is_err());
         assert!(parse_sizes("96,").is_err());
         assert!(parse_sizes("5000").is_err());
+    }
+
+    #[test]
+    fn confirmation_counts_files_not_sizes() {
+        let s = |done, failed_files| Summary {
+            files: 10,
+            done,
+            failed_files,
+            failed: failed_files * 3,
+            ..Summary::default()
+        };
+        assert_eq!(
+            s(10, 0).confirmation(false),
+            "Thumbnails ready for 10 files"
+        );
+        assert_eq!(
+            s(10, 2).confirmation(false),
+            "Thumbnails ready for 8 files (2 failed)"
+        );
+        assert_eq!(
+            s(4, 1).confirmation(true),
+            "Stopped: thumbnails ready for 3 of 10 files (1 failed)"
+        );
+        let one = Summary {
+            files: 1,
+            done: 1,
+            ..Summary::default()
+        };
+        assert_eq!(one.confirmation(false), "Thumbnails ready for 1 file");
     }
 
     #[test]
