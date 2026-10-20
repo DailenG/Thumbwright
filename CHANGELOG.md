@@ -17,26 +17,26 @@ on-disk formats may still change.
 
 ### Fixed
 
-- **"Convert to" selects the new file in an Explorer window that is already open.** A window
-  that had not yet processed a just-created file (or still held a just-deleted file of the
-  same name) could not select it and cleared its selection instead. The file is now announced
-  to the shell (a flushed `SHChangeNotify` create and update) before Explorer is asked to
-  select it.
-- **"Build thumbnails for this folder" now shows on the Windows 11 right-click menu** of a
-  folder and of a folder's background. Windows 11 lists only packaged verbs at the top level
-  and files classic handlers under "Show more options", so the folder entry (a classic handler
-  only) never appeared. It is now also a packaged verb (`Directory` and `Directory\Background`).
-  Where the package is registered the classic folder entry steps aside, as the file menu
-  already does, because Windows copies the packaged verb into "Show more options".
-- **The menu's preview no longer pushes every row to the right.** The thumbnail sat on the
-  header row as a menu item bitmap, and a native menu sizes one bitmap column for all rows
-  from the widest one, so each row's text started where the thumbnail ended (the Windows 11
-  popup, and the classic menu's Thumbwright submenu the same way). The header is now one
-  bitmap row that shows the thumbnail with the file name and size beside it, drawn in the menu
-  font and colours (light and dark), so the rows below start at the normal left edge and the
-  menu keeps its Windows theme. A header without a thumbnail stays an ordinary text row. The
-  header row keeps its accessible name (file name and size) through an MSAA dynamic
-  annotation, so screen readers still read it.
+- **Right-click menu: rows no longer start halfway across** ([#27]). With a preview at the top,
+  every item was pushed right to where the thumbnail ended, in the Windows 11 popup and in the
+  classic menu's Thumbwright submenu. The cause: the thumbnail was attached as the header's
+  menu bitmap, and Windows reserves one bitmap column of that width for every row. The header
+  is now a single picture of the thumbnail with the file name and size beside it, in the
+  menu's own font and light or dark colours, so items start at the normal left edge and the
+  menu keeps its Windows look. Screen readers still read the header (file name and size),
+  through an MSAA dynamic annotation. Without a thumbnail the header is an ordinary text row.
+- **"Build thumbnails for this folder" is on the Windows 11 menu** ([#26]), for a folder and
+  for a folder's background. Windows 11 shows only packaged verbs at the top level, and the
+  folder entry was a classic handler only, so it was hidden under "Show more options". It is
+  now a packaged verb too, and the classic entry steps aside while the package is registered,
+  so "Show more options" does not list it twice.
+- **"Convert to" selects the new file in an Explorer window that is already open.** When the
+  output replaced a file deleted moments earlier, the window had not yet caught up and cleared
+  its selection instead. Thumbwright now tells the shell about the new file (a flushed
+  `SHChangeNotify`) before asking Explorer to select it; 10 of 10 runs selected it.
+
+[#26]: https://github.com/DailenG/Thumbwright/issues/26
+[#27]: https://github.com/DailenG/Thumbwright/issues/27
 
 ## [0.1.3] - 2026-10-19
 
