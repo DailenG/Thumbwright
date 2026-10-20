@@ -265,22 +265,39 @@ pub fn compose(label: &str, thumbnail: HBITMAP, dpi: u32) -> Option<HeaderBitmap
     compose_row(label, size, Some(&thumb), dpi)
 }
 
-/// Like [`compose`], but the row's size does not depend on the thumbnail: it reserves the
-/// full `thumbnail_edge` square for it, so a row composed without a thumbnail (`None`: the box
-/// stays empty, the label is drawn) and the row composed once it has arrived are the same size,
-/// and the text sits in the same place. The thumbnail is at the left edge of the box, centred
-/// vertically in it. `None` when a bitmap is unusable or a GDI object cannot be created.
-pub fn compose_boxed(label: &str, thumbnail: Option<HBITMAP>, dpi: u32) -> Option<HeaderBitmap> {
+/// How a bitmap sits in the box of [`compose_boxed`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// A thumbnail: at the left edge of the box, centred vertically in it.
+    Thumbnail,
+    /// A file icon, the stand-in for a missing thumbnail: centred in the box both ways.
+    Icon,
+}
+
+/// Like [`compose`], but the row's size does not depend on the bitmap: it reserves the full
+/// `thumbnail_edge` square for it, so a row composed without one (`None`: the box stays empty,
+/// the label is drawn) and the row composed once it has arrived are the same size, and the text
+/// sits in the same place. The bitmap sits in the box as `placement` says. `None` when a bitmap
+/// is unusable or a GDI object cannot be created.
+pub fn compose_boxed(
+    label: &str,
+    bitmap: Option<(HBITMAP, Placement)>,
+    dpi: u32,
+) -> Option<HeaderBitmap> {
     let dpi = dpi.max(96);
     let edge = thumbnail_edge(dpi);
-    let thumb = match thumbnail {
-        Some(bitmap) => {
+    let thumb = match bitmap {
+        Some((bitmap, placement)) => {
             let source = bitmap_size(bitmap)?;
             let size = fit(source, dpi);
+            let x = match placement {
+                Placement::Thumbnail => 0,
+                Placement::Icon => (edge - size.0).max(0) / 2,
+            };
             Some(Thumb {
                 bitmap,
                 source,
-                at: (0, (edge - size.1).max(0) / 2),
+                at: (x, (edge - size.1).max(0) / 2),
                 size,
             })
         }
@@ -585,7 +602,8 @@ mod tests {
 
         // A wide thumbnail, centred vertically in the box, at its left edge.
         let thumb = solid(200, 100, 0xFF20_4060);
-        let full = compose_boxed("photo.png  12 KB", Some(thumb), 96).expect("composes");
+        let full = compose_boxed("photo.png  12 KB", Some((thumb, Placement::Thumbnail)), 96)
+            .expect("composes");
         assert_eq!(full.size(), (w, h), "the swap does not resize the row");
         let full_bits = pixels(&full);
         let top = PAD_V + (128 - 64) / 2;
@@ -606,6 +624,26 @@ mod tests {
         }
         // SAFETY: created above, not selected anywhere.
         let _ = unsafe { DeleteObject(HGDIOBJ(thumb.0)) };
+    }
+
+    #[test]
+    fn an_icon_is_centred_in_the_box_and_the_row_keeps_its_size() {
+        let empty = compose_boxed("a.txt  1 KB", None, 96).expect("composes");
+        let icon = solid(48, 48, 0xFF80_8080);
+        let full =
+            compose_boxed("a.txt  1 KB", Some((icon, Placement::Icon)), 96).expect("composes");
+        assert_eq!(full.size(), empty.size());
+        let (w, _) = full.size();
+        let bits = pixels(&full);
+        let at = |x: i32, y: i32| bits[(y * w + x) as usize];
+        let (left, top) = ((128 - 48) / 2, PAD_V + (128 - 48) / 2);
+        assert_eq!(at(left, top), 0xFF80_8080);
+        assert_eq!(at(left + 47, top + 47), 0xFF80_8080);
+        assert_eq!(at(left - 1, top), 0, "empty left of the icon");
+        assert_eq!(at(left + 48, top), 0, "and right of it");
+        assert_eq!(at(left, top - 1), 0, "and above it");
+        // SAFETY: created above, not selected anywhere.
+        let _ = unsafe { DeleteObject(HGDIOBJ(icon.0)) };
     }
 
     #[test]

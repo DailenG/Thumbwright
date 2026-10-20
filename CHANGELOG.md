@@ -21,8 +21,8 @@ on-disk formats may still change.
   size with an empty box at once, and the thumbnail is drawn into the box a few tens of
   milliseconds later. The header is now always as tall as the largest thumbnail, so a wide
   picture is centred in the box instead of the header shrinking to fit it. For a file
-  Windows has no thumbnail for (a text file, say) the header turns back into an ordinary
-  text row as soon as that is known.
+  Windows has no thumbnail for (a text file, say) the box shows the file's icon, centred, so
+  the menu never changes size or moves after it opens.
 
 ### Fixed
 
