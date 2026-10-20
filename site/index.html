@@ -833,10 +833,10 @@ choco upgrade thumbwright</pre>
 ["aifc","AIFF-C audio (waveform / album art)","Audio","CoverArt",1,1,"None"],
 ["aiff","AIFF audio (waveform / album art)","Audio","CoverArt",1,1,"None"],
 ["ani","Windows animated cursor","Raster","FullDecode",1,1,"None"],
-["ape","Monkey\u0027s Audio (album art)","Audio","CoverArt",1,1,"None"],
-["apk","Android application package","Design","EmbeddedPreview",1,1,"None"],
-["apkm","Android split-APK bundle (APKM)","Design","EmbeddedPreview",1,1,"None"],
-["apks","Android split-APK bundle","Design","EmbeddedPreview",1,1,"None"],
+["ape","Monkey's Audio (album art)","Audio","CoverArt",1,1,"None"],
+["apk","Android application package","Package","EmbeddedPreview",1,1,"None"],
+["apkm","Android split-APK bundle (APKM)","Package","EmbeddedPreview",1,1,"None"],
+["apks","Android split-APK bundle","Package","EmbeddedPreview",1,1,"None"],
 ["apng","Animated Portable Network Graphics","Raster","FullDecode",1,1,"None"],
 ["arw","Sony Alpha Raw Format","CameraRaw","EmbeddedPreview",1,1,"None"],
 ["ase","Aseprite sprite","Design","EmbeddedPreview",1,1,"None"],
@@ -884,7 +884,7 @@ choco upgrade thumbwright</pre>
 ["blend8","Blender auto-save backup","Raster","FullDecode",1,1,"None"],
 ["blend9","Blender auto-save backup","Raster","FullDecode",1,1,"None"],
 ["bmp","Microsoft Windows bitmap image","Raster","FullDecode",1,1,"None"],
-["bw","Silicon Graphics (B\u0026W)","Raster","FullDecode",1,1,"None"],
+["bw","Silicon Graphics (B&W)","Raster","FullDecode",1,1,"None"],
 ["c4d","Cinema 4D scene","Design","EmbeddedPreview",0,1,"None"],
 ["cal","Continuous Acquisition and Life-cycle Support","Raster","FullDecode",1,1,"None"],
 ["cals","Continuous Acquisition and Life-cycle Support","Raster","FullDecode",1,1,"None"],
@@ -1004,10 +1004,10 @@ choco upgrade thumbwright</pre>
 ["mac","MacPaint","Raster","FullDecode",1,1,"None"],
 ["mat","MATLAB level 5 image format","Raster","FullDecode",1,1,"None"],
 ["max","Autodesk 3ds Max scene","Design","EmbeddedPreview",0,1,"None"],
-["mcaddon","Minecraft Bedrock add-on","Design","EmbeddedPreview",1,1,"None"],
-["mcpack","Minecraft Bedrock pack","Design","EmbeddedPreview",1,1,"None"],
-["mctemplate","Minecraft Bedrock world template","Design","EmbeddedPreview",1,1,"None"],
-["mcworld","Minecraft Bedrock world","Design","EmbeddedPreview",1,1,"None"],
+["mcaddon","Minecraft Bedrock add-on","Package","EmbeddedPreview",1,1,"None"],
+["mcpack","Minecraft Bedrock pack","Package","EmbeddedPreview",1,1,"None"],
+["mctemplate","Minecraft Bedrock world template","Package","EmbeddedPreview",1,1,"None"],
+["mcworld","Minecraft Bedrock world","Package","EmbeddedPreview",1,1,"None"],
 ["mdc","Minolta Digital Camera Raw Format","CameraRaw","EmbeddedPreview",0,1,"None"],
 ["mef","Mamiya Raw Format","CameraRaw","EmbeddedPreview",1,1,"None"],
 ["miff","Magick Image File Format","Raster","FullDecode",1,1,"None"],
@@ -1029,7 +1029,7 @@ choco upgrade thumbwright</pre>
 ["nef","Nikon Digital SLR Camera Raw Format","CameraRaw","EmbeddedPreview",1,1,"None"],
 ["nrw","Nikon Digital SLR Camera Raw Format","CameraRaw","EmbeddedPreview",1,1,"None"],
 ["numbers","Apple Numbers spreadsheet","Document","CoverOrFirstPage",1,1,"None"],
-["nupkg","NuGet package","Design","EmbeddedPreview",1,1,"None"],
+["nupkg","NuGet package","Package","EmbeddedPreview",1,1,"None"],
 ["obj","Wavefront 3D model","Raster","FullDecode",1,1,"None"],
 ["odf","OpenDocument Formula","Document","CoverOrFirstPage",1,1,"None"],
 ["odg","OpenDocument Graphics","Document","CoverOrFirstPage",1,1,"None"],
@@ -1146,7 +1146,7 @@ choco upgrade thumbwright</pre>
 ["vsd","Visio drawing (legacy)","Document","CoverOrFirstPage",1,1,"None"],
 ["vsdm","Visio macro-enabled drawing","Document","CoverOrFirstPage",1,1,"None"],
 ["vsdx","Visio drawing","Document","CoverOrFirstPage",1,1,"None"],
-["vsix","Visual Studio extension package","Design","EmbeddedPreview",1,1,"None"],
+["vsix","Visual Studio extension package","Package","EmbeddedPreview",1,1,"None"],
 ["vssx","Visio stencil","Document","CoverOrFirstPage",1,1,"None"],
 ["vst","Truevision Targa image","Raster","FullDecode",1,1,"None"],
 ["vstx","Visio template","Document","CoverOrFirstPage",1,1,"None"],
@@ -1163,7 +1163,7 @@ choco upgrade thumbwright</pre>
 ["wpg","Word Perfect Graphics","Raster","FullDecode",0,1,"None"],
 ["wv","WavPack audio (album art)","Audio","CoverArt",1,1,"None"],
 ["x3f","Sigma Camera RAW Format","CameraRaw","EmbeddedPreview",1,1,"None"],
-["xapk","Android split-APK bundle (XAPK)","Design","EmbeddedPreview",1,1,"None"],
+["xapk","Android split-APK bundle (XAPK)","Package","EmbeddedPreview",1,1,"None"],
 ["xbm","X Windows system bitmap","Raster","FullDecode",1,1,"None"],
 ["xcf","GIMP image","Raster","FullDecode",1,1,"None"],
 ["xd","Adobe XD design","Design","EmbeddedPreview",1,1,"None"],
@@ -1182,9 +1182,10 @@ choco upgrade thumbwright</pre>
 
   var FAMILY = {
     Raster: "Images", CameraRaw: "Camera RAW", Document: "Documents", Design: "Design, 3D and CAD",
-    Video: "Video frames", Audio: "Audio cover art", Ebook: "Ebooks and comics", Archive: "Archives"
+    Video: "Video frames", Audio: "Audio cover art", Ebook: "Ebooks and comics", Archive: "Archives",
+    Package: "App and add-on packages"
   };
-  var ORDER = ["Raster", "CameraRaw", "Document", "Design", "Video", "Ebook", "Audio", "Archive"];
+  var ORDER = ["Raster", "CameraRaw", "Document", "Design", "Video", "Ebook", "Audio", "Package", "Archive"];
   var HOW = {
     FullDecode: "Thumbwright decodes the picture itself.",
     EmbeddedPreview: "It uses the preview picture saved inside the file.",

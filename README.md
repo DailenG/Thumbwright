@@ -58,11 +58,12 @@ On Windows 11, right-click > Thumbwright, or Shift + right-click, or Show more o
 |---|---:|---|
 | Raster | 148 | JPEG, PNG, WebP, HEIC, AVIF, JPEG XL, JPEG 2000, TIFF, legacy bitmaps |
 | Document | 46 | PDF, Word, Excel, PowerPoint, OpenDocument, Visio, DjVu, InDesign |
-| Design | 41 | Photoshop, Illustrator, Affinity, Krita, Blender, DWG, DXF, FreeCAD, 3MF, G-code |
+| Design | 31 | Photoshop, Illustrator, Affinity, Krita, Blender, DWG, DXF, FreeCAD, 3MF, G-code |
 | CameraRaw | 30 | CR2, CR3, NEF, ARW, DNG, RAF, ORF and other camera RAW |
 | Audio | 18 | cover art from tagged MP3, FLAC, M4A, Ogg, WMA |
 | Video | 17 | frames from MP4, MKV, MOV, AVI, WebM |
 | Ebook | 12 | EPUB, MOBI, AZW, FB2, CBZ, CBR |
+| Package | 10 | app icon from APK/XAPK, NuGet, VSIX, Minecraft packs and worlds |
 | Archive | 3 | ZIP, 7z, RAR (contact sheet) |
 
 Run `twctl formats` for the full list, or use the lookup box on the [website](https://daileng.github.io/Thumbwright/#formats). CAD (DWG, DXF, FreeCAD, 3MF, G-code) is thumbnail-only: the thumbnail is the preview embedded in the file, not a render of the drawing.

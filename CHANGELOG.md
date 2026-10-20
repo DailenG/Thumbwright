@@ -7,6 +7,14 @@ on-disk formats may still change.
 
 ## [Unreleased]
 
+### Changed
+
+- App, extension and game packages have their own **Package** family instead of being listed
+  under Design: APK, APKS, XAPK, APKM, NuGet (`.nupkg`), Visual Studio extensions (`.vsix`)
+  and Minecraft Bedrock packs, add-ons, worlds and world templates. `twctl formats`, the
+  website's format browser and the README count them separately. The `design` and `cad`
+  starter kits no longer turn on these types; `thumbnails` and `everything` still do.
+
 ## [0.1.3] - 2026-10-19
 
 ### Changed

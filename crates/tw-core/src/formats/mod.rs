@@ -14,6 +14,8 @@ pub enum Category {
     Ebook,
     Video,
     Archive,
+    /// App, extension and game packages (APK, NuGet, VSIX, Minecraft): their embedded icon.
+    Package,
     Audio,
 }
 

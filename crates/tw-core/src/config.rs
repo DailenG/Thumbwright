@@ -574,6 +574,7 @@ const ALL_FAMILIES: &[Category] = &[
     Category::Ebook,
     Category::Video,
     Category::Archive,
+    Category::Package,
     Category::Audio,
 ];
 
