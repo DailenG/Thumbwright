@@ -17,6 +17,11 @@ on-disk formats may still change.
 
 ### Fixed
 
+- **"Convert to" selects the new file in an Explorer window that is already open.** A window
+  that had not yet processed a just-created file (or still held a just-deleted file of the
+  same name) could not select it and cleared its selection instead. The file is now announced
+  to the shell (a flushed `SHChangeNotify` create and update) before Explorer is asked to
+  select it.
 - **"Build thumbnails for this folder" now shows on the Windows 11 right-click menu** of a
   folder and of a folder's background. Windows 11 lists only packaged verbs at the top level
   and files classic handlers under "Show more options", so the folder entry (a classic handler
