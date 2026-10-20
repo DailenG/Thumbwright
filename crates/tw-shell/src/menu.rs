@@ -33,7 +33,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, CreatePopupMenu, DestroyMenu, HMENU, InsertMenuItemW,
     MENUITEMINFOW, MFT_SEPARATOR, MFT_STRING, MIIM_FTYPE, MIIM_ID, MIIM_STRING, MIIM_SUBMENU,
-    SetMenuItemInfoW, WM_INITMENUPOPUP,
+    WM_INITMENUPOPUP,
 };
 use windows::core::{HRESULT, PCWSTR, PSTR, PWSTR, Ref, Result, implement};
 
@@ -544,7 +544,9 @@ impl ContextMenu_Impl {
             )
         {
             // SAFETY: `sub` is the live submenu the shell is initialising; row 0 is the header.
-            if unsafe { SetMenuItemInfoW(sub, 0, true, &row.item_info()) }.is_ok() {
+            // The row is detached when the menu object is dropped, which the shell does after
+            // it has destroyed the menu.
+            if unsafe { row.attach(sub) }.is_ok() {
                 *self.header_bitmap.borrow_mut() = Some(row);
             }
         }

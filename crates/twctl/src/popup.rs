@@ -24,9 +24,9 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DestroyMenu, DestroyWindow, GetCursorPos, HMENU,
-    MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, SetForegroundWindow, SetMenuItemInfoW,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WINDOW_STYLE, WM_NULL,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, SetForegroundWindow, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WINDOW_STYLE, WM_NULL, WS_EX_TOOLWINDOW,
+    WS_POPUP,
 };
 use windows::core::{PCSTR, PCWSTR, w};
 
@@ -61,6 +61,9 @@ pub struct Popup {
 
 impl Drop for Popup {
     fn drop(&mut self) {
+        if let Some(bitmap) = &self.bitmap {
+            bitmap.detach();
+        }
         // SAFETY: the menu (and its submenus) is owned by this popup; the bitmap it showed
         // is freed after it, as a field.
         let _ = unsafe { DestroyMenu(self.menu) };
@@ -189,8 +192,9 @@ impl Popup {
         let Some(bitmap) = composed else {
             return;
         };
-        // SAFETY: valid menu; row 0 is the header, and the bitmap outlives the menu.
-        if unsafe { SetMenuItemInfoW(self.menu, 0, true, &bitmap.item_info()) }.is_ok() {
+        // SAFETY: valid menu; row 0 is the header, and the bitmap is detached in `drop`,
+        // before the menu is destroyed.
+        if unsafe { bitmap.attach(self.menu) }.is_ok() {
             self.bitmap = Some(bitmap);
         }
     }

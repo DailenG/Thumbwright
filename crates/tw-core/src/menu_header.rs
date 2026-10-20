@@ -9,8 +9,11 @@
 //! bitmap is composed here: the thumbnail and the text, in the menu font and colours, in a
 //! premultiplied 32-bpp DIB that the menu blends over its own background.
 //!
-//! A bitmap item has no text, so a screen reader has nothing to read on it; a header without a
-//! thumbnail stays an ordinary text row.
+//! A bitmap item has no text, so the row gets its accessible name from an MSAA dynamic
+//! annotation (`IAccPropServices::SetHmenuPropStr`, `PROPID_ACC_NAME`), which oleacc reads in
+//! the menu's own process; a header without a thumbnail stays an ordinary text row.
+
+use std::cell::Cell;
 
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -20,11 +23,17 @@ use windows::Win32::Graphics::Gdi::{
     DeleteDC, DeleteObject, DrawTextW, GdiFlush, GetDC, GetObjectW, GetSysColor, HBITMAP, HDC,
     HFONT, HGDIOBJ, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoUninitialize,
+};
+use windows::Win32::UI::Accessibility::{CLSID_AccPropServices, IAccPropServices, PROPID_ACC_NAME};
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, SystemParametersInfoForDpi};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MENUITEMINFOW, MFT_BITMAP, MIIM_TYPE, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
+    HMENU, MENUITEMINFOW, MFT_BITMAP, MIIM_TYPE, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
+    SetMenuItemInfoW,
 };
-use windows::core::PWSTR;
+use windows::core::{HSTRING, PWSTR};
 
 /// Longest side of the preview thumbnail at 96 dpi.
 const PREVIEW_EDGE: i32 = 128;
@@ -95,31 +104,90 @@ fn menu_font(dpi: u32) -> HFONT {
     unsafe { CreateFontIndirectW(&metrics.lfMenuFont) }
 }
 
+/// The MSAA child id of the header row: the 1-based index of the first item.
+const HEADER_CHILD_ID: u32 = 1;
+
+/// Runs `f` with the dynamic annotation service; `None` when it cannot be created.
+fn with_annotations<T>(f: impl FnOnce(&IAccPropServices) -> T) -> Option<T> {
+    // SAFETY: COM is initialised for this call (or already was on this thread) and uninitialised
+    // again only when this call initialised it, after the service is released.
+    unsafe {
+        let inited = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = CoCreateInstance::<_, IAccPropServices>(
+            &CLSID_AccPropServices,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )
+        .ok()
+        .map(|services| f(&services));
+        if inited {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
 /// A bitmap owned by the menu code that built it: freed on drop, after the menu is gone.
-pub struct HeaderBitmap(HBITMAP);
+pub struct HeaderBitmap {
+    bitmap: HBITMAP,
+    /// The header text, the row's accessible name.
+    label: HSTRING,
+    /// The menu whose row 0 shows this bitmap and carries its name annotation.
+    attached: Cell<Option<HMENU>>,
+}
 
 impl HeaderBitmap {
+    /// Makes row 0 of `menu` show this bitmap as its whole content and names it for
+    /// accessibility. [`HeaderBitmap::detach`] (or dropping) removes the name again.
+    ///
+    /// # Safety
+    /// `menu` must be a valid menu this thread may modify, whose row 0 is the header, and it
+    /// must outlive neither this bitmap nor a call to `detach` or drop.
+    pub unsafe fn attach(&self, menu: HMENU) -> windows::core::Result<()> {
+        // SAFETY: per the contract.
+        unsafe { SetMenuItemInfoW(menu, 0, true, &self.item_info()) }?;
+        // The row works without its name, so a missing annotation service is not an error.
+        let _ = with_annotations(|services| {
+            // SAFETY: valid menu; the string is copied by the service.
+            unsafe { services.SetHmenuPropStr(menu, HEADER_CHILD_ID, PROPID_ACC_NAME, &self.label) }
+        });
+        self.attached.set(Some(menu));
+        Ok(())
+    }
+
+    /// Removes the name annotation from the menu this was attached to. Call before destroying
+    /// the menu: annotations are keyed by menu handle, and handles are reused.
+    pub fn detach(&self) {
+        if let Some(menu) = self.attached.take() {
+            let _ = with_annotations(|services| {
+                // SAFETY: clearing one property of a row; the handle is only a key.
+                unsafe { services.ClearHmenuProps(menu, HEADER_CHILD_ID, &[PROPID_ACC_NAME]) }
+            });
+        }
+    }
+
     /// The `MENUITEMINFOW` that makes a row show this bitmap as its whole content.
     pub fn item_info(&self) -> MENUITEMINFOW {
         MENUITEMINFOW {
             cbSize: size_of::<MENUITEMINFOW>() as u32,
             fMask: MIIM_TYPE,
             fType: MFT_BITMAP,
-            dwTypeData: PWSTR(self.0.0.cast()),
+            dwTypeData: PWSTR(self.bitmap.0.cast()),
             ..Default::default()
         }
     }
 
     /// Width and height in pixels.
     pub fn size(&self) -> (i32, i32) {
-        bitmap_size(self.0).unwrap_or((0, 0))
+        bitmap_size(self.bitmap).unwrap_or((0, 0))
     }
 }
 
 impl Drop for HeaderBitmap {
     fn drop(&mut self) {
+        self.detach();
         // SAFETY: created by `compose` and not selected into any device context.
-        let _ = unsafe { DeleteObject(HGDIOBJ(self.0.0)) };
+        let _ = unsafe { DeleteObject(HGDIOBJ(self.bitmap.0)) };
     }
 }
 
@@ -185,7 +253,11 @@ pub fn compose(label: &str, thumbnail: HBITMAP, dpi: u32) -> Option<HeaderBitmap
         let _ = DeleteObject(HGDIOBJ(font.0));
         result
     };
-    result.map(HeaderBitmap)
+    result.map(|bitmap| HeaderBitmap {
+        bitmap,
+        label: HSTRING::from(label),
+        attached: Cell::new(None),
+    })
 }
 
 /// The drawing of [`compose`] on the memory device context `dc`.
@@ -337,7 +409,11 @@ mod tests {
         let mut bits = vec![0u32; (w * h) as usize];
         // SAFETY: the buffer holds `w * h` 32-bit pixels, the bitmap's whole content.
         unsafe {
-            GetBitmapBits(bitmap.0, (bits.len() * 4) as i32, bits.as_mut_ptr().cast());
+            GetBitmapBits(
+                bitmap.bitmap,
+                (bits.len() * 4) as i32,
+                bits.as_mut_ptr().cast(),
+            );
         }
         bits[(y * w + x) as usize]
     }
@@ -397,12 +473,38 @@ mod tests {
     }
 
     #[test]
+    fn attaching_turns_row_0_into_the_bitmap_row_and_detaching_is_repeatable() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AppendMenuW, CreatePopupMenu, DestroyMenu, GetMenuItemInfoW, MF_STRING,
+        };
+        let thumb = solid(40, 30, 0xFF10_2030);
+        let header = compose("name.png  1 KB", thumb, 96).expect("composes");
+        // SAFETY: a fresh menu owned by this test, detached before it is destroyed.
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            AppendMenuW(menu, MF_STRING, 0, &HSTRING::from("name.png  1 KB")).unwrap();
+            header.attach(menu).expect("row 0 takes the bitmap");
+            let mut info = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_TYPE,
+                ..Default::default()
+            };
+            GetMenuItemInfoW(menu, 0, true, &mut info).unwrap();
+            assert_eq!(info.fType.0 & MFT_BITMAP.0, MFT_BITMAP.0);
+            header.detach();
+            header.detach();
+            let _ = DestroyMenu(menu);
+            let _ = DeleteObject(HGDIOBJ(thumb.0));
+        }
+    }
+
+    #[test]
     fn the_row_is_a_bitmap_item_that_carries_the_bitmap_handle() {
         let thumb = solid(10, 10, 0xFF00_0000);
         let header = compose("a", thumb, 96).expect("composes");
         let info = header.item_info();
         assert_eq!(info.fType, MFT_BITMAP);
-        assert_eq!(info.dwTypeData.0 as usize, header.0.0 as usize);
+        assert_eq!(info.dwTypeData.0 as usize, header.bitmap.0 as usize);
         // SAFETY: created above, not selected anywhere.
         let _ = unsafe { DeleteObject(HGDIOBJ(thumb.0)) };
     }

@@ -34,7 +34,9 @@ on-disk formats may still change.
   popup, and the classic menu's Thumbwright submenu the same way). The header is now one
   bitmap row that shows the thumbnail with the file name and size beside it, drawn in the menu
   font and colours (light and dark), so the rows below start at the normal left edge and the
-  menu keeps its Windows theme. A header without a thumbnail stays an ordinary text row.
+  menu keeps its Windows theme. A header without a thumbnail stays an ordinary text row. The
+  header row keeps its accessible name (file name and size) through an MSAA dynamic
+  annotation, so screen readers still read it.
 
 ## [0.1.3] - 2026-10-19
 
