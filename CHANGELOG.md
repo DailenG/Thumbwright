@@ -56,9 +56,16 @@ on-disk formats may still change.
   Both are now laid out inside the window's client area with even margins, in Segoe UI.
   Workbench's message boxes say "Thumbwright Workbench" instead of the old name "Thumbwright
   Settings".
+- **Workbench pages are aligned and use the current names** ([#28]). The Menu page said
+  "Settings is always in the menu" and "Build thumbnails here"; it now says "Thumbwright
+  Workbench" and "Build thumbnails for this folder", as the menu does. The General and
+  Thumbnails pages share one label column, input column and hint column, with ranges written
+  as "1-100" everywhere, and the General page's inputs sit next to their labels with a right
+  margin. The File types status line no longer wraps over the search box.
 
 [#26]: https://github.com/DailenG/Thumbwright/issues/26
 [#27]: https://github.com/DailenG/Thumbwright/issues/27
+[#28]: https://github.com/DailenG/Thumbwright/issues/28
 
 ## [0.1.3] - 2026-10-19
 

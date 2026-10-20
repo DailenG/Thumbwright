@@ -121,6 +121,16 @@ const CLIENT_W: i32 = 700;
 const CLIENT_H: i32 = 480;
 const X0: i32 = 170;
 const CONTENT_W: i32 = 520;
+/// Inner padding of a group box.
+const PAD: i32 = 14;
+/// Number rows on every page: label column, then the input, then the hint, all at one x.
+const LABEL_X: i32 = X0 + PAD;
+const LABEL_W: i32 = 180;
+const INPUT_X: i32 = LABEL_X + LABEL_W + 8;
+const INPUT_W: i32 = 64;
+const HINT_X: i32 = INPUT_X + INPUT_W + 10;
+/// The hint runs to the group box's right padding.
+const HINT_W: i32 = X0 + CONTENT_W - PAD - HINT_X;
 
 struct TypeRow {
     ext: &'static str,
@@ -302,6 +312,15 @@ impl App {
         )
     }
 
+    /// A label, a number input and a range hint on one row; `y` is the input's top. Returns
+    /// the input.
+    fn number_row(&mut self, page: usize, y: i32, label: &str, hint: &str, id: i32) -> HWND {
+        self.label(page, label, (LABEL_X, y + 4, LABEL_W, 18), 0);
+        let input = self.number_edit(page, (INPUT_X, y, INPUT_W, 22), id);
+        self.label(page, hint, (HINT_X, y + 4, HINT_W, 18), 0);
+        input
+    }
+
     fn list(&mut self, page: usize, rect: (i32, i32, i32, i32), id: i32, header: bool) -> HWND {
         let mut style = LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP.0 | WS_VSCROLL;
         if !header {
@@ -383,15 +402,14 @@ impl App {
             (X0, 98, CONTENT_W, 174),
             0,
         );
-        self.label(p, "JPEG quality (1-100):", (X0 + 14, 124, 240, 18), 0);
-        self.c.jpeg = self.number_edit(p, (X0 + 260, 120, 60, 22), ID_JPEG);
-        self.label(
+        self.c.jpeg = self.number_row(p, 120, "JPEG quality:", "1-100", ID_JPEG);
+        self.c.png = self.number_row(
             p,
-            "PNG compression (0 = fast, 9 = smallest):",
-            (X0 + 14, 154, 240, 18),
-            0,
+            150,
+            "PNG compression:",
+            "0-9 (0 = fast, 9 = smallest)",
+            ID_PNG,
         );
-        self.c.png = self.number_edit(p, (X0 + 260, 150, 60, 22), ID_PNG);
         self.c.keep_meta = self.check(
             p,
             "Keep EXIF and other metadata when converting",
@@ -424,8 +442,8 @@ impl App {
             (X0 + 108, 10, 160, 22),
             ID_FILTER,
         );
-        self.c.types_count = self.label(p, "", (X0 + 280, 6, 240, 32), ID_TYPES_COUNT);
-        let lv = self.list(p, (X0, 44, CONTENT_W, 326), ID_TYPES, true);
+        self.c.types_count = self.label(p, "", (X0, 40, CONTENT_W, 34), ID_TYPES_COUNT);
+        let lv = self.list(p, (X0, 78, CONTENT_W, 292), ID_TYPES, true);
         lv_add_column(lv, 0, "Extension", self.s(70));
         lv_add_column(lv, 1, "Description", self.s(210));
         lv_add_column(lv, 2, "Before Thumbwright", self.s(200));
@@ -458,7 +476,7 @@ impl App {
         );
         self.c.menu_here = self.check(
             p,
-            "Add \"Build thumbnails here\" to the folder menu",
+            "Add \"Build thumbnails for this folder\" to the folder menu",
             (X0, 64, 480, 20),
             ID_MENU_HERE,
         );
@@ -483,7 +501,7 @@ impl App {
         self.button(p, "Show all", (X0 + 404, 248, 116, 26), ID_MENU_SHOWALL);
         self.label(
             p,
-            "Settings is always in the menu.",
+            "Thumbwright Workbench is always in the menu.",
             (X0, 414, CONTENT_W, 18),
             0,
         );
@@ -506,14 +524,13 @@ impl App {
             (X0 + 14, 30, 490, 20),
             ID_CLOUD,
         );
-        self.label(
+        self.c.video_pct = self.number_row(
             p,
-            "Video thumbnail frame (% into the video):",
-            (X0 + 14, 66, 270, 18),
-            0,
+            62,
+            "Video thumbnail frame (%):",
+            "0-100; how far into the video",
+            ID_VIDEO_PCT,
         );
-        self.c.video_pct = self.number_edit(p, (X0 + 290, 62, 60, 22), ID_VIDEO_PCT);
-        self.label(p, "0 - 100", (X0 + 360, 66, 100, 18), 0);
 
         self.add(
             p,
@@ -524,26 +541,19 @@ impl App {
             (X0, 112, CONTENT_W, 100),
             0,
         );
-        self.label(p, "Maximum file size (MB):", (X0 + 14, 140, 196, 18), 0);
-        self.c.max_file = self.number_edit(p, (X0 + 216, 136, 70, 22), ID_MAX_FILE);
-        self.label(
+        self.c.max_file = self.number_row(
             p,
-            "Larger files get no thumbnail (1 - 4096).",
-            (X0 + 296, 140, 214, 18),
-            0,
+            136,
+            "Maximum file size (MB):",
+            "1-4096; larger files get no thumbnail",
+            ID_MAX_FILE,
         );
-        self.label(
+        self.c.max_thumb = self.number_row(
             p,
+            168,
             "Maximum thumbnail size (px):",
-            (X0 + 14, 172, 196, 18),
-            0,
-        );
-        self.c.max_thumb = self.number_edit(p, (X0 + 216, 168, 70, 22), ID_MAX_THUMB);
-        self.label(
-            p,
-            "Longest edge of a thumbnail (16 - 1024).",
-            (X0 + 296, 172, 214, 18),
-            0,
+            "16-1024; longest edge of a thumbnail",
+            ID_MAX_THUMB,
         );
     }
 
